@@ -110,9 +110,10 @@ def from_codes(codes, dt: Any, device: str = _device.HOST) -> SFArray:
     k = np.asarray(codes)
     if k.dtype.kind not in "iu":
         raise SFTypeError("codes must be an integer array")
-    k = k.astype(np.int64)
-    if np.any(np.abs(k) > cls._fmt.max_code):
+    # validate in the source type, before any narrowing conversion
+    if k.size and (int(k.max()) > cls._fmt.max_code or int(k.min()) < -cls._fmt.max_code):
         raise SFInvalidError(f"codes outside {cls.__name__} range ±{cls._fmt.max_code}")
+    k = k.astype(np.int64)
     out = SFArray._wrap(k, cls)
     return out if device == _device.HOST else out.to(device)
 
@@ -231,14 +232,22 @@ def div(a: Any, b: Any, where: Any = None):
     except ValueError:
         raise SFShapeError("sf.div: operands and mask could not be broadcast together") from None
     ka, kb, mask = (np.broadcast_to(v, shape) for v in (ka, kb, mask))
+    # masked-out elements become 0 / 1: exactly 0, no event, so the ordinary
+    # div kernel (host or device) does the right thing and the gate sees only
+    # the live elements
+    safe_a = np.where(mask, ka, 0)
     safe_b = np.where(mask, kb, 1)
-    k, events = vec.div(fmt, np.where(mask, ka, 0), safe_b)
-    events = {kind: m & mask for kind, m in events.items()}
-    _handle_events(events, fmt, "/", int(np.count_nonzero(mask)))
-    out = np.where(mask, k, 0)
-    if out.ndim == 0:
-        return dtype.from_code(int(out))
-    return SFArray._wrap(out, dtype, _device_of_any(a, b))
+    device = _device_of_any(a, b)
+    from ._array import _run_heavy, _should_offload
+    if device == _device.HOST and not _should_offload(int(np.prod(shape)) if shape else 1):
+        k, events = vec.div(fmt, safe_a, safe_b)
+        _handle_events(events, fmt, "/", int(np.count_nonzero(mask)))
+        if k.ndim == 0:
+            return dtype.from_code(int(k))
+        return SFArray._wrap(k, dtype)
+    from . import _config
+    target = device if device != _device.HOST else _config.get("default_device")
+    return _run_heavy("div", fmt, dtype, target, [safe_a, safe_b], shape, {"live": mask})
 
 
 def _device_of_any(*xs):

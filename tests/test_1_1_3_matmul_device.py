@@ -131,10 +131,10 @@ def test_heavy_ops_bit_identical_to_host():
     for (M, K, N) in [(4, 4, 4), (16, 64, 8), (1, 300, 1)]:
         a = rand((M, K), -0.9, 0.9, M)
         b = rand((K, N), -0.9, 0.9, N + 10)
-        with sf.errstate(all="ignore"), sf.config(preflight="ignore"):
+        with sf.errstate(all="ignore"), sf.config(preflight="ignore", suspect="ignore"):
             h = a @ b
             d = a.to(DEV) @ b.to(DEV)
-            assert np.array_equal(h.codes, d.codes) and d.status.saturated >= 0
+            assert np.array_equal(h.codes, d.codes) and d.status.outputs_at_max >= 0
             v = a[0]
             assert sf.dot(v.to(DEV), b[:, 0].to(DEV)).codes.tolist() == sf.dot(v, b[:, 0]).code
             assert np.array_equal((a.to(DEV) @ b).codes, h.codes)          # mixed placement is heavy
@@ -148,7 +148,7 @@ def test_status_fields_and_policy():
         warnings.simplefilter("always")
         y = a + a
     assert y.codes.tolist() == [32767, 16384, -32767, 32767]       # hardware value, no raise
-    assert y.status == sf.SFStatus(saturated=3, div0=0, invalid=0, exact=False)
+    assert y.status == sf.SFStatus(saturated=3, div0=0, invalid=0, exact=False, outputs_at_max=3)
     assert repr(y.status) == "SFStatus(saturated<=3, div0=0, invalid=0, exact=False)"
     assert len(w) == 1 and issubclass(w[0].category, sf.SFDeviceOverflowWarning)
     assert not y.status.ok
@@ -204,7 +204,7 @@ def test_status_fields_and_policy():
 def test_preflight_safe_skips_scan_and_marks_exact():
     a = sf.array([0.25, 0.125], dtype=sf.sf16, device=DEV)
     y = a + a
-    assert y.status == sf.SFStatus(0, 0, 0, exact=True)
+    assert y.status == sf.SFStatus(0, 0, 0, exact=True, outputs_at_max=0)
     small = sf.full((4, 4), 0.01, sf.sf16, device=DEV)
     z = small @ small                                                  # K max|A| max|B| <= max
     assert z.status.exact and z.status.saturated == 0
@@ -215,12 +215,24 @@ def test_preflight_refuses_certain_saturation_without_launch():
     n0 = launches()
     big = sf.full((4, 4), 0.9, sf.sf16, device=DEV)
     with pytest.raises(sf.SFOverflowError, match="pre-flight"):
-        big + big                                                   # every element overflows
-    with pytest.raises(sf.SFOverflowError, match="not launched"):
-        big @ big
+        big + big                                                   # every element overflows: proven
     with pytest.raises(sf.SFOverflowError, match="pre-flight"):
-        big / sf.full((4, 4), 0.5, sf.sf16, device=DEV)             # |a| >= |b| everywhere
+        big / sf.full((4, 4), 0.5, sf.sf16, device=DEV)             # |a| >= |b| everywhere: proven
     assert launches() == n0                                          # the chip never saw them
+    # a probe hit is a suspicion, not a proof: it warns and launches by default
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        big @ big
+    assert launches() == n0 + 1 and any(issubclass(x.category, sf.SFPreflightWarning) for x in w)
+    with sf.config(suspect="raise"):
+        with pytest.raises(sf.SFOverflowError, match="suspected"):
+            big @ big
+    assert launches() == n0 + 1
+    with sf.config(suspect="verify"):                               # exact replay proves it here
+        with pytest.raises(sf.SFOverflowError, match="host replay"):
+            big @ big
+    assert launches() == n0 + 1
+    n0 = launches()
     with sf.config(preflight="warn"):
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
@@ -232,7 +244,7 @@ def test_preflight_refuses_certain_saturation_without_launch():
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             y = big + big
-        assert launches() == n0 + 2 and y.status.saturated == 16
+        assert launches() == n0 + 2 and y.status.saturated == 16 and y.status.outputs_at_max == 16
         assert all(issubclass(x.category, sf.SFDeviceOverflowWarning) for x in w)
     assert sf.getconfig()["preflight"] == "raise"
 
@@ -242,14 +254,16 @@ def test_preflight_probe_can_be_disabled():
     a = sf.asarray(rng.uniform(0.6, 0.9, (8, 8)), dtype=sf.sf16, device=DEV)
     b = sf.asarray(rng.uniform(0.6, 0.9, (8, 8)), dtype=sf.sf16, device=DEV)
     n0 = launches()
-    with pytest.raises(sf.SFOverflowError, match="golden-vector probe"):
-        a @ b
+    with sf.config(suspect="raise"):
+        with pytest.raises(sf.SFOverflowError, match="golden-vector probe"):
+            a @ b
     assert launches() == n0
     with sf.config(probe=False):
-        with warnings.catch_warnings(record=True):
+        with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             y = a @ b
-        assert launches() == n0 + 1 and y.status.saturated == 64
+        assert launches() == n0 + 1 and y.status.saturated is None and y.status.outputs_at_max == 64
+        assert not any(issubclass(x.category, sf.SFPreflightWarning) for x in w)
     with pytest.raises(ValueError):
         sf.config(preflight="maybe")
     with pytest.raises(ValueError):
@@ -278,18 +292,25 @@ def test_offload_threshold():
     assert launches() == n0 + 1 and z.device == "host"
 
 
-def test_register_device():
-    class Flagged(sf.MockAtreides):
-        name = "atreides-flags"
-        sticky_flags = True
+def test_flagged_target_gets_exact_status():
+    a = sf.array([0.75, 0.25], dtype=sf.sf16, device="atreides-flags")
+    with pytest.raises(sf.SFOverflowError):                 # exact count, so raise is honoured
+        a + a
+    with sf.errstate(over="ignore"):
+        y = a + a
+    assert y.status.exact and y.status.saturated == 1 and y.status.ok is False
+    # a transient saturation inside a reduction is reported by flags, not by the scan
+    x = sf.array([0.75, 0.75, -0.75], dtype=sf.sf16, device="atreides-flags")
+    with sf.errstate(over="ignore"):
+        s = x.sum()
+    assert s.status == sf.SFStatus(saturated=1, div0=0, invalid=0, exact=True, outputs_at_max=0)
 
-    sf.register_device(Flagged())
-    try:
-        a = sf.array([0.75, 0.25], dtype=sf.sf16, device="atreides-flags")
-        with pytest.raises(sf.SFOverflowError):                 # with flags, exact, so raise is honoured
-            a + a
-        with sf.errstate(over="ignore"):
-            y = a + a
-        assert y.status.exact and y.status.saturated == 1
-    finally:
-        sf.get_device("atreides-flags")   # still registered; harmless
+
+def test_register_device():
+    class Mine(sf.MockAtreides):
+        name = "mine"
+
+    sf.register_device(Mine())
+    assert "mine" in sf.devices()
+    y = sf.array([0.25], dtype=sf.sf16, device="mine") + 0.25
+    assert y.device == "mine" and y.codes.tolist() == [16384]

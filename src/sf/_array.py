@@ -478,6 +478,9 @@ def _should_offload(total: int) -> bool:
     return t is not None and total > t
 
 
+_REDUCTIONS = ("sum", "matmul")
+
+
 def _run_heavy(op, fmt, dtype, device, codes, out_shape, kw):
     dev = _device.get_device(device)
     dev.check(fmt, max(int(np.prod(out_shape)) if out_shape else 1,
@@ -492,33 +495,42 @@ def _run_heavy(op, fmt, dtype, device, codes, out_shape, kw):
         _errstate.handle("divide", f"{fmt.name} {opname} on {dev.name}: division by zero in "
                                    f"{verdict.events['div0']} element(s) (status.div0)")
     verdict = _preflight.decide(verdict, op, fmt, *codes, **kw)
-    result = dev.run(op, fmt, *codes, **kw)
+    kw = {k: v for k, v in kw.items() if k != "live"}        # the gate's mask never reaches a kernel
+    result, flags = dev.run(op, fmt, *codes, **kw)
+    result = np.asarray(result, dtype=np.int64)
     result = np.broadcast_to(result, out_shape).copy() if result.shape != tuple(out_shape) else result
-    if verdict.kind == "safe" or dev.sticky_flags:
-        saturated, exact = 0, True
-        if dev.sticky_flags:
-            saturated = int(np.count_nonzero(np.abs(result) == fmt.max_code))  # placeholder until flags exist
+    at_max = int(np.count_nonzero(np.abs(result) == fmt.max_code))
+    if verdict.kind == "safe":
+        saturated, exact = 0, True                         # proved on the host; no scan needed
+    elif dev.sticky_flags and flags is not None and "overflow" in flags:
+        saturated, exact = int(np.count_nonzero(flags["overflow"])), True
+    elif _config.get("status") == "replay":
+        _, events = _preflight.host_events(op, fmt, *codes, **kw)
+        saturated, exact = int(np.count_nonzero(events.get("overflow", 0))), True
+    elif op in _REDUCTIONS:
+        saturated, exact = None, False                      # a partial sum can saturate and come back
     else:
-        saturated, exact = int(np.count_nonzero(np.abs(result) == fmt.max_code)), False
+        saturated, exact = at_max, False                    # elementwise: a true upper bound
     status = SFStatus(saturated=saturated, div0=verdict.events.get("div0", 0),
-                      invalid=verdict.events.get("invalid", 0), exact=exact)
-    _apply_status_policy(status, fmt, _SYM[op], dev)
+                      invalid=verdict.events.get("invalid", 0), exact=exact, outputs_at_max=at_max)
+    _apply_status_policy(status, fmt, opname, dev)
     return SFArray._wrap(result, dtype, dev.name, status)
 
 
 def _apply_status_policy(status: SFStatus, fmt: SFFormat, opname: str, dev) -> None:
     """Heavy ops apply the same policy after the op, from result.status.
     div0 and invalid were already handled before launch (they are exact).
-    Saturation on a target without sticky flags is only an upper bound, so
-    it warns rather than raises (spec 3.4)."""
-    if status.saturated:
-        msg = (f"{fmt.name} {opname} on {dev.name}: saturation in "
-               f"{'' if status.exact else '<='}{status.saturated} element(s) (status.saturated)")
-        if status.exact:
-            _errstate.handle("overflow", msg)
-        elif _errstate.geterr()["over"] != "ignore":
-            import warnings
-            warnings.warn(msg, SFDeviceOverflowWarning, stacklevel=_errstate._user_stacklevel())
+    An exact saturation count honours the policy; an upper bound only warns
+    (spec 3.4); an unknown count says nothing."""
+    if status.saturated is None or status.saturated == 0:
+        return
+    msg = (f"{fmt.name} {opname} on {dev.name}: saturation in "
+           f"{'' if status.exact else '<='}{status.saturated} element(s) (status.saturated)")
+    if status.exact:
+        _errstate.handle("overflow", msg)
+    elif _errstate.geterr()["over"] != "ignore":
+        import warnings
+        warnings.warn(msg, SFDeviceOverflowWarning, stacklevel=_errstate._user_stacklevel())
 
 
 # --- reductions and linear algebra --------------------------------------------------------
@@ -552,7 +564,8 @@ def sum_(x, axis=None):
         _handle_events(events, fmt, "sum", int(np.prod(result.shape)) if result.shape else 1)
         return _result(result, dtype)
     out_shape = codes.shape[:axis] + codes.shape[axis + 1:]
-    return _run_heavy("sum", fmt, dtype, x.device, [codes], out_shape, {"axis": axis})
+    target = x.device if x.device != _device.HOST else _config.get("default_device")
+    return _run_heavy("sum", fmt, dtype, target, [codes], out_shape, {"axis": axis})
 
 
 def _minmax(x, axis, fn):
@@ -572,7 +585,7 @@ def dot(a, b):
         fmt = _widest([a, b])
         ka, kb = _to_codes(a, fmt), _to_codes(b, fmt)
         device = _device_of([a, b])
-        if device == _device.HOST:
+        if device == _device.HOST and not _should_offload(ka.size):
             k, events = _linalg.dot_codes(fmt, ka, kb)
             first = events.pop("first")
             if first:                                # same order as the scalar fma chain
@@ -580,7 +593,8 @@ def dot(a, b):
                 events.pop(first, None)
             _handle_events(events, fmt, "dot", 1)
             return _dtype_of(fmt).from_code(int(k))
-        r = _run_heavy("matmul", fmt, _dtype_of(fmt), device, [ka[None, :], kb[:, None]], (1, 1), {})
+        target = device if device != _device.HOST else _config.get("default_device")
+        r = _run_heavy("matmul", fmt, _dtype_of(fmt), target, [ka[None, :], kb[:, None]], (1, 1), {})
         return SFArray._wrap(r._codes.reshape(()), r.dtype, r.device, r.status)
     return matmul(a, b)
 
@@ -614,7 +628,8 @@ def matmul(a, b):
         _handle_events(events, fmt, "@", int(np.prod(out_shape)))
         out = SFArray._wrap(result, dtype)
     else:
-        out = _run_heavy("matmul", fmt, dtype, device, [ka, kb], out_shape, {})
+        target = device if device != _device.HOST else _config.get("default_device")
+        out = _run_heavy("matmul", fmt, dtype, target, [ka, kb], out_shape, {})
     codes = out._codes
     if squeeze_row:
         codes = codes[..., 0, :]

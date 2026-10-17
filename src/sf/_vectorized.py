@@ -45,25 +45,30 @@ def cast_array(fmt: SFFormat, values: np.ndarray):
                 ev[e][i] = True
         return codes.reshape(values.shape), {k: m.reshape(values.shape) for k, m in ev.items()}
     if values.dtype.kind in "iub":
-        v = values.astype(np.int64)
-        nonzero = v != 0
-        codes = np.where(nonzero, np.sign(v) * fmt.max_code, 0).astype(np.int64)
+        # decide sign and overflow in the source type; only 0 is representable
+        nonzero = values != 0
+        if values.dtype.kind == "u" or values.dtype.kind == "b":
+            sign = nonzero.astype(np.int64)                        # unsigned: never negative
+        else:
+            sign = np.sign(values).astype(np.int64)
+        codes = (sign * fmt.max_code).astype(np.int64)
         return codes, {"overflow": nonzero,
-                       "underflow": np.zeros(v.shape, bool),
-                       "invalid": np.zeros(v.shape, bool)}
+                       "underflow": np.zeros(values.shape, bool),
+                       "invalid": np.zeros(values.shape, bool)}
     if values.dtype.kind != "f":
         raise TypeError(f"cannot cast array of dtype {values.dtype} to {fmt.name}")
     v = values.astype(np.float64)                  # exact for float16/32/64
     nan = np.isnan(v)
-    inf = np.isinf(v)
-    safe = np.where(nan | inf, 0.0, v)
-    k = np.rint(safe * fmt.scale).astype(np.int64)  # exact scaling, half-even
-    over = (np.abs(k) > fmt.max_code) | inf
-    k = np.clip(k, -fmt.max_code, fmt.max_code)
-    k = np.where(inf, np.sign(np.where(nan, 0.0, v)).astype(np.int64) * fmt.max_code, k)
-    under = (k == 0) & (safe != 0) & ~inf
-    k = np.where(nan, 0, k)
-    return k, {"overflow": over & ~nan, "underflow": under, "invalid": nan}
+    # overflow is decided on the exact value, before any integer conversion:
+    # |v| >= 1 - 2^-N rounds to 2^(N-1) or beyond (ties to even), including ±inf
+    threshold = 1.0 - 2.0 ** -fmt.bits             # exact in float64
+    over = (np.abs(v) >= threshold) & ~nan
+    fits = ~over & ~nan
+    k = np.zeros(v.shape, dtype=np.int64)
+    k[fits] = np.rint(v[fits] * fmt.scale).astype(np.int64)   # exact scaling, half-even
+    k[over] = np.sign(v[over]).astype(np.int64) * fmt.max_code
+    under = fits & (k == 0) & (v != 0)
+    return k, {"overflow": over, "underflow": under, "invalid": nan}
 
 
 def to_float(fmt: SFFormat, codes) -> np.ndarray:

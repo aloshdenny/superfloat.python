@@ -84,6 +84,11 @@ class SFDeviceOverflowWarning(SFWarning):
     """Saturation detected in a heavy op from result.status (Stage 1.1)."""
 
 
+class SFPreflightWarning(SFWarning):
+    """The pre-flight probe suspects a heavy op will saturate everywhere (a
+    sample, not a proof); the op is launched anyway (Stage 1.1)."""
+
+
 __all__ = [
     "SFError", "SFWarning",
     "SFTypeError", "SFShapeError", "SFUnsupportedError",
@@ -92,5 +97,5 @@ __all__ = [
     "SFUnderflowError", "SFUnderflowWarning",
     "SFZeroDivisionError", "SFZeroDivisionWarning",
     "SFInvalidError", "SFInvalidWarning",
-    "SFDeviceOverflowWarning",
+    "SFDeviceOverflowWarning", "SFPreflightWarning",
 ]

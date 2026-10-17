@@ -42,10 +42,14 @@ them. Each one is a single place to change if the team decides differently.
 | `sf.ones` | 1 is not representable, so it follows the literal rule: raises by default, saturates under `over="ignore"`; the message points at `sf.full(shape, sf.info(dt).max, dt)` | `_functions.ones` |
 | `sf.div(a, b, where=mask)` | elements where the mask is False are 0 and raise nothing | `_functions.div` |
 | Strings in `sf.array([...])` | accepted (constructor rule), rejected as operator literals | `_array._to_codes` |
-| Heavy-op underflow | not reported on v1 (no flags); only saturation (scan), div0 and invalid (from inputs) | `_array._run_heavy` |
-| `status.saturated` when the bound proves safety | 0 with `exact=True`, and the scan is skipped | `_array._run_heavy` |
+| Heavy-op underflow | not reported on v1 (no flags); only saturation, div0 and invalid (from inputs) | `_array._run_heavy` |
+| `status.saturated` | exact when the bound proved safety, when the target returns flags, or under `sf.config(status="replay")`; otherwise an upper bound (scan of ±max) for elementwise ops and `None` (unknown) for reductions, with `outputs_at_max` always reported | `_array._run_heavy`, `_status.py` |
+| Probe hit | `suspected`, never `certain`; `sf.config(suspect="warn"|"raise"|"verify"|"ignore")` decides. Only a host proof (range bound, or exact replay under `verify`) can refuse a launch as `certain` | `_preflight.decide` |
+| `Device.run` contract | returns `(codes, flags)`; `flags` is `None` for v1 and a dict of event masks for a target with sticky flags; trusted only when `sticky_flags` is True | `_device.Device` |
+| Masked `sf.div` on device arrays | heavy: masked-out elements become `0 / 1` (exact 0, no event) and the gate sees only the live elements | `_functions.div`, `_preflight._live` |
+| Selection ops on device arrays | `maximum`, `minimum`, `clip`, `where`, `cast`, indexing run on the host and return device-labelled arrays with no status (data movement, not kernels) | `_functions.py` |
 | Mixed placement (`host @ device`) | heavy; the host operand is sent along. Two different devices is an error | `_array._device_of` |
-| Probe policy | the matmul probe samples random rows and columns plus the largest-magnitude ones; "certain" only if every probed output saturates. `sf.config(probe=False)` disables it | `_preflight.probe` |
+| Probe policy | the matmul probe samples random rows and columns plus the largest-magnitude ones; elementwise probes sample elements plus the extremes. `sf.config(probe=False)` disables it | `_preflight.probe` |
 | 0-d results | host ops that produce a 0-d result return an SF scalar; heavy ops always return an array (it carries the status) | `_array._result` |
 
 ## Immutability
@@ -96,8 +100,9 @@ to every heavy op *before launch*, in this order:
    skip the post-op scan. Event certain for every input: reject before launch,
    naming the op and the reason.
 4. **Golden-vector probe**: for the undecidable band, run the golden boundary
-   vectors plus a slice of the real data through the host reference. If they
-   saturate, stop and ask the user; if clean, launch.
+   vectors plus a slice of the real data through the host reference. A hit is
+   a suspicion: warn by default, refuse or verify by exact replay under
+   `sf.config(suspect=...)`. A sample never by itself justifies "every element".
 
 Strictness is a policy knob alongside `errstate`, e.g.
 `sf.config(preflight="raise" | "ask" | "warn" | "off")`, subtle by default.
@@ -105,6 +110,18 @@ Only step 4 costs anything, and it is host-side and small. Step 3 is also
 what `sf.explain` (Stage 1.2) reports per op.
 
 ## Review history
+
+A second independent review (Stage 1.1 drop, 2026-10-18) found: a probe
+sample promoted to a "certain" refusal; the ±max scan presented as a
+saturation count for reductions (false in both directions); array casts
+reversing the sign of huge inputs and `from_codes` accepting out-of-range
+unsigned codes; `sf.config` not re-entrant and not async-aware; masked `div`
+bypassing the device path; and `offload_threshold` broken for `sum`, `dot`
+and `@`. All fixed and covered by `tests/test_review_findings_1_1.py`; the
+README now describes 1.1 as a host/mock implementation with the hardware gate
+still open.
+
+### First review
 
 An independent review of the first Stage 1.0 drop (2026-10-17) found: mutable
 scalars; the decorator sharing one token list across threads and not wrapping

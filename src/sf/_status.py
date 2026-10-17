@@ -8,26 +8,49 @@ from dataclasses import dataclass
 class SFStatus:
     """What the runtime knows about a heavy op after it ran.
 
-    ``saturated`` is a count of outputs at ±max.  On Atreides v1 there is no
-    saturation flag, so the runtime scans the output after readback and the
-    count is an *upper bound* (an exact ±max is legal, and partial sums that
-    saturated and came back into range are missed); ``exact`` is then False.
-    When the pre-flight bound proves saturation impossible, or the target
-    exposes sticky flags, ``exact`` is True.
+    ``saturated``: number of outputs whose computation saturated.  It is
+    exact when the target reports sticky flags, when the pre-flight bound
+    proved saturation impossible, or when ``sf.config(status="replay")``
+    recomputed the events on the host.  Otherwise:
 
-    ``div0`` and ``invalid`` are decided on the host from the inputs (a zero
-    divisor, a negative sqrt argument), so they are always exact.
+    * for an elementwise op it is an *upper bound* taken from scanning the
+      output for ±max (an exact ±max input is legal and is counted);
+    * for a reduction (``sum``, ``dot``, ``@``) it is **unknown** (``None``):
+      a partial sum can saturate and come back into range, so the final
+      output says nothing about the chain.
+
+    ``outputs_at_max``: the raw scan count, always available.
+    ``div0`` and ``invalid`` are read off the inputs on the host and exact.
+    ``exact`` is True when ``saturated`` is an exact count.
     """
 
-    saturated: int = 0
+    saturated: int | None = 0
     div0: int = 0
     invalid: int = 0
     exact: bool = False
+    outputs_at_max: int = 0
 
     @property
-    def ok(self) -> bool:
-        return self.saturated == 0 and self.div0 == 0 and self.invalid == 0
+    def known(self) -> bool:
+        """False when saturation could not be determined (reduction on a target without flags)."""
+        return self.saturated is not None
+
+    @property
+    def ok(self) -> bool | None:
+        """True: no event occurred.  False: an event occurred, or the upper
+        bound is nonzero.  None: saturation is unknown and nothing else went
+        wrong."""
+        if self.div0 or self.invalid:
+            return False
+        if self.saturated is None:
+            return None
+        return self.saturated == 0            # an upper bound of 0 is a proof of 0
 
     def __repr__(self) -> str:
-        sat = f"saturated={self.saturated}" if self.exact else f"saturated<={self.saturated}"
+        if self.saturated is None:
+            sat = f"saturated=unknown (outputs_at_max={self.outputs_at_max})"
+        elif self.exact:
+            sat = f"saturated={self.saturated}"
+        else:
+            sat = f"saturated<={self.saturated}"
         return f"SFStatus({sat}, div0={self.div0}, invalid={self.invalid}, exact={self.exact})"

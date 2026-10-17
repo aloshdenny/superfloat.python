@@ -52,7 +52,14 @@ class Device:
             raise SFLaunchError(f"{n_elements} elements exceed the {self.name} limit "
                                 f"of {self.max_elements}")
 
-    def run(self, op: str, fmt: SFFormat, *operands: np.ndarray, **kw) -> np.ndarray:
+    def run(self, op: str, fmt: SFFormat, *operands: np.ndarray, **kw):
+        """Execute ``op`` on code arrays.
+
+        Returns ``(codes, flags)``.  ``flags`` is ``None`` for a target with
+        no event reporting (Atreides v1), or a dict of boolean masks over the
+        output (``"overflow"`` at least) for a target with sticky flags.  The
+        runtime trusts ``flags`` only when ``sticky_flags`` is True.
+        """
         raise NotImplementedError
 
     def __repr__(self) -> str:
@@ -60,7 +67,8 @@ class Device:
 
 
 class MockAtreides(Device):
-    """Atreides v1 stand-in: runs the vectorised reference, returns codes only."""
+    """Atreides v1 stand-in: runs the vectorised reference and returns codes
+    only, exactly like hardware with no status register."""
 
     name = "atreides"
     supported_bits = (16,)
@@ -72,11 +80,26 @@ class MockAtreides(Device):
     def __init__(self) -> None:
         self.launches = 0                    # for tests: proves pre-flight skipped a launch
 
-    def run(self, op: str, fmt: SFFormat, *operands: np.ndarray, **kw) -> np.ndarray:
+    def run(self, op: str, fmt: SFFormat, *operands: np.ndarray, **kw):
         self.launches += 1
         fn: Callable = _KERNELS[op]
         codes, _events = fn(fmt, *operands, **kw)
-        return np.asarray(codes, dtype=np.int64)
+        return np.asarray(codes, dtype=np.int64), None
+
+
+class MockAtreidesFlags(MockAtreides):
+    """A hypothetical Atreides with per-tile sticky flags (spec section 12):
+    the same kernels, but the event masks come back with the result.  Used
+    to exercise the exact-status path until such hardware exists."""
+
+    name = "atreides-flags"
+    sticky_flags = True
+
+    def run(self, op: str, fmt: SFFormat, *operands: np.ndarray, **kw):
+        self.launches += 1
+        codes, events = _KERNELS[op](fmt, *operands, **kw)
+        return np.asarray(codes, dtype=np.int64), {k: np.asarray(v, dtype=bool)
+                                                   for k, v in events.items() if k != "first"}
 
 
 def _matmul_kernel(fmt: SFFormat, a: np.ndarray, b: np.ndarray):
@@ -95,7 +118,7 @@ _KERNELS: dict[str, Callable] = {
     "matmul": _matmul_kernel, "sum": _sum_kernel,
 }
 
-_registry: dict[str, Device] = {"atreides": MockAtreides()}
+_registry: dict[str, Device] = {"atreides": MockAtreides(), "atreides-flags": MockAtreidesFlags()}
 
 
 def get_device(name) -> Device:

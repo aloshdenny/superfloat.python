@@ -65,7 +65,7 @@ NumPy is the only runtime dependency (arrays are int64 code arrays).
 | `sf/_device.py` | `Device` interface, `MockAtreides` (sf16 only, no flags, like v1), `register_device` for the simulator and hardware |
 | `sf/_preflight.py` | The gate every heavy op passes before launch: known answers, range bound, golden-vector probe |
 | `sf/_status.py` | `SFStatus(saturated, div0, invalid, exact)` |
-| `sf/_config.py` | `sf.config(preflight=, probe=, probe_size=, offload_threshold=)` |
+| `sf/_config.py` | `sf.config(preflight=, suspect=, probe=, probe_size=, status=, offload_threshold=)` |
 
 The split that matters: **semantics live in `_reference.py` only.** The scalar
 classes are a thin layer that promotes operands, calls the reference, and hands
@@ -107,20 +107,29 @@ the same policy, in catalogue order: invalid, divide, overflow, underflow.
   (sequential from index 0, saturating at each step, accumulator at data
   width). `dot` equals the scalar fma chain bit for bit, and `@` equals
   per-output `dot`. `addmm(a, b, d)` is the `@` chain, then one saturating add.
-* `device="atreides"` makes an array heavy. Any op with a heavy operand is a
-  heavy op: it is checked on the host, run on the target, and reports
-  `result.status`. Only sf16 is accepted on Atreides v1.
+* `device="atreides"` makes an array heavy. Any arithmetic op with a heavy
+  operand (including masked `sf.div`) is a heavy op: it is checked on the host,
+  run on the target, and reports `result.status`. Selection and data-movement
+  ops (`maximum`, `minimum`, `clip`, `where`, `cast`, indexing) run on the host
+  and carry no status. Only sf16 is accepted on Atreides v1.
 * **Pre-flight (decide on the host, launch only the undecidable).** Before a
   launch: shape, dtype and limit checks; `div0` / `invalid` read off the inputs
   (exact, raised before launch under the policy); the range bound (safe means
-  no scan and `status.exact=True`); and, for the undecidable band, a
-  golden-vector probe through the host reference. When the op is known to
-  saturate on every element, `sf.config(preflight="raise")` (default) refuses
-  it before the chip sees it; `"warn"` and `"ignore"` launch anyway.
-* Atreides v1 has no saturation flag, so `status.saturated` is an upper bound
-  from scanning the output for ±max and `exact` is False; heavy-op saturation
-  warns (`SFDeviceOverflowWarning`) rather than raises. A target with
-  `sticky_flags = True` gets exact counts and `over="raise"` is honoured.
+  no scan and `status.exact=True`). When the host can *prove* the op saturates
+  on every element, `sf.config(preflight="raise")` (default) refuses it before
+  the chip sees it. For the undecidable band a golden-vector probe samples the
+  real inputs; a probe hit is a *suspicion*, never a proof: by default it warns
+  (`SFPreflightWarning`) and launches; `sf.config(suspect="raise")` refuses,
+  `"verify"` replays the whole op on the host and refuses only on a real proof.
+* **Status honesty.** Atreides v1 has no saturation flag. For an elementwise
+  op, `status.saturated` is an upper bound from scanning the output for ±max
+  (`exact=False`); for a reduction (`sum`, `dot`, `@`) a partial sum can
+  saturate and come back into range, so `saturated` is `None` (unknown) and
+  `status.outputs_at_max` holds the raw scan. `sf.config(status="replay")`
+  recomputes the events on the host for an exact count at the cost of running
+  the op twice. A target whose `Device.run` returns flags (`sticky_flags=True`,
+  see `MockAtreidesFlags`) gets exact counts, and `over="raise"` is honoured.
+  `status.ok` is `True`, `False`, or `None` when unknown.
 * `sf.config(offload_threshold=n)` moves host ops larger than `n` elements to
   the default device.
 
@@ -173,6 +182,7 @@ boundary corners (sf11 to sf16), plus hypothesis property tests.
 | `test_1_1_2_reductions.py` | 1.1.2 `sum` is the sequential chain; `dot` equals the scalar fma chain; max/min/argmax |
 | `test_1_1_3_matmul_device.py` | 1.1.3 `@` equals per-output `dot`; shape errors before launch; host and target bit-identical; status; pre-flight |
 | `test_1_1_4_functions.py` | 1.1.4 sqrt, pow, clip, maximum, minimum, masked div, where |
+| `test_review_findings_1_1.py` | Regressions from the independent Stage 1.1 review |
 
 Results are compared as integer codes, never with float tolerances.
 `SF_TEST_SEED` and `SF_TEST_RANDOM_PAIRS` control the sampled widths.
@@ -192,10 +202,13 @@ format definition itself changes.
 * Values are immutable; `x ** n` stops as soon as the chain reaches 0, so it is
   cheap for any `n`.
 
-## Roadmap
+## Status of the Stage 1.1 gate
 
-Stage 1.0 and 1.1 are done on the host and the mock target. The 1.1 gate
-("host and GPU bit-identical on every op") closes against real silicon once
-the simulator or hardware is registered with `sf.register_device` and the
-hardware team confirms accumulation order and accumulator width. Stage 1.2
-(diagnostics) is deferred; Stage 2 PyTorch; Stage 3 kernels.
+Stage 1.1 is a **host and mock implementation**. `MockAtreides` runs the same
+vectorised reference as the host, so "host == mock" proves the routing,
+placement, pre-flight and status machinery, not hardware correctness. The
+spec's gate ("host and GPU bit-identical on every op") stays open until a
+simulator or silicon is registered with `sf.register_device`, tested against
+the Fraction oracle in `tests/oracle.py`, and its event reporting (flags or
+not, accumulation order, accumulator width, `mat_fma` meaning) is confirmed.
+Stage 1.2 (diagnostics) is deferred; Stage 2 PyTorch; Stage 3 kernels.

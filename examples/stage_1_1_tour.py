@@ -36,10 +36,20 @@ print("proven safe, no scan:", (small @ small).status)
 big = sf.full((4, 4), 0.9, sf.sf16, device="atreides")
 before = sf.get_device("atreides").launches
 try:
-    big @ big
+    big + big                                            # provable on the host: refused, no launch
 except sf.SFOverflowError as e:
-    print("pre-flight refused:", e)
-print("launches during the refused op:", sf.get_device("atreides").launches - before)
+    print("pre-flight refused (proof):", e)
+with sf.config(suspect="verify"):                        # probe hit, verified by exact host replay
+    try:
+        big @ big
+    except sf.SFOverflowError as e:
+        print("pre-flight refused (replay):", e)
+print("launches during the refused ops:", sf.get_device("atreides").launches - before)
+s = sf.array([0.75, 0.75, -0.75], dtype=sf.sf16, device="atreides").sum()
+print("reduction without flags:", s.status, "| ok:", s.status.ok)
+with sf.config(status="replay"), sf.errstate(over="ignore"):
+    s = sf.array([0.75, 0.75, -0.75], dtype=sf.sf16, device="atreides").sum()
+print("same, with host replay:  ", s.status, "| ok:", s.status.ok)
 
 a = sf.array([0.1, 0.2, 0.3], dtype=sf.sf16)
 b = sf.array([0.5, 0, 0.6], dtype=sf.sf16)
