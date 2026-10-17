@@ -15,6 +15,15 @@ In addition, a random sample of each chunk is checked against the scalar
 reference (``sf._reference``) and the Fraction oracle used by the test
 suite, which ties the vectorised path back to the scalar semantics.
 
+Because the two vectorised formulations could share a misreading of the
+spec, a third, streaming check runs the *scalar* package operators (the
+public API) against the Fraction oracle over a structured sweep: every
+code paired with every boundary-class code (0, ±1, ±2, ±(M-1), ±M, every
+power of two and its neighbours, the underflow / overflow transition
+points), in both operand orders, and every event transition it finds is
+counted.  For sf16 that is about 7 million pairs per op through Fractions.
+Skip it with ``--no-boundary``.
+
 Exit status is nonzero on the first mismatch, with the offending codes.
 """
 from __future__ import annotations
@@ -74,7 +83,67 @@ def check_scalar_sample(op: str, fmt, ka, kb, rk, n=64, rng=None):
         assert Fraction(k_ref, fmt.scale) == v_or and ev_ref == ev_or, (op, a, b)
 
 
-def run(bits: int, ops: list[str], chunk: int, seed: int) -> int:
+_UNSET = object()
+
+
+def boundary_codes(fmt) -> list[int]:
+    M = fmt.max_code
+    core = {0, 1, 2, 3, M - 1, M, M // 2, M // 2 + 1}
+    p = 1
+    while p <= M:
+        core.update({p - 1, p, p + 1})
+        p <<= 1
+    core = {c for c in core if 0 <= c <= M}
+    return sorted(core | {-c for c in core})
+
+
+def boundary_sweep(bits: int, ops: list[str]) -> int:
+    """Public scalar operators vs the Fraction oracle on the boundary sweep."""
+    import operator
+    dt = sf.dtypes[bits - 4]
+    fmt = FORMATS[bits]
+    frac = Fmt(bits)
+    M = fmt.max_code
+    pyops = {"add": operator.add, "sub": operator.sub, "mul": operator.mul, "div": operator.truediv}
+    errors = {None: None, "overflow": sf.SFOverflowError, "underflow": sf.SFUnderflowError,
+              "divide": sf.SFZeroDivisionError, "invalid": sf.SFInvalidError}
+    bcodes = boundary_codes(fmt)
+    all_codes = [sf.from_code(k, dt) for k in range(-M, M + 1)]
+    bvals = [sf.from_code(k, dt) for k in bcodes]
+    raise_all, ignore_all = sf.errstate(all="raise"), sf.errstate(all="ignore")
+    for op in ops:
+        t0 = time.time()
+        pyop, orop = pyops[op], getattr(frac, op)
+        transitions = {}
+        checked = 0
+        for b in bvals:
+            prev = _UNSET
+            for a in all_codes:
+                for x, y in ((a, b), (b, a)):
+                    expect, ev = orop(x.exact, y.exact)
+                    with raise_all:
+                        try:
+                            r, raised = pyop(x, y), None
+                        except sf.SFError as e:
+                            raised = type(e)
+                            with ignore_all:
+                                r = pyop(x, y)
+                    if raised is not errors[ev] or r.exact != expect:
+                        print(f"BOUNDARY MISMATCH {op} sf{bits}: {x!r} {op} {y!r}: "
+                              f"got {r!r}/{raised} oracle {expect}/{ev}")
+                        return 1
+                    checked += 1
+                # event transitions along the a axis for fixed b
+                ev_now = orop(a.exact, b.exact)[1]
+                if prev is not _UNSET and ev_now != prev:
+                    transitions[(prev, ev_now)] = transitions.get((prev, ev_now), 0) + 1
+                prev = ev_now
+        print(f"boundary {op} sf{bits}: {checked:,} pairs OK in {time.time() - t0:.1f}s; "
+              f"event transitions seen: {dict(transitions)}")
+    return 0
+
+
+def run(bits: int, ops: list[str], chunk: int, seed: int, boundary: bool = True) -> int:
     fmt = FORMATS[bits]
     M = fmt.max_code
     n = 2 * M + 1
@@ -111,6 +180,8 @@ def run(bits: int, ops: list[str], chunk: int, seed: int) -> int:
                 print(f"\r{op} sf{bits}: {done / total:6.1%}  {el:6.0f}s  "
                       f"eta {el / done * (total - done):6.0f}s", end="", flush=True)
         print(f"\r{op} sf{bits}: {total:,} pairs OK in {time.time() - t0:.1f}s" + " " * 20)
+    if boundary:
+        return boundary_sweep(bits, ops)
     return 0
 
 
@@ -120,8 +191,9 @@ def main() -> None:
     p.add_argument("--ops", nargs="+", default=["add", "sub", "mul", "div"], choices=list(vec.OPS))
     p.add_argument("--chunk", type=int, default=1 << 24, help="pairs per chunk")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--no-boundary", action="store_true", help="skip the Fraction boundary sweep")
     a = p.parse_args()
-    sys.exit(run(a.bits, a.ops, a.chunk, a.seed))
+    sys.exit(run(a.bits, a.ops, a.chunk, a.seed, boundary=not a.no_boundary))
 
 
 if __name__ == "__main__":

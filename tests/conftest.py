@@ -4,7 +4,8 @@
   sf10 are marked ``slow`` so they can be skipped while iterating with
   ``-m "not slow"``.  They still run on every commit.
 * ``SAMPLED_WIDTHS`` (11..16) get boundary vectors, hypothesis property
-  tests and random sampling.
+  tests and random sampling for operand *pairs*; single-value tests are
+  exhaustive on every width.
 """
 from __future__ import annotations
 
@@ -80,11 +81,10 @@ def pairs(bits: int):
 
 
 def singles(bits: int):
+    """Every code of the width.  Single-value tests are exhaustive on all
+    widths: sf16 has only 65,535 values, which is cheap."""
     m = sf.info(dtype_of(bits)).max_code
-    if bits in EXHAUSTIVE_WIDTHS or bits <= 13:
-        return range(-m, m + 1)
-    rnd = random.Random(SEED * 1000 + bits)
-    return [-m, -m + 1, -1, 0, 1, m - 1, m] + [rnd.randint(-m, m) for _ in range(N_RANDOM)]
+    return range(-m, m + 1)
 
 
 @pytest.fixture(params=width_params(ALL_WIDTHS), ids=lambda b: f"sf{b}")

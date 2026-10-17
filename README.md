@@ -26,8 +26,14 @@ with sf.errstate(over="ignore"):      # silent saturation, same bits as the GPU
 ```
 pip install -e ".[test]"
 pytest                    # every commit: exhaustive sf4..sf10, sampled sf11..sf16
-pytest -m "not slow"      # ~35 s while iterating (skips exhaustive sf9/sf10)
-python tools/exhaustive.py --bits 16    # nightly: all 4.3e9 pairs per binary op
+pytest -m "not slow"      # ~40 s while iterating (skips exhaustive sf9/sf10)
+python tools/exhaustive.py --bits 16    # nightly: all 4.3e9 pairs per binary op + Fraction boundary sweep
+```
+
+`.github/workflows/ci.yml` runs the per-commit gate on every push (Python 3.10,
+3.12, 3.13) and the nightly gate on a schedule.
+
+```
 ```
 
 No runtime dependencies. NumPy is only needed by the tests and the nightly tool.
@@ -117,6 +123,7 @@ boundary corners (sf11 to sf16), plus hypothesis property tests.
 | `test_properties.py` | Commutativity, identities, monotonic saturation; associativity recorded only |
 | `test_errstate.py` | Policy, catalogue types, user-line attribution, context locality |
 | `test_spec_examples.py` | Every code example in the spec, as written |
+| `test_review_findings.py` | Regressions from the independent Stage 1.0 review |
 
 Results are compared as integer codes, never with float tolerances.
 `SF_TEST_SEED` and `SF_TEST_RANDOM_PAIRS` control the sampled widths.
@@ -131,7 +138,10 @@ format definition itself changes.
 * `sf.sqrt` ships now (it is the invalid-event example in section 3.2); the
   rest of 1.1.4 waits for arrays.
 * Strings are accepted by the constructor only (`sf.sf16("0.1")` quantizes the
-  exact decimal 1/10), never as operator literals.
+  exact decimal 1/10), never as operator literals. A foreign operand such as
+  `x + "0.25"` raises `SFTypeError`.
+* Values are immutable; `x ** n` stops as soon as the chain reaches 0, so it is
+  cheap for any `n`.
 
 ## Roadmap
 

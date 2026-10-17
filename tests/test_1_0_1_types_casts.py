@@ -321,7 +321,7 @@ def golden_table(bits: int) -> str:
 def test_golden_codes(bits, request):
     """The golden file is the baseline for every later milestone.
 
-    Full tables are stored for sf4..sf10; every width also has a SHA-256
+    Full tables are stored for sf4..sf12; every width also has a SHA-256
     recorded in ``golden/checksums.json``.  Regenerate with
     ``python tools/make_golden.py`` only when the format definition changes.
     """

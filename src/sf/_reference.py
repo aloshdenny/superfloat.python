@@ -174,11 +174,17 @@ def sqrt(fmt: SFFormat, ka: int) -> Result:
 
 def pow_int(fmt: SFFormat, ka: int, n: int) -> Result:
     """a ** n for integer n >= 1 as a left-to-right chain of ``mul``.
-    Reports the first underflow seen (the chain can only go to 0)."""
+    Reports the first underflow seen (the chain can only go to 0).
+
+    The chain stops once the running value is 0, so the cost is bounded by
+    the number of steps it takes to reach 0 (at most 2^(N-1) - 1, for
+    a = max), whatever ``n`` is."""
     if n < 1:
         raise ValueError("pow_int needs n >= 1")
     k, event = ka, None
     for _ in range(n - 1):
+        if k == 0:
+            break                      # stays 0 from here on; the chain is finite anyway
         k, ev = mul(fmt, k, ka)
         event = event or ev
     return k, event

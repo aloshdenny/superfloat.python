@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate tests/golden: full code tables for sf4..sf10 and SHA-256
+"""Regenerate tests/golden: full code tables for sf4..sf12 and SHA-256
 checksums for every width.  Run only when the format definition changes;
 the golden file is the baseline every later milestone is checked against.
 
@@ -28,7 +28,7 @@ def main() -> None:
         bits = sf.info(dt).bits
         table = golden_table(bits)
         checksums[f"sf{bits}"] = hashlib.sha256(table.encode()).hexdigest()
-        if bits <= 10:
+        if bits <= 12:
             with open(os.path.join(out, f"sf{bits}.tsv"), "w") as f:
                 f.write(table)
     with open(os.path.join(out, "checksums.json"), "w") as f:

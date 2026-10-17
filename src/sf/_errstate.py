@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import inspect
 import os
 import sys
 import warnings
@@ -75,6 +76,11 @@ class errstate:
 
     >>> with sf.errstate(over="ignore"):
     ...     sf.sf16(0.75) + 0.5          # saturates silently
+
+    As a decorator it works on plain and ``async def`` functions; each call
+    gets its own context entry, so concurrent calls never share state.
+    Generator functions are rejected (the policy would only cover the
+    creation of the generator, not its body).
     """
 
     def __init__(self, all: str | None = None, **kw: str | None) -> None:
@@ -84,9 +90,12 @@ class errstate:
             _check("over", all)
         self._all = all
         self._kw = kw
-        self._tokens: list[contextvars.Token] = []
+        # One token per live entry, keyed per context so the same errstate
+        # object can be entered from several threads or tasks at once.
+        self._tokens: contextvars.ContextVar[tuple] = contextvars.ContextVar(
+            "sf_errstate_tokens", default=())
 
-    def __enter__(self) -> "errstate":
+    def _policy(self) -> Mapping[str, str]:
         new = dict(_state.get())
         if self._all is not None:
             for k in KEYS:
@@ -94,16 +103,34 @@ class errstate:
         for k, v in self._kw.items():
             if v is not None:
                 new[k] = v
-        self._tokens.append(_state.set(MappingProxyType(new)))
+        return MappingProxyType(new)
+
+    def __enter__(self) -> "errstate":
+        token = _state.set(self._policy())
+        self._tokens.set(self._tokens.get() + (token,))
         return self
 
     def __exit__(self, *exc: object) -> None:
-        _state.reset(self._tokens.pop())
+        stack = self._tokens.get()
+        if not stack:
+            raise RuntimeError("errstate.__exit__ called without a matching __enter__")
+        self._tokens.set(stack[:-1])
+        _state.reset(stack[-1])
 
     def __call__(self, fn: Callable) -> Callable:
+        if inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn):
+            raise TypeError("sf.errstate cannot decorate a generator function; "
+                            "use 'with sf.errstate(...)' inside the generator body")
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def awrapper(*a, **k):
+                with errstate(self._all, **self._kw):
+                    return await fn(*a, **k)
+            return awrapper
+
         @functools.wraps(fn)
         def wrapper(*a, **k):
-            with self:
+            with errstate(self._all, **self._kw):
                 return fn(*a, **k)
         return wrapper
 

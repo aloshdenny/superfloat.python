@@ -15,6 +15,7 @@ Rules implemented here:
 from __future__ import annotations
 
 import math
+import operator
 from fractions import Fraction
 from typing import Any
 
@@ -30,9 +31,20 @@ def _fmt_value(fmt: SFFormat, k: int) -> str:
 
 
 class SFScalar:
-    """Base class of every sfN scalar.  Instances are immutable."""
+    """Base class of every sfN scalar.  Instances are immutable: the code is
+    set exactly once at construction and any later assignment or deletion
+    raises AttributeError, so equality and hash never change."""
 
     __slots__ = ("_code",)
+
+    def __setattr__(self, name, value):
+        if name == "_code" and not hasattr(self, "_code"):
+            object.__setattr__(self, name, value)
+            return
+        raise AttributeError(f"{type(self).__name__} values are immutable")
+
+    def __delattr__(self, name):
+        raise AttributeError(f"{type(self).__name__} values are immutable")
     _fmt: SFFormat                      # set on each concrete subclass
 
     # Tell NumPy to defer to our reflected operators instead of building
@@ -67,11 +79,11 @@ class SFScalar:
 
     @classmethod
     def from_code(cls, code: int) -> "SFScalar":
-        """Build from a signed integer code in [-max_code, max_code]."""
+        """Build from a signed integer code in [-max_code, max_code].
+        Any integer-like value (``operator.index``) is accepted; bool is not."""
+        code = _as_index(code, "code")
         try:
             cls._fmt.check_code(code)
-        except TypeError as e:
-            raise SFTypeError(str(e)) from None
         except ValueError as e:
             raise SFInvalidError(str(e)) from None
         obj = object.__new__(cls)
@@ -81,6 +93,7 @@ class SFScalar:
     @classmethod
     def from_bits(cls, bits: int) -> "SFScalar":
         """Build from the sign-magnitude bit pattern the device stores."""
+        bits = _as_index(bits, "bits")
         try:
             return cls.from_code(cls._fmt.from_bits(bits))
         except TypeError as e:
@@ -177,7 +190,7 @@ class SFScalar:
     def _binary(self, other, op, sym, reflected=False):
         pair = self._coerce(other)
         if pair is None:
-            return NotImplemented
+            return _reject(self, other, sym, reflected)
         fmt, ka, kb = pair
         if reflected:
             ka, kb = kb, ka
@@ -223,10 +236,12 @@ class SFScalar:
         fmt = self._fmt
         if mod is not None:
             raise SFUnsupportedError("pow() with a modulus is not supported for SF values")
-        if isinstance(n, bool) or not isinstance(n, int):
+        try:
+            n = _as_index(n, "exponent")
+        except SFTypeError:
             raise SFUnsupportedError(
                 f"{fmt.name} ** {n!r}: only integer exponents k >= 1 are supported"
-            )
+            ) from None
         if n == 0:
             _errstate.handle("overflow", f"x ** 0 = 1 is not representable in {fmt.name}")
             return type(self).from_code(fmt.max_code)
@@ -319,6 +334,35 @@ class SFScalar:
     def __trunc__(self): return 0
     def __floor__(self): self._unsupported("math.floor()")
     def __ceil__(self): self._unsupported("math.ceil()")
+
+
+_REFLECTED = {"+": "__radd__", "-": "__rsub__", "*": "__rmul__", "/": "__rtruediv__"}
+_FORWARD = {"+": "__add__", "-": "__sub__", "*": "__mul__", "/": "__truediv__"}
+
+
+def _reject(self, other, sym, reflected):
+    """A foreign operand.  Give a third-party numeric type its chance via the
+    Python protocol (NotImplemented) only if it defines the matching
+    operator itself; anything else gets the catalogue's SFTypeError."""
+    hook = _FORWARD[sym] if reflected else _REFLECTED[sym]
+    if not isinstance(other, (str, bytes, type(None), list, tuple, dict, set, frozenset)) \
+            and hasattr(type(other), hook):
+        return NotImplemented
+    a, b = (other, self) if reflected else (self, other)
+    raise SFTypeError(
+        f"unsupported operand type(s) for {sym}: {type(a).__name__!r} and "
+        f"{type(b).__name__!r} (SF values combine with SF values and host numbers)"
+    )
+
+
+def _as_index(v, what: str) -> int:
+    """Integer-like -> int via operator.index; bool and floats are rejected."""
+    if isinstance(v, bool):
+        raise SFTypeError(f"{what} must be an integer, not bool")
+    try:
+        return operator.index(v)
+    except TypeError:
+        raise SFTypeError(f"{what} must be an integer, got {type(v).__name__}") from None
 
 
 def _binary_message(fmt, ka, kb, sym, k, event) -> str:

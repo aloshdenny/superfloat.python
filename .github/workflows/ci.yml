@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 2 * * *"      # nightly, UTC
+  workflow_dispatch:
+
+jobs:
+  commit:
+    # Spec section 10: every commit runs unit + mix + regression for every
+    # milestone, exhaustive over sf4..sf10, sampled + hypothesis for sf11..sf16.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[test]"
+      - run: python -m pytest -q
+      - run: python examples/stage_1_0_tour.py
+      - run: python tools/exhaustive.py --bits 12          # fast vectorised + Fraction boundary sweep
+
+  nightly:
+    # Spec section 10: sf16 exhaustive over all 4.3 billion pairs per binary op.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test]"
+      - run: python -m pytest -q
+      - run: python tools/exhaustive.py --bits 16
+      - run: python tools/exhaustive.py --bits 14 --no-boundary
