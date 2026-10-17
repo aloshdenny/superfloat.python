@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "sf: the Python DSL for Superfloat (sf4..sf16 fixed point) on the Atreides GPU. Stages 1.0 and 1.1: scalar arithmetic, arrays and linear algebra."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
 test = ["pytest>=8", "hypothesis>=6", "numpy>=1.24"]

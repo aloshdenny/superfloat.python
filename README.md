@@ -47,7 +47,7 @@ python tools/exhaustive.py --bits 16    # nightly: all 4.3e9 pairs per binary op
 ```
 ```
 
-No runtime dependencies. NumPy is only needed by the tests and the nightly tool.
+NumPy is the only runtime dependency (arrays are int64 code arrays).
 
 ## What is in the package
 
