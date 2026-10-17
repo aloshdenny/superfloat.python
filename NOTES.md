@@ -30,6 +30,24 @@ them. Each one is a single place to change if the team decides differently.
 | Strings | constructor only (`sf.sf16("0.1")` is the exact decimal 1/10); never an operator literal | `_reference.to_exact`, `_scalar._coerce` |
 | `sf.where` | scalar `x if c else y`; both branches are evaluated by Python before the call | `_functions.where` |
 
+## Stage 1.1 decisions
+
+| Question | Choice here | Where |
+|---|---|---|
+| Accumulation order and width | sequential from index 0, saturate per step, accumulator at data width (v1); attributes of the target, read by the reference | `_linalg.py`, `_device.Device` |
+| `sum(axis=None)` order | C order over the flattened array, sequential | `_array.sum_` |
+| `addmm(a, b, d)` | the `@` chain first, then one saturating add of `d` (not `d` as the initial accumulator; the two differ under saturation). Confirm against `__sf16_mat_fma` | `_array.addmm` |
+| Event order on arrays | catalogue order: invalid, divide, overflow, underflow; the first in that order with a `raise` policy is raised. `dot` (single output) reports the first event *in time*, like the scalar chain | `_array._handle_events`, `_array.dot` |
+| `a * b + c` vs `sf.fma` on arrays | same bits always; the fused form may report an overflow before an underflow elsewhere in the array, the two-step form the reverse | `_vectorized.fma` |
+| `sf.ones` | 1 is not representable, so it follows the literal rule: raises by default, saturates under `over="ignore"`; the message points at `sf.full(shape, sf.info(dt).max, dt)` | `_functions.ones` |
+| `sf.div(a, b, where=mask)` | elements where the mask is False are 0 and raise nothing | `_functions.div` |
+| Strings in `sf.array([...])` | accepted (constructor rule), rejected as operator literals | `_array._to_codes` |
+| Heavy-op underflow | not reported on v1 (no flags); only saturation (scan), div0 and invalid (from inputs) | `_array._run_heavy` |
+| `status.saturated` when the bound proves safety | 0 with `exact=True`, and the scan is skipped | `_array._run_heavy` |
+| Mixed placement (`host @ device`) | heavy; the host operand is sent along. Two different devices is an error | `_array._device_of` |
+| Probe policy | the matmul probe samples random rows and columns plus the largest-magnitude ones; "certain" only if every probed output saturates. `sf.config(probe=False)` disables it | `_preflight.probe` |
+| 0-d results | host ops that produce a 0-d result return an SF scalar; heavy ops always return an array (it carries the status) | `_array._result` |
+
 ## Immutability
 
 `SFScalar.__setattr__` allows `_code` to be set once (construction) and
@@ -56,7 +74,10 @@ therefore never change after a value is used as a dict key.
 * Accumulation order and accumulator width per target are needed before
   Stage 1.1 `sum` / `dot` / `@` can be bit-identical on host and GPU.
 * Per-tile sticky SAT / DIV0 / INVALID flags decide whether heavy-op events
-  can ever `raise` instead of `warn`.
+  can ever `raise` instead of `warn`. The code path exists: a `Device` with
+  `sticky_flags = True` gets exact status and honours `over="raise"`.
+* Confirm `__sf16_mat_fma` means `(A @ B) + D` and not `D` as the initial
+  accumulator (see Stage 1.1 decisions).
 
 ## Design rule for the device path: decide on the host, launch only the undecidable
 

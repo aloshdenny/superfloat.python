@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sf-python"
-version = "0.1.0"
-description = "sf: the Python DSL for Superfloat (sf4..sf16 fixed point) on the Atreides GPU. Stage 1.0: scalar arithmetic."
+version = "0.2.0"
+description = "sf: the Python DSL for Superfloat (sf4..sf16 fixed point) on the Atreides GPU. Stages 1.0 and 1.1: scalar arithmetic, arrays and linear algebra."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []

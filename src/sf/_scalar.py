@@ -327,7 +327,11 @@ class SFScalar:
     def __xor__(self, o): self._unsupported("^")
     def __rxor__(self, o): self._unsupported("^")
     def __invert__(self): self._unsupported("~")
-    def __matmul__(self, o): self._unsupported("@ on scalars")
+    def __matmul__(self, o):
+        if hasattr(type(o), "__rmatmul__") and not isinstance(o, SFScalar):
+            return NotImplemented                  # let an array report the shape error
+        self._unsupported("@ on scalars")
+
     def __rmatmul__(self, o): self._unsupported("@ on scalars")
     def __index__(self): self._unsupported("using an SF value as an index")
     def __round__(self, n=None): self._unsupported("round()")

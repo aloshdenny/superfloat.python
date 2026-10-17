@@ -1,13 +1,17 @@
-"""Module-level functions: sf.cast, sf.info, sf.fma, sf.div, sf.sqrt,
-sf.where, sf.from_code, sf.from_bits, sf.dtype."""
+"""Module-level functions: constructors, casts, info, fma, div, sqrt, clip,
+maximum, minimum, where, from_code, from_bits, dtype.  Every function
+accepts SF scalars and SF arrays alike."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any
 
-from . import _errstate, _reference as ref
-from ._errors import SFTypeError
+import numpy as np
+
+from . import _device, _errstate, _reference as ref, _vectorized as vec
+from ._array import SFArray, _as_sfarray, _elementwise, _handle_events, _nested_to_array, _to_codes, _widest
+from ._errors import SFInvalidError, SFShapeError, SFTypeError
 from ._format import SFFormat, widen_code
 from ._scalar import DTYPES, SFScalar, _binary_message, _dtype_of, _fmt_value, resolve_dtype
 
@@ -48,36 +52,100 @@ def info(dt: Any) -> SFInfo:
     """Constants of a format, the way ``numpy.finfo`` works."""
     cls = resolve_dtype(dt)
     fmt: SFFormat = cls._fmt
-    return SFInfo(
-        dtype=cls, bits=fmt.bits,
-        max=float(fmt.max), min=float(fmt.min), lsb=float(fmt.lsb),
-        max_code=fmt.max_code, codes=fmt.codes,
-        exact_max=fmt.max, exact_lsb=fmt.lsb,
-    )
+    return SFInfo(dtype=cls, bits=fmt.bits, max=float(fmt.max), min=float(fmt.min),
+                  lsb=float(fmt.lsb), max_code=fmt.max_code, codes=fmt.codes,
+                  exact_max=fmt.max, exact_lsb=fmt.lsb)
 
 
-def from_code(code: int, dt: Any) -> SFScalar:
-    """Inverse of ``x.code``."""
+# --- constructors ----------------------------------------------------------------------
+
+def array(obj: Any, dtype: Any = None, device: str = _device.HOST) -> SFArray | SFScalar:
+    """Build an SF array from (nested) lists, NumPy arrays, SF scalars or SF
+    arrays.  Host numbers are quantized through the error policy."""
+    return SFArray(obj, dtype, device)
+
+
+def asarray(obj: Any, dtype: Any = None, device: str = _device.HOST) -> SFArray:
+    """Like ``array`` but returns the input itself when it is already an SF
+    array of the requested dtype on the requested device."""
+    if isinstance(obj, SFArray) and (dtype is None or resolve_dtype(dtype) is obj.dtype) \
+            and obj.device == device:
+        return obj
+    return SFArray(obj, dtype, device)
+
+
+def zeros(shape, dtype: Any = "sf16", device: str = _device.HOST) -> SFArray:
+    cls = resolve_dtype(dtype)
+    out = SFArray._wrap(np.zeros(shape, dtype=np.int64), cls)
+    return out if device == _device.HOST else out.to(device)
+
+
+def full(shape, value: Any, dtype: Any = None, device: str = _device.HOST) -> SFArray:
+    """An array filled with ``value`` (quantized through the error policy)."""
+    if dtype is None:
+        if not isinstance(value, SFScalar):
+            raise SFTypeError("sf.full needs dtype= unless value is an SF scalar")
+        dtype = type(value)
+    cls = resolve_dtype(dtype)
+    k = int(_to_codes(value, cls._fmt, what="value"))
+    out = SFArray._wrap(np.full(shape, k, dtype=np.int64), cls)
+    return out if device == _device.HOST else out.to(device)
+
+
+def ones(shape, dtype: Any = "sf16", device: str = _device.HOST) -> SFArray:
+    """Filled with the literal 1.  1.0 is not representable in any SF format,
+    so this follows the policy like any other literal: it raises
+    SFOverflowError by default and saturates to max under over='ignore'.
+    For the largest representable value use ``sf.full(shape, sf.info(dt).max, dt)``."""
+    cls = resolve_dtype(dtype)
+    _errstate.handle("overflow", f"sf.ones: 1 is not representable in {cls.__name__} "
+                                 f"(max {_fmt_value(cls._fmt, cls._fmt.max_code)}); "
+                                 f"use sf.full(shape, sf.info(sf.{cls.__name__}).max, sf.{cls.__name__})")
+    return full(shape, cls._fmt.max, cls, device)
+
+
+def from_codes(codes, dt: Any, device: str = _device.HOST) -> SFArray:
+    """Array inverse of ``x.codes``."""
+    cls = resolve_dtype(dt)
+    k = np.asarray(codes)
+    if k.dtype.kind not in "iu":
+        raise SFTypeError("codes must be an integer array")
+    k = k.astype(np.int64)
+    if np.any(np.abs(k) > cls._fmt.max_code):
+        raise SFInvalidError(f"codes outside {cls.__name__} range ±{cls._fmt.max_code}")
+    out = SFArray._wrap(k, cls)
+    return out if device == _device.HOST else out.to(device)
+
+
+def from_code(code, dt: Any) -> SFScalar | SFArray:
+    """Inverse of ``x.code`` (scalar) or ``x.codes`` (array)."""
+    if isinstance(code, np.ndarray) and code.ndim:
+        return from_codes(code, dt)
     return resolve_dtype(dt).from_code(code)
 
 
-def from_bits(bits: int, dt: Any) -> SFScalar:
-    """Inverse of ``x.bits`` (sign-magnitude device pattern)."""
-    return resolve_dtype(dt).from_bits(bits)
-
-
-def cast(x: Any, dt: Any) -> SFScalar:
-    """Convert ``x`` to ``dt``.
-
-    Widening is exact.  Narrowing re-quantizes the exact value with
-    round-half-even and goes through the error policy (overflow,
-    underflow).  Host scalars are quantized like the constructor.
-    """
+def from_bits(bits, dt: Any) -> SFScalar | SFArray:
+    """Inverse of ``x.bits`` (sign-magnitude device pattern), scalar or array."""
     cls = resolve_dtype(dt)
+    if isinstance(bits, np.ndarray) and bits.ndim:
+        try:
+            return SFArray._wrap(vec.from_bits(cls._fmt, bits), cls)
+        except ValueError as e:
+            raise SFInvalidError(str(e)) from None
+    return cls.from_bits(bits)
+
+
+# --- casts --------------------------------------------------------------------------------
+
+def cast(x: Any, dt: Any):
+    """Convert ``x`` to ``dt``.  Widening is exact.  Narrowing re-quantizes
+    the exact value with round-half-even through the error policy.  Host
+    scalars and arrays are quantized like the constructor."""
+    cls = resolve_dtype(dt)
+    fmt = cls._fmt
     if isinstance(x, SFScalar):
-        if x._fmt.bits <= cls._fmt.bits:
-            return cls.from_code(widen_code(x._code, x._fmt, cls._fmt))
-        fmt = cls._fmt
+        if x._fmt.bits <= fmt.bits:
+            return cls.from_code(widen_code(x._code, x._fmt, fmt))
         k, event = ref.cast_exact(fmt, x.exact)
         if event == "overflow":
             _errstate.handle(event, f"{x!r} is not representable in {fmt.name} "
@@ -85,15 +153,34 @@ def cast(x: Any, dt: Any) -> SFScalar:
         elif event == "underflow":
             _errstate.handle(event, f"{x!r} underflows to 0 in {fmt.name}")
         return cls.from_code(k)
+    if isinstance(x, SFArray):
+        src = x.dtype._fmt
+        if src.bits <= fmt.bits:
+            return SFArray._wrap(x._codes << (fmt.bits - src.bits), cls, x.device)
+        # narrowing: round half even on the exact value = (code * 2^dst) / 2^src
+        shift = src.bits - fmt.bits
+        num = x._codes
+        den = 1 << shift
+        q, r = np.divmod(num, den)                      # floor division
+        twice = 2 * r
+        k = q + ((twice > den) | ((twice == den) & (q % 2 == 1)))
+        over = np.abs(k) > fmt.max_code
+        k = np.clip(k, -fmt.max_code, fmt.max_code)
+        under = (k == 0) & (num != 0)
+        _handle_events({"overflow": over, "underflow": under}, fmt, "cast", x.size)
+        return SFArray._wrap(k, cls, x.device)
+    if isinstance(x, (list, tuple, np.ndarray)):
+        return SFArray(x, cls)
     return cls(x)
 
 
-def _operands(name: str, *xs: Any):
-    """Promote mixed operands to the widest SF format among them.
+# --- elementwise functions ----------------------------------------------------------------
 
-    At least one operand must be an SF value (it fixes the type the host
-    literals are quantized to), like the binary operators.
-    """
+def _any_array(*xs) -> bool:
+    return any(isinstance(x, (SFArray, np.ndarray, list, tuple)) for x in xs)
+
+
+def _scalar_operands(name: str, *xs: Any):
     sf_ops = [x for x in xs if isinstance(x, SFScalar)]
     if not sf_ops:
         raise SFTypeError(f"sf.{name}: at least one argument must be an SF value")
@@ -108,10 +195,11 @@ def _operands(name: str, *xs: Any):
     return fmt, codes
 
 
-def fma(a: Any, b: Any, c: Any) -> SFScalar:
-    """a * b + c, bit-identical to ``a * b + c`` (the product never
-    overflows and the add is exact, so the compiler may fuse freely)."""
-    fmt, (ka, kb, kc) = _operands("fma", a, b, c)
+def fma(a: Any, b: Any, c: Any):
+    """a * b + c, bit-identical to ``a * b + c``.  Scalars or arrays."""
+    if _any_array(a, b, c):
+        return _elementwise("fma", a, b, c)
+    fmt, (ka, kb, kc) = _scalar_operands("fma", a, b, c)
     k, event = ref.fma(fmt, ka, kb, kc)
     if event is not None:
         if event == "overflow":
@@ -123,20 +211,48 @@ def fma(a: Any, b: Any, c: Any) -> SFScalar:
     return _dtype_of(fmt).from_code(k)
 
 
-def div(a: Any, b: Any) -> SFScalar:
-    """Same as ``a / b``.  (``where=`` arrives with arrays in Stage 1.1.)"""
-    fmt, (ka, kb) = _operands("div", a, b)
-    k, event = ref.div(fmt, ka, kb)
-    if event is not None:
-        _errstate.handle(event, _binary_message(fmt, ka, kb, "/", k, event))
-    return _dtype_of(fmt).from_code(k)
+def div(a: Any, b: Any, where: Any = None):
+    """``a / b``.  With ``where=mask`` (arrays) the division only happens
+    where the mask is True; other elements are 0 and raise nothing."""
+    if where is None:
+        if _any_array(a, b):
+            return _elementwise("div", a, b)
+        fmt, (ka, kb) = _scalar_operands("div", a, b)
+        k, event = ref.div(fmt, ka, kb)
+        if event is not None:
+            _errstate.handle(event, _binary_message(fmt, ka, kb, "/", k, event))
+        return _dtype_of(fmt).from_code(k)
+    fmt = _widest([a, b])
+    dtype = _dtype_of(fmt)
+    ka, kb = _to_codes(a, fmt), _to_codes(b, fmt)
+    mask = np.asarray(where, dtype=bool)
+    try:
+        shape = np.broadcast_shapes(ka.shape, kb.shape, mask.shape)
+    except ValueError:
+        raise SFShapeError("sf.div: operands and mask could not be broadcast together") from None
+    ka, kb, mask = (np.broadcast_to(v, shape) for v in (ka, kb, mask))
+    safe_b = np.where(mask, kb, 1)
+    k, events = vec.div(fmt, np.where(mask, ka, 0), safe_b)
+    events = {kind: m & mask for kind, m in events.items()}
+    _handle_events(events, fmt, "/", int(np.count_nonzero(mask)))
+    out = np.where(mask, k, 0)
+    if out.ndim == 0:
+        return dtype.from_code(int(out))
+    return SFArray._wrap(out, dtype, _device_of_any(a, b))
 
 
-def sqrt(a: SFScalar) -> SFScalar:
-    """Square root, truncated toward zero.  Negative input is a domain
-    error (invalid); the device value is 0."""
+def _device_of_any(*xs):
+    from ._array import _device_of
+    return _device_of(xs)
+
+
+def sqrt(a: Any):
+    """Square root, truncated toward zero.  Negative input is a domain error
+    (invalid); the device value is 0.  Scalars or arrays."""
+    if isinstance(a, (SFArray, list, tuple)):
+        return _elementwise("sqrt", _as_sfarray(a, "sqrt"))
     if not isinstance(a, SFScalar):
-        raise SFTypeError("sf.sqrt expects an SF value")
+        raise SFTypeError("sf.sqrt expects an SF value or array")
     fmt = a._fmt
     k, event = ref.sqrt(fmt, a._code)
     if event is not None:
@@ -145,11 +261,59 @@ def sqrt(a: SFScalar) -> SFScalar:
     return type(a).from_code(k)
 
 
-def where(cond: Any, x: Any, y: Any) -> Any:
-    """``x if cond else y``.  Note that, unlike a conditional expression,
-    Python evaluates both ``x`` and ``y`` before ``where`` runs."""
-    return x if cond else y
+def _select(name, pick, *xs):
+    """maximum / minimum: exact selection on codes, no events."""
+    fmt = _widest(xs)
+    dtype = _dtype_of(fmt)
+    codes = [_to_codes(x, fmt) for x in xs]
+    try:
+        r = pick(*codes)
+    except ValueError:
+        raise SFShapeError(f"sf.{name}: operands could not be broadcast together") from None
+    if np.ndim(r) == 0:
+        return dtype.from_code(int(r))
+    return SFArray._wrap(r, dtype, _device_of_any(*xs))
 
 
-__all__ = ["dtype", "info", "SFInfo", "from_code", "from_bits", "cast",
-           "fma", "div", "sqrt", "where"]
+def maximum(a: Any, b: Any):
+    return _select("maximum", np.maximum, a, b)
+
+
+def minimum(a: Any, b: Any):
+    return _select("minimum", np.minimum, a, b)
+
+
+def clip(x: Any, lo: Any, hi: Any):
+    """Clamp to [lo, hi].  Exact on codes; lo and hi are quantized like literals."""
+    fmt = _widest([x, lo, hi])
+    dtype = _dtype_of(fmt)
+    kx, klo, khi = (_to_codes(v, fmt) for v in (x, lo, hi))
+    if np.any(klo > khi):
+        raise SFInvalidError("sf.clip: lo must not exceed hi")
+    r = np.clip(kx, klo, khi)
+    if np.ndim(r) == 0:
+        return dtype.from_code(int(r))
+    return SFArray._wrap(r, dtype, _device_of_any(x))
+
+
+def where(cond: Any, x: Any, y: Any):
+    """``x if cond else y``, elementwise for arrays.  Note that Python
+    evaluates both ``x`` and ``y`` before ``where`` runs."""
+    if not _any_array(cond, x, y):
+        return x if cond else y
+    fmt = _widest([x, y])
+    dtype = _dtype_of(fmt)
+    kx, ky = _to_codes(x, fmt), _to_codes(y, fmt)
+    c = np.asarray(cond, dtype=bool) if not isinstance(cond, SFArray) else cond._codes != 0
+    try:
+        r = np.where(c, kx, ky)
+    except ValueError:
+        raise SFShapeError("sf.where: operands could not be broadcast together") from None
+    if r.ndim == 0:
+        return dtype.from_code(int(r))
+    return SFArray._wrap(r, dtype, _device_of_any(x, y))
+
+
+__all__ = ["dtype", "info", "SFInfo", "array", "asarray", "zeros", "ones", "full",
+           "from_codes", "from_code", "from_bits", "cast", "fma", "div", "sqrt",
+           "maximum", "minimum", "clip", "where"]

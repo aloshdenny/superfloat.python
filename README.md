@@ -1,9 +1,10 @@
 # sf: the Python DSL for Superfloat
 
 Python front end for the Superfloat formats (sf4 to sf16) on the Atreides GPU.
-This is **Stage 1.0** of the language roadmap: scalar arithmetic, types and
-casts, the error model, and the bit-exact host reference that every later
-backend is checked against.
+This covers **Stage 1.0** (scalar arithmetic, types and casts, the error model,
+the bit-exact host reference) and **Stage 1.1** (NumPy-style arrays, reductions,
+dot, matmul, elementary functions, and the device path with a mock Atreides
+target behind a device interface).
 
 ```python
 import sf
@@ -19,6 +20,16 @@ a < 1          # True: comparisons are exact
 
 with sf.errstate(over="ignore"):      # silent saturation, same bits as the GPU
     sf.sf16(0.75) + 0.5               # sf16(0.999969482421875)
+```
+
+```python
+x = sf.array([0.10, -0.25, 0.50], dtype=sf.sf16)                 # host array: light
+h = sf.asarray(np_inputs, dtype=sf.sf16, device="atreides")
+w = sf.asarray(np_weights, dtype=sf.sf16, device="atreides")
+y = h @ w                                                         # heavy: built-in kernel
+y.status            # SFStatus(saturated<=12, div0=0, invalid=0, exact=False)
+y.numpy()           # read back to host
+sf.div(a, b, where=b != 0)                                        # never raises
 ```
 
 ## Install
@@ -48,7 +59,13 @@ No runtime dependencies. NumPy is only needed by the tests and the nightly tool.
 | `sf/_errors.py` | The exception and warning hierarchy of spec section 3.2 |
 | `sf/_scalar.py` | `sf.sf4` .. `sf.sf16` classes: construction, promotion, literals, operators, comparisons, unsupported ops |
 | `sf/_functions.py` | `sf.cast`, `sf.info`, `sf.fma`, `sf.div`, `sf.sqrt`, `sf.where`, `sf.from_code`, `sf.from_bits`, `sf.dtype` |
-| `sf/_vectorized.py` | The same ops over NumPy int64 code arrays (nightly tool now, Stage 1.1 arrays later) |
+| `sf/_vectorized.py` | The same ops over NumPy int64 code arrays: host arrays, the mock target and the nightly tool all run this |
+| `sf/_array.py` | `SFArray`: construction, indexing, broadcasting, elementwise ops, reductions, `dot`, `matmul`, `addmm`, and the light/heavy dispatch |
+| `sf/_linalg.py` | Reference accumulation: `sum`, `dot`, `@` as sequential saturating fma chains; the spec 3.4 matmul bound |
+| `sf/_device.py` | `Device` interface, `MockAtreides` (sf16 only, no flags, like v1), `register_device` for the simulator and hardware |
+| `sf/_preflight.py` | The gate every heavy op passes before launch: known answers, range bound, golden-vector probe |
+| `sf/_status.py` | `SFStatus(saturated, div0, invalid, exact)` |
+| `sf/_config.py` | `sf.config(preflight=, probe=, probe_size=, offload_threshold=)` |
 
 The split that matters: **semantics live in `_reference.py` only.** The scalar
 classes are a thin layer that promotes operands, calls the reference, and hands
@@ -78,6 +95,34 @@ No exponent, NaN, infinity or subnormals; -0 is canonicalised to +0.
 * `sfN op sfM` gives the wider type; narrowing needs `sf.cast`. Mixing with a narrower target raises `SFTypeError`.
 * `//`, `%`, bitwise ops, `round()`, non-integer or negative `**` raise `SFUnsupportedError`.
 * `x ** k` for integer `k >= 1` is the left-to-right chain of multiplies.
+
+## Arrays and the device path (Stage 1.1)
+
+An SF array is an int64 NumPy array of codes plus a dtype and a placement.
+Every scalar rule applies element by element with NumPy broadcasting. Events
+on host arrays are counted (`overflow in 12 of 4096 elements`) and go through
+the same policy, in catalogue order: invalid, divide, overflow, underflow.
+
+* `sum`, `dot` and `@` are chains of fma in the target's accumulation order
+  (sequential from index 0, saturating at each step, accumulator at data
+  width). `dot` equals the scalar fma chain bit for bit, and `@` equals
+  per-output `dot`. `addmm(a, b, d)` is the `@` chain, then one saturating add.
+* `device="atreides"` makes an array heavy. Any op with a heavy operand is a
+  heavy op: it is checked on the host, run on the target, and reports
+  `result.status`. Only sf16 is accepted on Atreides v1.
+* **Pre-flight (decide on the host, launch only the undecidable).** Before a
+  launch: shape, dtype and limit checks; `div0` / `invalid` read off the inputs
+  (exact, raised before launch under the policy); the range bound (safe means
+  no scan and `status.exact=True`); and, for the undecidable band, a
+  golden-vector probe through the host reference. When the op is known to
+  saturate on every element, `sf.config(preflight="raise")` (default) refuses
+  it before the chip sees it; `"warn"` and `"ignore"` launch anyway.
+* Atreides v1 has no saturation flag, so `status.saturated` is an upper bound
+  from scanning the output for ±max and `exact` is False; heavy-op saturation
+  warns (`SFDeviceOverflowWarning`) rather than raises. A target with
+  `sticky_flags = True` gets exact counts and `over="raise"` is honoured.
+* `sf.config(offload_threshold=n)` moves host ops larger than `n` elements to
+  the default device.
 
 ## Error policy
 
@@ -124,6 +169,10 @@ boundary corners (sf11 to sf16), plus hypothesis property tests.
 | `test_errstate.py` | Policy, catalogue types, user-line attribution, context locality |
 | `test_spec_examples.py` | Every code example in the spec, as written |
 | `test_review_findings.py` | Regressions from the independent Stage 1.0 review |
+| `test_1_1_1_arrays.py` | 1.1.1 every Stage 1.0 op re-run on shapes `()`, `(n,)`, `(m, n)`; broadcasting, literals, promotion, casts |
+| `test_1_1_2_reductions.py` | 1.1.2 `sum` is the sequential chain; `dot` equals the scalar fma chain; max/min/argmax |
+| `test_1_1_3_matmul_device.py` | 1.1.3 `@` equals per-output `dot`; shape errors before launch; host and target bit-identical; status; pre-flight |
+| `test_1_1_4_functions.py` | 1.1.4 sqrt, pow, clip, maximum, minimum, masked div, where |
 
 Results are compared as integer codes, never with float tolerances.
 `SF_TEST_SEED` and `SF_TEST_RANDOM_PAIRS` control the sampled widths.
@@ -145,5 +194,8 @@ format definition itself changes.
 
 ## Roadmap
 
-Stage 1.1 (arrays, dot, matmul, built-in GPU kernels) builds on
-`_vectorized.py`; Stage 1.2 diagnostics; Stage 2 PyTorch; Stage 3 kernels.
+Stage 1.0 and 1.1 are done on the host and the mock target. The 1.1 gate
+("host and GPU bit-identical on every op") closes against real silicon once
+the simulator or hardware is registered with `sf.register_device` and the
+hardware team confirms accumulation order and accumulator width. Stage 1.2
+(diagnostics) is deferred; Stage 2 PyTorch; Stage 3 kernels.
