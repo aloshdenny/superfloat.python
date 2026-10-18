@@ -67,6 +67,12 @@ them. Each one is a single place to change if the team decides differently.
 | `last_status` | process-wide registry keyed by layer name; `last_status(model)` filters by that model's layers | `torch/_status.py` |
 | Compile backend | retargets `sf::linear` / `sf::matmul` nodes to a `DeviceRunner` on `sf.config(default_device)`; unsupported widths stay host-emulated; inference-only (raises with grad enabled) | `torch/_backend.py` |
 | `autocast` as a decorator | sync functions only; torch function modes are thread-local, so a coroutine or generator would leak the mode across awaits | `torch/_autocast.py` |
+| NaN / ±inf in SF layers | routed through the SF policy before any scale is chosen, like a Stage 1 cast: NaN is `invalid` (device value 0), ±inf is `overflow`; under a non-raising policy ±inf stands in as the largest finite magnitude of the tensor with its sign, so it saturates in the scale the finite values choose | `torch/_core.sanitize` |
+| Conversion and parameters | `SFLinear.from_float` / `SFConv2d` wrap the source layer's own `Parameter` objects (identity, `requires_grad` and training state preserved), so `convert(..., inplace=True)` keeps a pre-existing optimizer connected; a non-inplace `convert` deep-copies first | `torch/_modules.py` |
+| Shared / aliased modules | converted once per distinct module; every alias (including inside nested containers) is replaced by the same SF object; reported under `shared` | `torch/_modules.convert` |
+| Root `Conv2d` | converted like a root `Linear`; an unconvertible one is reported as skipped | `torch/_modules.convert` |
+| Huge float64 values | the bias scale is derived with overflow guarded (`a_bias` from finite ratios, a bias no finite scale can encode is counted as `bias_saturated`); a result outside float64 is `inf`, as in float | `torch/_core.linear` |
+| Request-scoped status | `sft.capture_status()` collects statuses for the current thread or task (context-local), alongside the process-wide `last_status()`; use it for concurrent serving where models share layer names | `torch/_status.capture_status` |
 | Research `sf_quantize` | the spec says to promote it from the superfloat research code; that code is not in this repository, so `quantize` is written from the Stage 1 cast and gated on producing the same codes. Replace or cross-check when the research code is available | `torch/_core.fake_quantize` |
 
 ## Immutability
@@ -127,6 +133,15 @@ Only step 4 costs anything, and it is host-side and small. Step 3 is also
 what `sf.explain` (Stage 1.2) reports per op.
 
 ## Review history
+
+A third independent review (Stage 2 drop, 2026-10-18) found: NaN silently
+treated as 0 in SF layers and a raw `ValueError` for a NaN bias; conversion
+re-creating parameters (losing `requires_grad`, training state, and the link
+to a pre-existing optimizer); shared layers converted only under their first
+name; a root `Conv2d` left unchanged; and an intermediate overflow in the
+bias scale search for a float64 bias near the maximum. All fixed and covered
+by `tests/test_review_findings_2.py`; `sft.capture_status()` addresses the
+process-wide status registry the review flagged for concurrent serving.
 
 A second independent review (Stage 1.1 drop, 2026-10-18) found: a probe
 sample promoted to a "certain" refusal; the ±max scan presented as a

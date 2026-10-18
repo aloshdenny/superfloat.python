@@ -27,7 +27,7 @@ from . import _ops  # noqa: F401  (registers the sf:: custom ops)
 from ._autocast import autocast
 from ._backend import GraphReport, compile_report, compile_reports, superfloat  # noqa: F401
 from ._modules import ConversionReport, SFConfig, SFConv2d, SFLinear, conversion_report, convert
-from ._status import SFLayerStatus, last_status, reset_status
+from ._status import SFLayerStatus, capture_status, last_status, reset_status
 
 
 def _bits(dtype) -> int:
@@ -97,5 +97,5 @@ def from_sf(a, dtype: torch.dtype = torch.float32) -> torch.Tensor:
 
 
 __all__ = ["quantize", "linear", "matmul", "to_sf", "from_sf", "SFLinear", "SFConv2d", "SFConfig", "convert",
-           "conversion_report", "ConversionReport", "autocast", "last_status", "reset_status",
+           "conversion_report", "ConversionReport", "autocast", "last_status", "reset_status", "capture_status",
            "SFLayerStatus", "compile_report", "compile_reports", "GraphReport"]

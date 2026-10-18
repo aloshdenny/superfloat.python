@@ -134,16 +134,53 @@ def _check(fmt_bits: int, wscale: str | None = None, headroom: str | None = None
     return FORMATS[fmt_bits]
 
 
+# --- non-finite inputs -----------------------------------------------------------------------
+
+def sanitize(x: np.ndarray, fmt: SFFormat, what: str) -> np.ndarray:
+    """Route NaN and ±inf through the SF error policy before any scale is
+    chosen, exactly as a Stage 1 cast would: NaN is an ``invalid`` event
+    (device value 0), ±inf an ``overflow`` event.  Under a non-raising
+    policy the returned array is finite: NaN becomes 0 and ±inf becomes the
+    largest finite magnitude of the tensor with its sign (so it quantizes to
+    ±max in the scale the finite values choose), or ±max itself when nothing
+    is finite."""
+    from .. import _errstate
+    x = np.asarray(x, dtype=np.float64)
+    nan = np.isnan(x)
+    inf = np.isinf(x)
+    if nan.any():
+        _errstate.handle("invalid", f"{fmt.name} {what}: invalid (NaN) in "
+                                    f"{int(nan.sum())} of {x.size} element(s)")
+    if inf.any():
+        _errstate.handle("overflow", f"{fmt.name} {what}: ±inf in {int(inf.sum())} of "
+                                     f"{x.size} element(s) (saturates)")
+    if nan.any():
+        x = np.where(nan, 0.0, x)
+    if inf.any():
+        big = _finite_absmax(x)
+        if big == 0.0:
+            big = float(fmt.max)
+        x = np.where(inf, np.sign(x) * big, x)
+    return x
+
+
+def _finite_absmax(x: np.ndarray) -> float:
+    finite = np.isfinite(x)
+    return float(np.abs(x[finite]).max()) if finite.any() else 0.0
+
+
 # --- weights ----------------------------------------------------------------------------
 
 def weight_scales(fmt: SFFormat, w: np.ndarray, wscale: str) -> np.ndarray:
-    """One positive scale per output row (per_tensor: all equal)."""
+    """One positive scale per output row (per_tensor: all equal), from the
+    finite magnitudes (an inf weight saturates to ±max at that scale)."""
     m = fmt.max_code / fmt.scale
+    finite = np.where(np.isfinite(w), np.abs(w), 0.0)
     if wscale == "per_tensor":
-        amax = float(np.abs(w).max()) if w.size else 0.0
+        amax = float(finite.max()) if w.size else 0.0
         s = np.full(w.shape[0], amax / m if amax > 0 else 1.0)
     else:
-        amax = np.abs(w).max(axis=1) if w.size else np.zeros(w.shape[0])
+        amax = finite.max(axis=1) if w.size else np.zeros(w.shape[0])
         s = np.where(amax > 0, amax / m, 1.0)
     return s.astype(np.float64)
 
@@ -167,14 +204,22 @@ def _activation(fmt: SFFormat, x: np.ndarray, kb_for_bound, bias_over_scale, hea
     codes (K, N) or batched; ``bias_over_scale(a)`` returns max |b| / (a s_w)
     in accumulator codes (0 without bias).  Returns (codes, a, a0)."""
     m = fmt.max_code / fmt.scale
-    amax = float(np.abs(x).max()) if x.size else 0.0
+    amax = _finite_absmax(x) if x.size else 0.0
     a0 = amax / m if amax > 0 else 1.0
     a = a0
     kx, ev = _cast(fmt, x / a)
     if headroom == "none":
         return kx, ev, a, a0
+    # the bias alone needs a >= a_bias for its codes to fit the accumulator;
+    # start there so the ratio below is always finite (<= max_code)
+    a_bias = bias_over_scale(None)
+    if a_bias is not None and math.isfinite(a_bias) and a_bias > a:
+        a = a_bias
+        kx, ev = _cast(fmt, x / a)
     for _ in range(_MAX_ITER):
-        bound = _linalg.matmul_bound(fmt, kx, kb_for_bound) + int(math.ceil(bias_over_scale(a)))
+        ratio = bias_over_scale(a)
+        bias_codes = int(math.ceil(ratio)) if ratio is not None and math.isfinite(ratio) else 0
+        bound = _linalg.matmul_bound(fmt, kx, kb_for_bound) + bias_codes
         if bound <= fmt.max_code:
             return kx, ev, a, a0
         a *= max(bound / fmt.max_code, 1.0 + 2.0 ** -20)
@@ -190,17 +235,32 @@ def linear(x: np.ndarray, w: np.ndarray, b: np.ndarray | None, bits: int,
     fmt = _check(bits, wscale, headroom)
     runner = runner or HostRunner()
     S = fmt.scale
+    x = sanitize(x, fmt, "linear input")
+    w = sanitize(w, fmt, "linear weight")
+    if b is not None:
+        b = sanitize(b, fmt, "linear bias")
     kw, s_w, w_under = quantize_weight(fmt, w, wscale)
     kwT = np.ascontiguousarray(kw.T)
 
     if b is not None and b.size:
-        b_abs = np.abs(b)
+        # |b_j| / (a s_wj) must be <= max_code / S for the bias code to fit:
+        # the smallest such a is a_bias.  Computed with overflow guarded so a
+        # finite bias near float64 max does not crash the search; a bias that
+        # cannot be encoded by any finite a is simply counted as saturated.
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            need = np.abs(b) / s_w                            # may be inf
+            a_bias = float(need[np.isfinite(need)].max()) / (fmt.max_code / S) \
+                if np.isfinite(need).any() else 0.0
 
         def bias_over_scale(a):
-            return float((b_abs / (a * s_w)).max() * S)
+            if a is None:
+                return a_bias
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                r = float((need / a).max() * S)
+            return r
     else:
         def bias_over_scale(a):
-            return 0.0
+            return None if a is None else 0.0
 
     kx, ev_x, a, a0 = _activation(fmt, x, kwT, bias_over_scale, headroom)
     acc, ev = runner.matmul(fmt, kx, kwT)
@@ -208,12 +268,14 @@ def linear(x: np.ndarray, w: np.ndarray, b: np.ndarray | None, bits: int,
     exact = ev["exact"]
     bias_sat = 0
     if b is not None:
-        kb, ev_b = _cast(fmt, b / (a * s_w))
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            kb, ev_b = _cast(fmt, b / (a * s_w))
         bias_sat = _count(ev_b["overflow"])
         acc, ev2 = runner.add(fmt, acc, np.broadcast_to(kb, acc.shape))
         sat = _merge(sat, ev2["saturated"])
         exact = exact and ev2["exact"]
-    y = acc / S * a * s_w[None, :]
+    with np.errstate(over="ignore"):                  # a true float64 overflow is inf, as in float
+        y = acc / S * a * s_w[None, :]
     return CoreResult(
         y=y, saturated=_count(sat), exact=exact, underflow=_count(ev["underflow"]),
         input_underflow=_count(ev_x["underflow"]), weight_underflow=w_under,
@@ -239,12 +301,15 @@ def matmul(a_val: np.ndarray, b_val: np.ndarray, bits: int, headroom: str = "bou
     runner = runner or HostRunner()
     S = fmt.scale
     m = fmt.max_code / S
-    bmax = float(np.abs(b_val).max()) if b_val.size else 0.0
+    a_val = sanitize(a_val, fmt, "matmul left operand")
+    b_val = sanitize(b_val, fmt, "matmul right operand")
+    bmax = _finite_absmax(b_val) if b_val.size else 0.0
     s_b = bmax / m if bmax > 0 else 1.0
     kb, ev_b = _cast(fmt, b_val / s_b)
-    ka, ev_a, a, a0 = _activation(fmt, a_val, kb, lambda _a: 0.0, headroom)
+    ka, ev_a, a, a0 = _activation(fmt, a_val, kb, lambda _a: None if _a is None else 0.0, headroom)
     acc, ev = runner.matmul(fmt, ka, kb)
-    y = acc / S * a * s_b
+    with np.errstate(over="ignore"):
+        y = acc / S * a * s_b
     return CoreResult(
         y=y, saturated=_count(ev["saturated"]), exact=ev["exact"],
         underflow=_count(ev["underflow"]),

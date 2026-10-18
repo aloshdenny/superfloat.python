@@ -1,6 +1,7 @@
 """Per-layer post-op status for converted models (``sft.last_status()``)."""
 from __future__ import annotations
 
+import contextvars
 import threading
 from dataclasses import dataclass
 
@@ -55,10 +56,64 @@ class SFLayerStatus:
 _lock = threading.Lock()
 _last: dict[str, SFLayerStatus] = {}
 
+# request-scoped capture: a context-local stack of dicts (threads and asyncio
+# tasks each see their own), filled alongside the process-wide registry
+_captures: contextvars.ContextVar[tuple] = contextvars.ContextVar("sf_status_captures", default=())
+
 
 def record(st: SFLayerStatus) -> None:
     with _lock:
         _last[st.name] = st
+    for sink in _captures.get():
+        sink[st.name] = st
+
+
+class capture_status:
+    """Collect the statuses of the SF layers that run inside this context,
+    for this thread or task only:
+
+    >>> with sft.capture_status() as st:
+    ...     out = model(x)
+    >>> st["encoder.fc"].saturated
+
+    Unlike ``last_status()``, two requests served concurrently with models
+    that share layer names cannot overwrite each other's entries.  Usable as
+    a decorator on plain and ``async`` functions (the captured dict is then
+    available as ``fn.last``).
+    """
+
+    def __init__(self) -> None:
+        self.statuses: dict[str, SFLayerStatus] = {}
+        self._tokens: list = []
+
+    def __enter__(self) -> dict[str, SFLayerStatus]:
+        self._tokens.append(_captures.set(_captures.get() + (self.statuses,)))
+        return self.statuses
+
+    def __exit__(self, *exc) -> None:
+        _captures.reset(self._tokens.pop())
+
+    def __call__(self, fn):
+        import functools
+        import inspect
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def awrapper(*a, **k):
+                with capture_status() as st:
+                    out = await fn(*a, **k)
+                awrapper.last = st
+                return out
+            awrapper.last = {}
+            return awrapper
+
+        @functools.wraps(fn)
+        def wrapper(*a, **k):
+            with capture_status() as st:
+                out = fn(*a, **k)
+            wrapper.last = st
+            return out
+        wrapper.last = {}
+        return wrapper
 
 
 def last_status(model=None) -> dict[str, SFLayerStatus]:

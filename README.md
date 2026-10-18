@@ -176,6 +176,15 @@ loading and serialisation; SF owns numerics and offload.
   per-step saturation, sequential order, then one saturating bias add.
   Training works through the straight-through gradient (quantization-aware
   fine-tuning recovers most of sf8's loss in the tests).
+* **Status.** `sft.last_status(model)` is the most recent call of each of the
+  model's layers from a process-wide registry keyed by layer name;
+  `with sft.capture_status() as st:` collects the statuses of one request for
+  the current thread or task only, for concurrent serving. NaN and ±inf in an
+  input, weight or bias go through `sf.errstate` like any Stage 1 cast (NaN is
+  `invalid`, inf is `overflow`), never silently through the arithmetic.
+  `sft.convert` keeps the source layers' own parameters (identity,
+  `requires_grad`, train/eval state), so an optimizer built before an in-place
+  conversion keeps working, and shared layers are converted once.
 * **2.2 `torch.compile(model, backend="superfloat")`**: every `sf::linear` /
   `sf::matmul` node the target supports (sf16 on Atreides v1) runs through the
   Stage 1.1 heavy-op path (pre-flight gate, launch, `result.status`); other
@@ -245,6 +254,7 @@ boundary corners (sf11 to sf16), plus hypothesis property tests.
 | `test_2_0_quantize.py` | 2.0 same codes and events as Stage 1 under every policy; STE; dtypes |
 | `test_2_1_convert.py` | 2.1 SF linear recomputed through the Stage 1 public API; adversarial no-saturation cases; conv as unfold + linear; convert report; autocast; accuracy gate on digits; QAT recovery |
 | `test_2_2_compile.py` | 2.2 compiled == emulated bit for bit on MLP, CNN and attention; coverage report; unsupported widths; inference-only; pre-flight on the compiled path |
+| `test_review_findings_2.py` | Regressions from the independent Stage 2 review |
 
 Results are compared as integer codes, never with float tolerances.
 `SF_TEST_SEED` and `SF_TEST_RANDOM_PAIRS` control the sampled widths.

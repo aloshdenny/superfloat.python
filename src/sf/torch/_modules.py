@@ -56,13 +56,17 @@ class SFLinear(nn.Module):
 
     @classmethod
     def from_float(cls, m: nn.Linear, name: str, cfg: SFConfig) -> "SFLinear":
-        new = cls(m.in_features, m.out_features, m.bias is not None, dtype=cfg.dtype_name,
-                  scale=cfg.scale, headroom=cfg.headroom, name=name,
-                  device=m.weight.device, param_dtype=m.weight.dtype)
-        with torch.no_grad():
-            new.weight.copy_(m.weight)
-            if m.bias is not None:
-                new.bias.copy_(m.bias)
+        """Wrap ``m``'s own parameter objects (identity preserved, so an
+        optimizer built before conversion keeps working and ``requires_grad``
+        is whatever it was), and copy its training / eval state."""
+        new = cls.__new__(cls)
+        nn.Module.__init__(new)
+        new.in_features, new.out_features = m.in_features, m.out_features
+        new.sf = cfg
+        new.sf_name = name or f"linear_{id(new):x}"
+        new.weight = m.weight
+        new.bias = m.bias
+        new.train(m.training)
         return new
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -92,8 +96,9 @@ class SFConv2d(nn.Module):
         self.stride, self.padding, self.dilation = _pair(conv.stride), _pair(conv.padding), _pair(conv.dilation)
         self.sf = cfg
         self.sf_name = name
-        self.weight = nn.Parameter(conv.weight.detach().clone())
-        self.bias = nn.Parameter(conv.bias.detach().clone()) if conv.bias is not None else None
+        self.weight = conv.weight                     # same parameter objects as the source conv
+        self.bias = conv.bias
+        self.train(conv.training)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         n, _, h, w = x.shape
@@ -125,10 +130,13 @@ def convertible_conv(c: nn.Conv2d) -> tuple[bool, str]:
 class ConversionReport:
     converted: list = field(default_factory=list)     # (name, kind)
     skipped: list = field(default_factory=list)       # (name, kind, reason)
+    shared: list = field(default_factory=list)        # (alias name, converted name): same module
 
     def __repr__(self) -> str:
-        lines = [f"ConversionReport: {len(self.converted)} converted, {len(self.skipped)} skipped"]
+        lines = [f"ConversionReport: {len(self.converted)} converted, {len(self.skipped)} skipped"
+                 + (f", {len(self.shared)} shared alias(es)" if self.shared else "")]
         lines += [f"  + {n} ({k})" for n, k in self.converted]
+        lines += [f"  = {a} is {n} (shared module, converted once)" for a, n in self.shared]
         lines += [f"  - {n} ({k}): {r}" for n, k, r in self.skipped]
         return "\n".join(lines)
 
@@ -145,33 +153,62 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
     if not inplace:
         model = copy.deepcopy(model)
     report = ConversionReport()
+    done: dict[int, tuple[str, nn.Module | None]] = {}     # id(source) -> (name, replacement)
+    seen: set[int] = set()                                  # containers already visited
+
+    def replacement(child: nn.Module, full: str):
+        """The SF module for ``child``, or None if it stays; converts each
+        distinct module once and returns the same object for every alias."""
+        key = id(child)
+        if key in done:
+            name, rep = done[key]
+            if rep is not None:
+                report.shared.append((full, name))
+            return rep, True
+        rep = None
+        if isinstance(child, (SFLinear, SFConv2d)):
+            report.converted.append((full, type(child).__name__ + " (already SF)"))
+        elif isinstance(child, nn.Linear):
+            rep = SFLinear.from_float(child, full, cfg)
+            report.converted.append((full, "Linear"))
+        elif isinstance(child, nn.Conv2d):
+            ok, why = convertible_conv(child)
+            if ok:
+                rep = SFConv2d(child, full, cfg)
+                report.converted.append((full, "Conv2d"))
+            else:
+                report.skipped.append((full, "Conv2d", why))
+        elif isinstance(child, (nn.Conv1d, nn.Conv3d, nn.ConvTranspose1d, nn.ConvTranspose2d,
+                                nn.ConvTranspose3d, nn.MultiheadAttention, nn.Bilinear,
+                                nn.LSTM, nn.GRU, nn.RNN)):
+            report.skipped.append((full, type(child).__name__, "no SF version yet; runs in float"))
+        else:
+            done[key] = (full, None)
+            return None, False                              # a container: recurse into it
+        done[key] = (full, rep)
+        return rep, True
 
     def visit(parent: nn.Module, prefix: str):
-        for child_name, child in list(parent.named_children()):
+        if id(parent) in seen:
+            return
+        seen.add(id(parent))
+        # parent._modules, not named_children(): the latter yields a module
+        # registered under two names only once, and the second alias would
+        # keep its float version
+        for child_name, child in list(parent._modules.items()):
+            if child is None:
+                continue
             full = f"{prefix}.{child_name}" if prefix else child_name
-            if isinstance(child, (SFLinear, SFConv2d)):
-                report.converted.append((full, type(child).__name__ + " (already SF)"))
-            elif isinstance(child, nn.Linear):
-                setattr(parent, child_name, SFLinear.from_float(child, full, cfg))
-                report.converted.append((full, "Linear"))
-            elif isinstance(child, nn.Conv2d):
-                ok, why = convertible_conv(child)
-                if ok:
-                    setattr(parent, child_name, SFConv2d(child, full, cfg))
-                    report.converted.append((full, "Conv2d"))
-                else:
-                    report.skipped.append((full, "Conv2d", why))
-            elif isinstance(child, (nn.Conv1d, nn.Conv3d, nn.ConvTranspose1d, nn.ConvTranspose2d,
-                                    nn.ConvTranspose3d, nn.MultiheadAttention, nn.Bilinear,
-                                    nn.LSTM, nn.GRU, nn.RNN)):
-                report.skipped.append((full, type(child).__name__, "no SF version yet; runs in float"))
-            else:
+            rep, leaf = replacement(child, full)
+            if rep is not None:
+                setattr(parent, child_name, rep)
+            elif not leaf:
                 visit(child, full)
 
-    if isinstance(model, nn.Linear):
-        model = SFLinear.from_float(model, "", cfg)
-        report.converted.append(("", "Linear"))
-    else:
+    rep, leaf = replacement(model, "")
+    if rep is not None:
+        model = rep
+    elif not leaf:
         visit(model, "")
     model._sf_conversion_report = report
     return model
