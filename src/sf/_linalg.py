@@ -79,13 +79,31 @@ def matmul_codes(fmt: SFFormat, a: np.ndarray, b: np.ndarray, order: str = "sequ
     return acc, {"overflow": over, "underflow": under}
 
 
+def matmul_bound(fmt: SFFormat, a: np.ndarray, b: np.ndarray) -> int:
+    """Upper bound, in accumulator code units, on |every partial sum| of
+    every output of ``a @ b`` (codes, batched like ``matmul_codes``).
+
+    Each step adds trunc(k_a k_b / S), whose magnitude is at most
+    |k_a||k_b| / S, so for output (i, j) every partial sum is bounded by
+    sum_k |a_ik||b_kj| / S.  That per-output sum is O(MKN) to compute, so
+    this uses the O(MK + KN) relaxation
+
+        min( max_i ||a_i||_1 * max|b| ,  max|a| * max_j ||b_:j||_1 ) // S
+
+    which is never looser than the spec 3.4 form K * max|A| * max|B| / S.
+    Exact integer arithmetic, no rounding.
+    """
+    a, b = np.asarray(a, dtype=np.int64), np.asarray(b, dtype=np.int64)
+    if a.size == 0 or b.size == 0 or a.shape[-1] == 0:
+        return 0
+    abs_a, abs_b = np.abs(a), np.abs(b)
+    row_l1 = int(abs_a.sum(axis=-1).max())          # max over (batch, i) of sum_k |a_ik|
+    col_l1 = int(abs_b.sum(axis=-2).max())          # max over (batch, j) of sum_k |b_kj|
+    bound = min(row_l1 * int(abs_b.max()), int(abs_a.max()) * col_l1)
+    return bound // fmt.scale
+
+
 def matmul_bound_safe(fmt: SFFormat, a: np.ndarray, b: np.ndarray) -> bool:
-    """Spec 3.4 pre-flight bound: K * max|A| * max|B| <= max proves that no
-    partial sum can saturate.  In code units: K * maxA * maxB <= M * S."""
-    a, b = np.asarray(a), np.asarray(b)
-    K = a.shape[-1]
-    if K == 0 or a.size == 0 or b.size == 0:
-        return True
-    max_a = int(np.abs(a).max())
-    max_b = int(np.abs(b).max())
-    return K * max_a * max_b <= fmt.max_code * fmt.scale
+    """Pre-flight proof that no partial sum of ``a @ b`` can saturate
+    (spec 3.4, tightened to the L1 form of ``matmul_bound``)."""
+    return matmul_bound(fmt, a, b) <= fmt.max_code

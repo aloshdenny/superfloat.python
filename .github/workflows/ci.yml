@@ -21,7 +21,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install -e ".[test]"
+      - run: pip install -e ".[test]" --extra-index-url https://download.pytorch.org/whl/cpu
       - run: python -m pytest -q
       - run: python examples/stage_1_0_tour.py
       - run: python tools/exhaustive.py --bits 12          # fast vectorised + Fraction boundary sweep
@@ -36,7 +36,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[test]"
+      - run: pip install -e ".[test]" --extra-index-url https://download.pytorch.org/whl/cpu
       - run: python -m pytest -q
       - run: python tools/exhaustive.py --bits 16
       - run: python tools/exhaustive.py --bits 14 --no-boundary

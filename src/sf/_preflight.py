@@ -100,7 +100,7 @@ def check(op: str, fmt: SFFormat, *operands, **kw) -> Verdict:
         return Verdict("safe", "powers cannot overflow", ev)
     if op == "matmul":
         if _linalg.matmul_bound_safe(fmt, operands[0], operands[1]):
-            return Verdict("safe", "K * max|A| * max|B| <= max", ev)
+            return Verdict("safe", "L1 bound: no partial sum can exceed max", ev)
         return Verdict("unknown", "", ev)
     if op == "sum":
         a = np.asarray(operands[0])

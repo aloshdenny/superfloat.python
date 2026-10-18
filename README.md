@@ -2,9 +2,11 @@
 
 Python front end for the Superfloat formats (sf4 to sf16) on the Atreides GPU.
 This covers **Stage 1.0** (scalar arithmetic, types and casts, the error model,
-the bit-exact host reference) and **Stage 1.1** (NumPy-style arrays, reductions,
+the bit-exact host reference), **Stage 1.1** (NumPy-style arrays, reductions,
 dot, matmul, elementary functions, and the device path with a mock Atreides
-target behind a device interface).
+target behind a device interface) and **Stage 2** (PyTorch: fake quantization,
+model conversion with a scale policy, and a `torch.compile` backend that
+offloads SF ops to the target).
 
 ```python
 import sf
@@ -32,10 +34,20 @@ y.numpy()           # read back to host
 sf.div(a, b, where=b != 0)                                        # never raises
 ```
 
+```python
+import sf.torch as sft
+model = sft.convert(model, dtype=sf.sf16, scale="per_tensor")   # host emulation, chip-exact
+fast = torch.compile(model, backend="superfloat")                # offload to Atreides
+with torch.no_grad():
+    out = fast(x)
+sft.last_status(model)                                           # post-op events per layer
+```
+
 ## Install
 
 ```
 pip install -e ".[test]"
+pip install -e ".[torch]"   # adds PyTorch for sf.torch (Stage 2)
 pytest                    # every commit: exhaustive sf4..sf10, sampled sf11..sf16
 pytest -m "not slow"      # ~40 s while iterating (skips exhaustive sf9/sf10)
 python tools/exhaustive.py --bits 16    # nightly: all 4.3e9 pairs per binary op + Fraction boundary sweep
@@ -66,6 +78,12 @@ NumPy is the only runtime dependency (arrays are int64 code arrays).
 | `sf/_preflight.py` | The gate every heavy op passes before launch: known answers, range bound, golden-vector probe |
 | `sf/_status.py` | `SFStatus(saturated, div0, invalid, exact)` |
 | `sf/_config.py` | `sf.config(preflight=, suspect=, probe=, probe_size=, status=, offload_threshold=)` |
+| `sf/torch/_core.py` | Torch-free chip-exact SF linear / matmul with the scale policy; one function for eager, autocast and the compile backend, parameterised by a runner (host reference or device) |
+| `sf/torch/_ops.py` | `sf::quantize`, `sf::linear`, `sf::matmul` custom ops with straight-through gradients; one opaque node each in a compiled graph |
+| `sf/torch/_modules.py` | `SFLinear`, `SFConv2d` (unfold + SF linear), `sft.convert`, the conversion report |
+| `sf/torch/_autocast.py` | `sft.autocast`: `F.linear`, `F.conv2d`, `matmul`/`@`/`mm`/`bmm` routed to the SF ops inside a block |
+| `sf/torch/_backend.py` | `torch.compile(..., backend="superfloat")`: SF nodes retargeted to the device runner, CPU fallback for the rest, per-graph coverage report |
+| `sf/torch/_status.py` | `sft.last_status()`: per-layer saturation, underflow, headroom and scale |
 
 The split that matters: **semantics live in `_reference.py` only.** The scalar
 classes are a thin layer that promotes operands, calls the reference, and hands
@@ -133,6 +151,47 @@ the same policy, in catalogue order: invalid, divide, overflow, underflow.
 * `sf.config(offload_threshold=n)` moves host ops larger than `n` elements to
   the default device.
 
+## PyTorch (Stage 2)
+
+Integrate, do not clone: PyTorch keeps autograd, modules, optimisers, data
+loading and serialisation; SF owns numerics and offload.
+
+* **2.0 `sft.quantize(t, dtype, scale=None|"dynamic"|float)`**: values snapped
+  to SF codes, float storage (float32, which holds every sf4..sf16 value
+  exactly; bfloat16 and float16 do not), the same codes and the same events as
+  `sf.asarray` under every policy, clipped straight-through gradient.
+* **2.1 `sft.convert(model, dtype, scale, headroom)`** swaps `nn.Linear` and
+  `nn.Conv2d` (groups=1, zero padding) for `SFLinear` / `SFConv2d`; everything
+  else stays float. `sft.autocast(dtype)` does the same for a block of code
+  through a `TorchFunctionMode`. Both run the **scale policy**, because real
+  activations exceed ±1: weights get a per-tensor or per-channel scale so the
+  largest weight maps to the largest code; activations get a dynamic per-call
+  scale; the float scales stay on the host. With `headroom="bound"` (default)
+  the activation scale is raised until the L1 bound (`_linalg.matmul_bound`)
+  proves that no partial sum of the accumulation chain and no bias add can
+  saturate, so `saturated` is an exact 0 on every layer, on the host and on the
+  device, and the bits given up are reported as `headroom_bits`.
+  `headroom="none"` uses the raw scale and lets the chain saturate (counted).
+  The chain itself is the Stage 1.1 reference: per-product truncation,
+  per-step saturation, sequential order, then one saturating bias add.
+  Training works through the straight-through gradient (quantization-aware
+  fine-tuning recovers most of sf8's loss in the tests).
+* **2.2 `torch.compile(model, backend="superfloat")`**: every `sf::linear` /
+  `sf::matmul` node the target supports (sf16 on Atreides v1) runs through the
+  Stage 1.1 heavy-op path (pre-flight gate, launch, `result.status`); other
+  widths are host-emulated; everything else stays on the CPU. Compiled output
+  equals emulated output bit for bit by construction (same core function,
+  different runner). `sft.compile_report()` lists what went where and flags
+  float linear algebra that was never converted. The backend is inference-only;
+  train with the eager emulation.
+* **2.3** (Atreides as a PyTorch `PrivateUse1` device) is deferred, as the spec
+  recommends, until 2.2 coverage is high.
+
+Measured on scikit-learn digits (tests): MLP float 0.947, sf16 0.947, sf12
+0.950, sf8 0.924; CNN float 0.980, sf16 0.980, sf12 0.982. Without headroom
+sf16 drops to 0.18 because the accumulation saturates, which is why `bound` is
+the default.
+
 ## Error policy
 
 ```python
@@ -183,6 +242,9 @@ boundary corners (sf11 to sf16), plus hypothesis property tests.
 | `test_1_1_3_matmul_device.py` | 1.1.3 `@` equals per-output `dot`; shape errors before launch; host and target bit-identical; status; pre-flight |
 | `test_1_1_4_functions.py` | 1.1.4 sqrt, pow, clip, maximum, minimum, masked div, where |
 | `test_review_findings_1_1.py` | Regressions from the independent Stage 1.1 review |
+| `test_2_0_quantize.py` | 2.0 same codes and events as Stage 1 under every policy; STE; dtypes |
+| `test_2_1_convert.py` | 2.1 SF linear recomputed through the Stage 1 public API; adversarial no-saturation cases; conv as unfold + linear; convert report; autocast; accuracy gate on digits; QAT recovery |
+| `test_2_2_compile.py` | 2.2 compiled == emulated bit for bit on MLP, CNN and attention; coverage report; unsupported widths; inference-only; pre-flight on the compiled path |
 
 Results are compared as integer codes, never with float tolerances.
 `SF_TEST_SEED` and `SF_TEST_RANDOM_PAIRS` control the sampled widths.
@@ -211,4 +273,6 @@ spec's gate ("host and GPU bit-identical on every op") stays open until a
 simulator or silicon is registered with `sf.register_device`, tested against
 the Fraction oracle in `tests/oracle.py`, and its event reporting (flags or
 not, accumulation order, accumulator width, `mat_fma` meaning) is confirmed.
-Stage 1.2 (diagnostics) is deferred; Stage 2 PyTorch; Stage 3 kernels.
+Stage 2 runs on the same mock, so the same caveat applies to the
+`superfloat` backend. Stage 1.2 (diagnostics) and Stage 2.3 are deferred;
+Stage 3 kernels next.
