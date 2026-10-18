@@ -113,31 +113,11 @@ chip's value; the policy only decides whether Python also raises or warns.
 
 ## How it is tested
 
-Every result is compared as integer codes, never with float tolerances. The
-reference answers come from an independent oracle written with exact
-fractions straight from the format definition.
-
-| What | Checked against | Widths | Target | When | Status |
-|---|---|---|---|---|---|
-| Scalar ops and casts | Fraction oracle, golden files | sf4 to sf10 every pair; sf11 to sf16 sampled plus corners | host | every commit | passing |
-| Scalar ops, all 4.3 billion pairs per op | Fraction oracle | sf16 and sf14 exhaustive | host | nightly, 31 min | passing |
-| Error policy, expression trees, spec examples | catalogue types and first-error order | sf4 to sf16 | host | every commit | passing |
-| Arrays, broadcasting, elementwise | the scalar rule, element by element | sf4 to sf16 | host | every commit | passing |
-| `sum`, `dot`, `@` | sequential saturating chain of scalar ops | sf4 to sf16 | host, mock device | every commit | passing |
-| Device path, pre-flight gate, status | host == mock bit for bit; nothing launched when the host can decide | sf16 | mock device | every commit | passing on mock, real chip open |
-| `sft.quantize` | same codes and events as `sf.asarray` | sf4 to sf16 | host | every commit | passing |
-| `SFLinear`, `SFConv2d`, `convert`, `autocast` | recomputed through the array API; accuracy on digits; QAT | sf16, sf8 | host | every commit | passing |
-| `torch.compile` backend | compiled == emulated bit for bit on MLP, CNN, attention | sf16 | mock device | every commit | passing on mock, real chip open |
-| Kernel runtime: copies, limits, faults | round trip bit for bit; errors before launch | sf16 | simulator | every commit | passing |
-| Thread and block kernels | the Stage 1.1 built-ins, bit for bit | sf16 | simulator, both back ends | every commit | passing |
-| C back end | same bits and same event counts as the interpreter, every kernel | sf16 | simulator with `cc` | every commit | passing |
-| Autotune, cache, profiler | every config identical bits; fastest by cycles | sf16 | simulator | every commit | passing |
-| Regressions from four independent reviews | the failing case of each finding | as found | as found | every commit | passing |
-| Real hardware | the same cases through `atreides-hw` | sf16 | silicon or RTL | when a driver exists | not started |
-
-CI (`.github/workflows/ci.yml`) runs the suite on Python 3.10, 3.12 and 3.13
-on every push, and the exhaustive sf16 gate nightly. Today: 732 tests per
-commit.
+Every result is compared as integer codes, never with float tolerances,
+against an independent oracle written with exact fractions. 732 tests run
+on every commit (Python 3.10, 3.12, 3.13) and the exhaustive sf16 sweep
+runs nightly. The full matrix of what is checked, against what, at which
+widths and on which target is in [docs/TESTING.md](docs/TESTING.md).
 
 ## What is done and what is not
 
@@ -154,8 +134,12 @@ Not done:
 * Stage 1.2 diagnostics (`sf.explain`) and Stage 2.3 PyTorch device tensors,
   deferred on purpose.
 
-## Where to look next
+## Documentation
 
-* `docs/DETAILS.md`: module map, exact semantics tables, every option.
-* `NOTES.md`: design decisions, open hardware questions, review history.
-* `examples/`: a tour script per stage.
+| File | What it holds |
+|---|---|
+| [docs/API.md](docs/API.md) | Every function, decorator and object for Stages 1 to 3, with syntax and the Python semantics of SF values. The reference to use when writing tests against the simulator. |
+| [docs/TESTING.md](docs/TESTING.md) | The testing matrix, the test files, how to run each gate. |
+| [docs/DETAILS.md](docs/DETAILS.md) | Module map, exact semantics tables, every config option, design notes per stage. |
+| [NOTES.md](NOTES.md) | Design decisions, open hardware questions, review history. |
+| `examples/` | A runnable tour per stage. |
