@@ -1,0 +1,46 @@
+---
+title: "Scalars (Stage 1.0)"
+description: "2. Stage 1.0: scalars"
+---
+
+## Types
+
+| Name | Description |
+|---|---|
+| `sf.sf4(value=0)` ... `sf.sf16(value=0)` | Scalar classes, one per width. `value` may be int, float, Fraction, Decimal, str (constructor only), NumPy scalar or another SF value. |
+| `sf.dtypes` | Tuple of all thirteen classes. |
+| `sf.dtype(spec)` | Resolve `"sf16"`, `16`, `sf.sf16` or an sf16 value to the class. |
+| `sf.info(dt)` | `SFInfo(bits, max, min, lsb, max_code, codes, exact_max, exact_lsb)`, like `numpy.finfo`. |
+| `sf.FORMATS`, `sf.SFFormat`, `sf.MIN_BITS`, `sf.MAX_BITS` | Format constants per width (scale, max code, cast thresholds). |
+
+## Scalar attributes
+
+| Name | Description |
+|---|---|
+| `x.code` | Signed integer code. |
+| `x.bits` | Sign-magnitude bit pattern as the device stores it. |
+| `x.sign`, `x.mantissa` | The two fields of `x.bits`. |
+| `x.exact` | The value as a `Fraction`. |
+| `x.dtype` | The class. |
+| `float(x)` | The value as a float (exact for every width). |
+
+## Operators
+
+`+ - * /`, unary `-`, `abs()`, `**` (integer exponent >= 1, as a left to
+right chain of multiplies), `< <= > >= == !=`, `bool()`.
+
+## Functions
+
+| Name | Description |
+|---|---|
+| `sf.cast(x, dt)` | Convert to another width. Widening is exact; narrowing re-quantizes through the policy. Scalars and arrays. |
+| `sf.fma(a, b, c)` | `a * b + c` with one truncation of the product then one saturating add. Same bits as `a * b + c`. |
+| `sf.div(a, b, where=None)` | `a / b`. With `where=mask` (arrays) divides only where the mask is True; other elements are 0 and raise nothing. |
+| `sf.sqrt(a)` | Square root truncated toward zero. A negative input is an `invalid` event (device value 0). |
+| `sf.maximum(a, b)`, `sf.minimum(a, b)` | Elementwise selection, exact, no events. |
+| `sf.clip(x, lo, hi)` | Clamp to `[lo, hi]`; `lo` and `hi` are quantized like literals. |
+| `sf.where(cond, x, y)` | `x if cond else y`, elementwise. At least one branch must be an SF value. |
+| `sf.from_code(code, dt)` | Build a value from its signed code. Validates the range. |
+| `sf.from_bits(bits, dt)` | Build a value from its sign-magnitude pattern. |
+
+---

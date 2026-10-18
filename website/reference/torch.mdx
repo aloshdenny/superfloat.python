@@ -1,0 +1,31 @@
+---
+title: "sf.torch (Stage 2)"
+description: "5. Stage 2: `sf.torch` (import as `sft`)"
+---
+
+| Name | Description |
+|---|---|
+| `sft.quantize(t, dtype="sf16", scale=None)` | Fake quantization: values snapped to the SF grid, float storage, same codes and events as `sf.asarray`, straight-through gradient. `scale=None` (values must fit), `"dynamic"` (per call) or a float. |
+| `sft.to_sf(t, dtype="sf16", device="host")` | Tensor to `SFArray`. |
+| `sft.from_sf(a, dtype=torch.float32)` | `SFArray` or scalar to tensor (float32 holds every width exactly). |
+| `sft.linear(x, weight, bias=None, dtype="sf16", scale="per_tensor", headroom="bound", name="linear")` | Functional chip-exact SF linear. |
+| `sft.matmul(a, b, dtype="sf16", headroom="bound", name="matmul")` | Functional chip-exact SF matmul of two activations. |
+| `sft.SFLinear(in_features, out_features, bias=True, *, dtype="sf16", scale="per_tensor", headroom="bound", name="")` | `nn.Linear` with SF arithmetic. `SFLinear.from_float(linear)` wraps an existing layer's parameters. |
+| `sft.SFConv2d(conv, name, cfg)` | `nn.Conv2d` (groups=1, zero padding) as unfold + SF linear. |
+| `sft.convert(model, dtype="sf16", scale="per_tensor", headroom="bound", inplace=False)` | Swap every `nn.Linear` / `nn.Conv2d` for the SF versions; everything else stays float. |
+| `sft.conversion_report(model)` | `ConversionReport(converted, skipped, shared)`. |
+| `sft.autocast(dtype="sf16", scale=, headroom=, prefix="autocast.")` | Context manager / decorator routing `F.linear`, `F.conv2d`, `matmul`, `@`, `mm`, `bmm` to the SF ops. |
+| `torch.compile(model, backend="superfloat")` | SF nodes run through the Stage 1.1 heavy-op path on `default_device`; the rest stays on CPU. Inference only. |
+| `sft.compile_report()`, `sft.compile_reports()` | `GraphReport(on_device, host_emulated, cpu, unconverted)` for the last / all compiled graphs. |
+| `sft.last_status(model=None)` | Most recent `SFLayerStatus` per layer name. |
+| `sft.capture_status()` | Context manager collecting the statuses of one request (thread / task local). |
+| `sft.reset_status()` | Clear the registry. |
+| `sft.SFConfig(bits=16, scale="per_tensor", headroom="bound")` | The scale policy record. |
+
+Scale policy: `scale` is `"per_tensor"` or `"per_channel"` for weights;
+activations get a dynamic per-call scale. `headroom="bound"` raises the
+activation scale until the L1 bound proves nothing in the layer can
+saturate (bits given up are reported as `headroom_bits`); `"none"` uses the
+raw scale.
+
+---

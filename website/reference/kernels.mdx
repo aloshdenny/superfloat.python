@@ -1,0 +1,69 @@
+---
+title: "Kernels (Stage 3)"
+description: "6. Stage 3: kernels"
+---
+
+## Runtime
+
+| Name | Description |
+|---|---|
+| `sf.device("atreides-sim")` | The simulator. `dev.alloc(shape, dtype="sf16")`, `dev.upload(host_array_or_floats)`, `dev.download(device_array)`, `dev.synchronize()`, `dev.limits`, `dev.last` (last `LaunchResult`), `dev.kernel_launches`. |
+| `sf.device("atreides-hw")` | Hardware target. Raises `SFDeviceError` until `sf.HardwareAtreides.attach(driver)` is given an object with `launch(ir, grid, block, buffers, scalars) -> Counters`. |
+| `sf.synchronize(device="atreides-sim")` | Wait for the device; returns its last `LaunchResult`. |
+| `sf.Limits` | `max_block=1024` lanes, `max_tile=16384` values, `max_grid=65535` per axis, `max_shared=32768` bytes, `max_elements=2^28`. |
+| `sf.cdiv(a, b)` | Ceiling division for grid sizes. |
+| `sf.config(kernel_backend="interp" \| "c")` | Interpreter (default) or generated C through `cc`. Same bits, same events. |
+
+## Decorators and launch syntax
+
+| Syntax | Description |
+|---|---|
+| `@sf.kernel` | CUDA-style thread kernel. Launch: `k[grid, block](*args, **constexpr)`, e.g. `k[(sf.cdiv(n, 256),), (256,)](a, x, y, out, n)`. Up to 3 axes each. |
+| `@sf.jit` | Triton-style block kernel. Launch: `k[(grid,)](*args, BLOCK=256)`. |
+| `@sf.autotune(configs=[{...}, ...], key=["n"])` on top of `@sf.jit` / `@sf.kernel` | Runs each config once per distinct value of the `key` arguments, keeps the one with the fewest simulated cycles. Config constexprs are not passed at launch. The grid may be a function of the config: `k[lambda cfg: (sf.cdiv(n, cfg["BLOCK"]),)](...)`. |
+| `BLOCK: sf.constexpr` | Annotation for an argument fixed at trace time (a Python int). Kernels are traced once per distinct (argument kinds, constexpr values, block) and cached in `k.cache`; `k.tuned` holds autotune choices. |
+
+Argument rules: device arrays become pointers; `sf.sf16(...)` scalars and
+Python ints become scalar arguments; host arrays, raw floats, bools, and
+non-contiguous views (a transpose or strided slice) are rejected before
+launch; all arrays must be on one device; sf16 only on the simulator. A
+kernel must not return a value.
+
+## Kernel language (valid only inside a kernel)
+
+| Name | Description |
+|---|---|
+| `sf.program_id(axis=0)` / `sf.block_idx(axis=0)` | Index of this program (block) in the grid. |
+| `sf.thread_idx(axis=0)` | Lane index within the block, as a lane vector. |
+| `sf.block_dim(axis=0)` | Lanes per block along `axis` (a Python int). |
+| `sf.arange(start, end)` | `[start, end)` as an int vector; both ends Python ints or constexprs. |
+| `ptr + offs`, `ptr[i]`, `ptr[i] = v` | Pointer arithmetic, load and store on pointer arguments. |
+| `sf.load(ptr, mask=None, other=0)` | Gather; masked-off lanes read `other`. |
+| `sf.store(ptr, value, mask=None)` | Scatter; masked-off lanes write nothing. |
+| `sf.shared(shape, dtype="sf16")` | Block scratchpad; `tile[i]` and `tile[i] = v`. Zeroed per program. |
+| `sf.barrier()` | Block-wide barrier. |
+| `with sf.predicate(mask):` | Stores and event counts inside are masked by `mask` (and any enclosing predicate). Values are still computed on every lane. Nested predicates AND. |
+| `sf.where(cond, x, y)` | Select per lane. |
+| `sf.fma(a, b, c)`, `sf.sqrt(a)`, `sf.maximum(a, b)`, `sf.minimum(a, b)`, `sf.clip(x, lo, hi)`, `sf.cast(x, dtype)` | Same semantics as the host versions. |
+| `sf.dot(a, b)` | 2-D tile matmul on the systolic array (sequential fma chain per output). |
+| `sf.sum(x, axis=None)`, `sf.max(x, axis=None)`, `sf.min(x, axis=None)` | Tile reductions; `sum` is the sequential saturating chain. |
+| `sf.zeros(shape, dtype="sf16")`, `sf.full(shape, value, dtype="sf16")` | Tile constants. |
+| `v.reshape(...)`, `v[:, None]`, `v[None, :]` | Reshape and expand dims on tile values; NumPy broadcasting applies. |
+| `v + w`, `v - w`, `v * w`, `v / w`, `-v`, `abs(v)`, `v < w`, `v == 0.1`, `m & n`, `m \| n`, `~m`, `i // 2`, `i % 2` (ints) | Operators on traced values. Literals follow Stage 1 (quantized for arithmetic, exact for comparisons). |
+| `sf.kernels.is_traced(x)` | True for a traced value. |
+
+**Lockstep rule.** `if`, `while`, `and`, `or`, `not` on a traced value, or
+a traced value in `range()`, raise `SFCompileError` at trace time. Use
+`sf.where` for a value and `sf.predicate` for statements. Loops run over
+Python ints or constexprs and are unrolled.
+
+**Faults.** Out-of-bounds load / store / shared access and integer division
+by zero raise `SFDeviceError`. The faulting op writes nothing; writes by
+earlier ops and earlier programs stay; nothing after the fault runs.
+
+**Result.** A launch returns `LaunchResult` with `.status` (exact
+`SFStatus`), `.counters`, `.cycles`, `.grid`, `.block`, `.device`,
+`.backend`, `.config`. The policy is applied to the status after the launch
+in catalogue order (invalid, divide, overflow).
+
+---

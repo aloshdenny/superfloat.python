@@ -1,0 +1,20 @@
+---
+title: "Install"
+description: "Detailed reference: install"
+---
+
+```
+pip install -e ".[test]"
+pip install -e ".[torch]"   # adds PyTorch for sf.torch (Stage 2)
+pytest                    # every commit: exhaustive sf4..sf10, sampled sf11..sf16
+pytest -m "not slow"      # ~40 s while iterating (skips exhaustive sf9/sf10)
+python tools/exhaustive.py --bits 16    # nightly: all 4.3e9 pairs per binary op + Fraction boundary sweep
+```
+
+`.github/workflows/ci.yml` runs the per-commit gate on every push (Python 3.10,
+3.12, 3.13) and the nightly gate on a schedule.
+
+```
+```
+
+NumPy is the only runtime dependency (arrays are int64 code arrays).

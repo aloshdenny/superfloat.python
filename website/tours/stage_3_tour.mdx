@@ -1,0 +1,120 @@
+---
+title: "Stage 3 tour"
+description: "examples/stage_3_tour.py, runnable end to end"
+---
+
+Run with `python examples/stage_3_tour.py`.
+
+```python
+"""A tour of Stage 3: writing kernels for Atreides in Python.
+Run: python examples/stage_3_tour.py   (the C backend needs a C compiler on PATH)"""
+import numpy as np
+
+import sf
+from sf.kernels import _cgen
+
+dev = sf.device("atreides-sim")                      # the simulator: exact bits, exact events
+
+# 3.0 runtime: copies are bit for bit
+host = sf.array(np.random.default_rng(0).uniform(-0.9, 0.9, 1000), sf.sf16)
+x = dev.upload(host)
+assert np.array_equal(dev.download(x).codes, host.codes)
+print("devices:", sf.devices())
+
+# 3.1 thread kernels (CUDA style): one program per block, one lane per thread
+@sf.kernel
+def axpy_t(a, x, y, out, n):
+    i = sf.block_idx(0) * sf.block_dim(0) + sf.thread_idx(0)
+    with sf.predicate(i < n):                        # no `if` on traced values: lockstep
+        out[i] = sf.fma(a, x[i], y[i])
+
+# 3.2 block kernels (Triton style): one program per tile of BLOCK values
+@sf.jit
+def axpy_b(a, x_ptr, y_ptr, out_ptr, n, BLOCK: sf.constexpr):
+    offs = sf.program_id(0) * BLOCK + sf.arange(0, BLOCK)
+    mask = offs < n
+    xv = sf.load(x_ptr + offs, mask=mask)
+    yv = sf.load(y_ptr + offs, mask=mask)
+    sf.store(out_ptr + offs, sf.fma(a, xv, yv), mask=mask)
+
+y = dev.upload(np.random.default_rng(1).uniform(-0.9, 0.9, 1000))
+a = sf.sf16(0.75)
+n = 1000
+with sf.errstate(over="ignore"):                     # some lanes saturate on purpose
+    out_t, out_b = dev.alloc(n), dev.alloc(n)
+    rt = axpy_t[(sf.cdiv(n, 256),), (256,)](a, x, y, out_t, n)
+    rb = axpy_b[(sf.cdiv(n, 256),)](a, x, y, out_b, n, BLOCK=256)
+    ref = sf.fma(a, host, y.to("host"))              # the Stage 1.1 built-in
+print("thread == block == built-in:", np.array_equal(out_t.codes, out_b.codes)
+      and np.array_equal(out_b.codes, ref.codes))
+print("status:", rt.status, "| cycles:", rt.cycles, "vs", rb.cycles)
+
+# a tiled matmul on the systolic array (sf.dot), same bits as `A @ B` on the host
+@sf.jit
+def matmul(a_ptr, b_ptr, c_ptr, M, N, K: sf.constexpr, BM: sf.constexpr, BN: sf.constexpr, BK: sf.constexpr):
+    rm = sf.program_id(0) * BM + sf.arange(0, BM)
+    rn = sf.program_id(1) * BN + sf.arange(0, BN)
+    acc = sf.zeros((BM, BN))
+    for k0 in range(0, K, BK):                       # Python loop over a constexpr: unrolled
+        rk = k0 + sf.arange(0, BK)
+        at = sf.load(a_ptr + rm[:, None] * K + rk[None, :], mask=(rm[:, None] < M) & (rk[None, :] < K))
+        bt = sf.load(b_ptr + rk[:, None] * N + rn[None, :], mask=(rk[:, None] < K) & (rn[None, :] < N))
+        acc = acc + sf.dot(at, bt)
+    sf.store(c_ptr + rm[:, None] * N + rn[None, :], acc, mask=(rm[:, None] < M) & (rn[None, :] < N))
+
+M, N, K = 37, 29, 32
+A = dev.upload(np.random.default_rng(2).uniform(-0.3, 0.3, (M, K)))
+B = dev.upload(np.random.default_rng(3).uniform(-0.3, 0.3, (K, N)))
+C = dev.alloc((M, N))
+r = matmul[(sf.cdiv(M, 16), sf.cdiv(N, 16))](A, B, C, M, N, K=K, BM=16, BN=16, BK=16)
+print("matmul == A @ B:", np.array_equal(C.codes, (A.to("host") @ B.to("host")).codes),
+      "| macs:", r.counters.macs, "| cycles:", r.cycles)
+
+# the lockstep rule, caught at trace time, before anything is launched
+@sf.kernel
+def bad(x, n):
+    i = sf.thread_idx(0)
+    if i < n:                                        # data-dependent branch
+        x[i] = x[i]
+
+try:
+    bad[(1,), (8,)](dev.alloc(8), 8)
+except sf.SFCompileError as e:
+    print("rejected:", str(e).splitlines()[0])
+
+# launch limits are checked before launch too
+try:
+    axpy_t[(1,), (4096,)](a, x, y, out_t, n)
+except sf.SFLaunchError as e:
+    print("rejected:", e)
+
+# 3.3 autotune: the fastest config by simulated cycles; every config gives the same bits
+@sf.autotune(configs=[{"BLOCK": 64}, {"BLOCK": 256}, {"BLOCK": 1024}], key=["n"])
+@sf.jit
+def double(x_ptr, out_ptr, n, BLOCK: sf.constexpr):
+    offs = sf.program_id(0) * BLOCK + sf.arange(0, BLOCK)
+    m = offs < n
+    v = sf.load(x_ptr + offs, mask=m)
+    sf.store(out_ptr + offs, v + v, mask=m)
+
+with sf.errstate(over="ignore"):
+    r = double[lambda cfg: (sf.cdiv(n, cfg["BLOCK"]),)](x, out_t, n)
+print("autotune picked:", r.config, "| cycles:", r.cycles)
+
+# the C backend: SF IR -> C with the __sf16_* builtins -> cc; same bits, same events
+if _cgen.compiler():
+    with sf.config(kernel_backend="c"), sf.errstate(over="ignore"):
+        out_c = dev.alloc(n)
+        rc = axpy_b[(sf.cdiv(n, 256),)](a, x, y, out_c, n, BLOCK=256)
+    print("C backend == interpreter:", np.array_equal(out_c.codes, out_b.codes), rc.status == rb.status)
+else:
+    print("no C compiler on PATH; interpreter only")
+
+# the real chip is a stub until a driver is attached
+try:
+    axpy_t[(1,), (256,)](a, sf.zeros((4,), device="atreides-hw"), sf.zeros((4,), device="atreides-hw"),
+                         sf.zeros((4,), device="atreides-hw"), 4)
+except sf.SFDeviceError as e:
+    print("hardware:", e)
+
+```

@@ -1,0 +1,74 @@
+---
+title: "Plugging in a simulator or the hardware"
+description: "9. Plugging in a real simulator or the hardware"
+---
+
+This is how to run the whole test suite against something other than the
+built-in simulator (an RTL simulator such as Verilator behind your own
+compiler, or the chip).
+
+## Kernels: attach a driver
+
+```python
+import sf
+from sf.kernels._interp import Counters
+
+class VerilatorDriver:
+    def launch(self, ir, grid, block, buffers, scalars):
+        # ir       : sf.kernels.KernelIR   (ir.dump() prints it; see below for C)
+        # grid     : (gx, gy, gz)          block: (bx, by, bz)
+        # buffers  : {param name: int64 NumPy array of codes}, written IN PLACE for outputs
+        # scalars  : {param name: int}     (sf scalars arrive as their integer code)
+        ...run it, write results into the buffers...
+        return Counters(programs=..., saturated=..., underflow=..., div0=..., invalid=...)
+
+sf.HardwareAtreides.attach(VerilatorDriver())
+dev = sf.device("atreides-hw")
+```
+
+From then on `k[grid, block](...)` on arrays placed on `"atreides-hw"` goes
+through the driver, and `LaunchResult.status` is built from the `Counters`
+it returns. Raise `sf.SFDeviceError` from `launch` for a device fault.
+
+To get the generated C for the compiler (sf16 only):
+
+```python
+from sf.kernels._cgen import emit_c
+ir = next(iter(k.cache.values()))      # after one launch on the simulator
+print(ir.dump())                       # the SF IR
+print(emit_c(ir))                      # C on the __sf16_* builtins (sf16_builtins.h)
+```
+
+The emitted function is
+`void sf_kernel(int64_t *arg0, int64_t arg0__size, ..., int64_t gx, gy, gz, sf_counters *C)`
+with pointers first, scalars after, each pointer followed by its element
+count. `src/sf/kernels/sf16_builtins.h` is the reference for what the
+builtins must compute.
+
+## Built-ins (Stage 1.1 arrays, Stage 2 models): register a device
+
+```python
+class VerilatorDevice(sf.Device):
+    name = "atreides-rtl"
+    supported_bits = (16,)
+    sticky_flags = True            # True if you can return per-element event flags
+    def run(self, op, fmt, *operands, **kw):
+        # op: "add" | "sub" | "mul" | "div" | "fma" | "sqrt" | "sum" | "dot" | "matmul" | ...
+        # operands: int64 code arrays; return (codes, flags) with flags a dict of bool arrays
+        ...
+
+sf.register_device(VerilatorDevice())
+x = sf.asarray(values, dtype=sf.sf16, device="atreides-rtl")
+```
+
+Look at `src/sf/_device.py` (`MockAtreides`, `MockAtreidesFlags`) for the
+exact `run` contract and the op names.
+
+## Running the suite against it
+
+The Stage 3 tests take the target from the `DEV` constant at the top of
+`tests/test_3_kernels.py` and `tests/test_review_findings_3.py`; the Stage
+1.1 device tests use the mock names in `tests/test_1_1_3_matmul_device.py`.
+Point those at your device name and run `pytest`. Every assertion compares
+integer codes and event counts, so any difference from the host reference
+is a real disagreement between the hardware and the spec.

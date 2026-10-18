@@ -1,0 +1,95 @@
+---
+title: "Stage 2 tour"
+description: "examples/stage_2_tour.py, runnable end to end"
+---
+
+Run with `python examples/stage_2_tour.py`.
+
+```python
+"""A tour of Stage 2: Superfloat through PyTorch.
+Run: python examples/stage_2_tour.py   (needs torch and scikit-learn)"""
+import warnings
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import sf
+import sf.torch as sft
+
+warnings.simplefilter("ignore", sf.SFUnderflowWarning)
+
+# 2.0 fake quantization, same bits as Stage 1, straight-through gradient
+t = torch.tensor([0.5, -0.25, 0.1], requires_grad=True)
+q = sft.quantize(t)
+print("quantize:", q.tolist(), "| codes:", sft.to_sf(t).codes.tolist())
+q.sum().backward()
+print("STE gradient:", t.grad.tolist())
+
+# a small trained model (scikit-learn digits)
+from sklearn.datasets import load_digits                      # noqa: E402
+
+d = load_digits()
+X = torch.tensor(d.data / 16.0, dtype=torch.float32)
+Y = torch.tensor(d.target)
+perm = torch.randperm(len(X), generator=torch.Generator().manual_seed(0))
+tr, te = perm[:1400], perm[1400:]
+torch.manual_seed(0)
+model = nn.Sequential(nn.Linear(64, 64), nn.ReLU(), nn.Linear(64, 10))
+opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+for _ in range(60):
+    opt.zero_grad()
+    F.cross_entropy(model(X[tr]), Y[tr]).backward()
+    opt.step()
+
+
+def acc(m):
+    with torch.no_grad():
+        return (m(X[te]).argmax(1) == Y[te]).float().mean().item()
+
+
+print(f"float accuracy: {acc(model):.4f}")
+
+# 2.1 conversion: chip-exact SF linears with a scale policy
+for dtype in ("sf16", "sf12", "sf8"):
+    conv = sft.convert(model, dtype=dtype, scale="per_tensor")      # host emulation
+    print(f"{dtype} accuracy: {acc(conv):.4f}")
+    for name, st in sft.last_status(conv).items():
+        print(f"   layer {name}: {st}")
+print(sft.conversion_report(conv))
+
+none = sft.convert(model, headroom="none")
+print(f"sf16 without headroom: {acc(none):.4f}  (the accumulation saturates;",
+      f"{sum(s.saturated for s in sft.last_status(none).values())} outputs)")
+
+# fine-tuning through the straight-through gradient recovers sf8
+conv8 = sft.convert(model, dtype="sf8")
+before = acc(conv8)
+opt = torch.optim.Adam(conv8.parameters(), lr=3e-3)
+for _ in range(25):
+    opt.zero_grad()
+    F.cross_entropy(conv8(X[tr]), Y[tr]).backward()
+    opt.step()
+print(f"sf8 after 25 epochs of quantization-aware fine-tuning: {before:.4f} -> {acc(conv8):.4f}")
+
+# autocast: an unmodified model, SF linear algebra inside the block
+with sft.autocast(sf.sf16), torch.no_grad():
+    y_auto = model(X[:4])
+with torch.no_grad():
+    y_conv = sft.convert(model)(X[:4])
+print("autocast == convert:", torch.equal(y_auto, y_conv))
+
+# 2.2 compile: SF ops go to the target, the rest stays on the CPU
+conv16 = sft.convert(model)
+fast = torch.compile(conv16, backend="superfloat")
+n0 = sf.get_device("atreides").launches
+with torch.no_grad():
+    eager = conv16(X[te])
+    out = fast(X[te])
+print("compiled == emulated bit for bit:", torch.equal(out, eager),
+      "| launches:", sf.get_device("atreides").launches - n0)
+print(sft.compile_report())
+for name, st in sft.last_status(conv16).items():
+    print(f"   layer {name}: {st}")
+
+```

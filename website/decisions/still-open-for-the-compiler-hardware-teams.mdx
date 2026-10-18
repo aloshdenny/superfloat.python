@@ -1,0 +1,18 @@
+---
+title: "Still open for the compiler / hardware teams (spec section 12)"
+description: "Decision log: still open for the compiler / hardware teams (spec section 12)"
+---
+
+* `__sf16_sub` / `__sf16_neg` and a true `__sf16_div` are needed for the device
+  path; nothing in Stage 1.0 depends on them.
+* Accumulation order and accumulator width per target are needed before
+  Stage 1.1 `sum` / `dot` / `@` can be bit-identical on host and GPU.
+* Per-tile sticky SAT / DIV0 / INVALID flags decide whether heavy-op events
+  can ever `raise` instead of `warn`. The code path exists: a `Device` with
+  `sticky_flags = True` gets exact status and honours `over="raise"`.
+* Confirm `__sf16_mat_fma` means `(A @ B) + D` and not `D` as the initial
+  accumulator (see Stage 1.1 decisions).
+* Stage 3: the cycle model constants (lane width 256, systolic 4096 MACs per
+  cycle), what the machine does on two lanes storing to one address, and the
+  driver interface for `atreides-hw` (`launch(ir, grid, block, buffers,
+  scalars)` is the proposal).

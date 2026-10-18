@@ -1,0 +1,15 @@
+---
+title: "Error policy mechanics"
+description: "Decision log: error policy mechanics"
+---
+
+* `contextvars.ContextVar`, so `with sf.errstate` is per thread and per task.
+* An `errstate` object keeps its entry tokens in a context-local stack, so the
+  same object (including the one a decorator holds) can be entered from many
+  threads or tasks at once. The decorator wraps `async def` functions with an
+  `async` wrapper that holds the policy across `await`; generator functions are
+  rejected with `TypeError` (the policy would not cover the body).
+* Warnings carry a `stacklevel` that walks out of the package to the user's
+  frame, so `-W error` and `warnings.catch_warnings` point at the right line.
+* The test suite runs with `filterwarnings = error::sf.SFWarning`, so an
+  unexpected warning fails a test.

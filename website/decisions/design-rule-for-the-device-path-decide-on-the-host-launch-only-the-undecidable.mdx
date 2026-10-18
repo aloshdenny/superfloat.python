@@ -1,0 +1,28 @@
+---
+title: "Design rule for the device path: decide on the host, launch only the undecidable"
+description: "Decision log: design rule for the device path: decide on the host, launch only the undecidable"
+---
+
+Agreed 2026-10-17. The chip is for work whose answer the host does not know.
+Nothing that the host can already decide is sent to the device, and the
+host never waits for the device to report an event it could have predicted.
+Stage 1.0 already behaves this way for light ops; Stage 1.1 must apply it
+to every heavy op *before launch*, in this order:
+
+1. **Static checks**: shape, dtype, target support, launch limits (spec 3.2).
+2. **Known answers**: literals that do not fit, `x * 0`, `a / a`, a divisor
+   array containing a zero, a divide where every `|a| >= |b|`. Answered or
+   rejected on the host; no launch.
+3. **Range bound**: carry operand min/max through the reference rules. No
+   event possible (e.g. `K * max|A| * max|B| <= max`, spec 3.4): launch and
+   skip the post-op scan. Event certain for every input: reject before launch,
+   naming the op and the reason.
+4. **Golden-vector probe**: for the undecidable band, run the golden boundary
+   vectors plus a slice of the real data through the host reference. A hit is
+   a suspicion: warn by default, refuse or verify by exact replay under
+   `sf.config(suspect=...)`. A sample never by itself justifies "every element".
+
+Strictness is a policy knob alongside `errstate`, e.g.
+`sf.config(preflight="raise" | "ask" | "warn" | "off")`, subtle by default.
+Only step 4 costs anything, and it is host-side and small. Step 3 is also
+what `sf.explain` (Stage 1.2) reports per op.

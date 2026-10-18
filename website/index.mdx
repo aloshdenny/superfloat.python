@@ -1,0 +1,18 @@
+---
+title: "Superfloat in Python"
+description: "What sf is and what it is for"
+---
+
+`sf` is the Python library for the Superfloat number formats (sf4 to sf16)
+used by the Atreides chip. You write normal Python, NumPy-style arrays,
+PyTorch models or GPU kernels, and `sf` makes sure every number behaves
+exactly as the chip would compute it, bit for bit, and tells you when
+something overflowed, underflowed, divided by zero or went invalid.
+
+## What is Superfloat, in one paragraph
+
+An sf16 value is a 16-bit signed fixed-point number strictly between -1 and 1.
+There is no exponent, no NaN, no infinity. Adding or subtracting can push a
+value past the edge: it then sticks at the largest value (saturates).
+Multiplying two small values can land on 0 (underflows). Dividing `a / b`
+only works when `|a| < |b|`. The chip does exactly this, and so does `sf`.

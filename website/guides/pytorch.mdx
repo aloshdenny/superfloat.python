@@ -1,0 +1,19 @@
+---
+title: "PyTorch models"
+description: "Stage 2: quantize, convert, compile"
+---
+
+(Stage 2)
+
+```python
+import sf.torch as sft
+
+model = sft.convert(model, dtype=sf.sf16)             # Linear and Conv2d now compute in sf16
+fast = torch.compile(model, backend="superfloat")      # sends the SF layers to the device
+out = fast(x)
+sft.last_status(model)                                 # per-layer saturation report
+```
+
+Weights and activations are scaled so the chip's -1..1 range is used well,
+and by default the scale leaves enough headroom that nothing can saturate
+inside a layer. Training still works (straight-through gradients).

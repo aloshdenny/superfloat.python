@@ -1,0 +1,25 @@
+---
+title: "Exceptions and warnings"
+description: "7. Exceptions and warnings"
+---
+
+| Name | When |
+|---|---|
+| `SFOverflowError` / `SFOverflowWarning` | Result outside ±max (saturated). |
+| `SFUnderflowError` / `SFUnderflowWarning` | Nonzero exact result became 0. |
+| `SFZeroDivisionError` / `SFZeroDivisionWarning` | Division by an SF zero. |
+| `SFInvalidError` / `SFInvalidWarning` | NaN input or sqrt of a negative. |
+| `SFPreflightWarning` | Probe suspects a heavy op will saturate. |
+| `SFDeviceOverflowWarning` | Upper-bound saturation count from a heavy op's scan. |
+| `SFTypeError` | Bad operand, bad dtype, implicit narrowing, host array passed to a kernel. |
+| `SFShapeError` | Shape mismatch, before launch. |
+| `SFUnsupportedError` | Op or width not supported on the host or target. |
+| `SFLaunchError` | Grid, block, tile, shared memory, buffer size or view rules violated; nothing launched. |
+| `SFCompileError` | Lockstep violation, bad kernel shape, missing launch syntax, C compile failure. |
+| `SFDeviceError` | Device fault, or no hardware driver attached. |
+| `SFError`, `SFWarning` | Bases of all of the above. |
+
+Static errors (`SFTypeError`, `SFShapeError`, `SFUnsupportedError`,
+`SFLaunchError`, `SFCompileError`, `SFDeviceError`) ignore the policy.
+
+---

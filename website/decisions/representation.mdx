@@ -1,0 +1,10 @@
+---
+title: "Representation"
+description: "Decision log: representation"
+---
+
+* Host codes are **signed Python ints** (`k` in `[-M, M]`), not sign-magnitude
+  bit patterns. Arithmetic is simpler and overflow-free on signed codes, and
+  the two forms are the same information. `x.bits`, `sf.from_bits` and
+  `SFFormat.to_bits/from_bits` convert at the device boundary. A -0 bit
+  pattern coming back from the device becomes +0 (`_format.py`).

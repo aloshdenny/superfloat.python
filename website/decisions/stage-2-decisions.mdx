@@ -1,0 +1,25 @@
+---
+title: "Stage 2 decisions"
+description: "Decision log: stage 2 decisions"
+---
+
+| Question | Choice here | Where |
+|---|---|---|
+| Default scale policy (spec section 12 open question) | weights per tensor by default, per channel on request (`scale=`); activations dynamic per call; float scales on the host | `torch/_core.py` |
+| Headroom | `"bound"` (default): raise the activation scale until the L1 bound proves no partial sum or bias add can saturate; `"none"`: raw scale, saturation counted. Measured: without headroom a trained MLP drops from 0.95 to 0.18 accuracy | `torch/_core._activation` |
+| Matmul bound | tightened from the spec's `K max\|A\| max\|B\|` to `min(max_i \|\|a_i\|\|_1 max\|b\|, max\|a\| max_j \|\|b_j\|\|_1)`, never looser, exact integer arithmetic; used by both pre-flight and the headroom search, so what the host proves safe the device pre-flight proves safe too | `_linalg.matmul_bound` |
+| Bias | added after the chain as one saturating add (`addmm` semantics of 1.1), quantized in the accumulator scale `a s_w`; a bias that does not fit is counted as `bias_saturated` | `torch/_core.linear` |
+| Gradients | straight-through: `quantize` passes the gradient where the input was in range, 0 where it saturated; `linear` / `matmul` use the float gradient with the dequantized weight | `torch/_ops.py` |
+| Output dtype | float32 for float16 / bfloat16 / float32 inputs, float64 for float64 (bfloat16 and float16 cannot hold 32767/32768) | `torch/_ops.out_dtype` |
+| Conv2d | unfold on the host (data movement), then the SF linear chain; groups != 1 and string / non-zero padding are skipped and reported | `torch/_modules.SFConv2d` |
+| Modules not converted | Conv1d/3d, transposed convs, MultiheadAttention, RNNs, Bilinear: skipped with a reason; custom attention uses `sft.matmul` | `torch/_modules.convert` |
+| `last_status` | process-wide registry keyed by layer name; `last_status(model)` filters by that model's layers | `torch/_status.py` |
+| Compile backend | retargets `sf::linear` / `sf::matmul` nodes to a `DeviceRunner` on `sf.config(default_device)`; unsupported widths stay host-emulated; inference-only (raises with grad enabled) | `torch/_backend.py` |
+| `autocast` as a decorator | sync functions only; torch function modes are thread-local, so a coroutine or generator would leak the mode across awaits | `torch/_autocast.py` |
+| NaN / ±inf in SF layers | routed through the SF policy before any scale is chosen, like a Stage 1 cast: NaN is `invalid` (device value 0), ±inf is `overflow`; under a non-raising policy ±inf stands in as the largest finite magnitude of the tensor with its sign, so it saturates in the scale the finite values choose | `torch/_core.sanitize` |
+| Conversion and parameters | `SFLinear.from_float` / `SFConv2d` wrap the source layer's own `Parameter` objects (identity, `requires_grad` and training state preserved), so `convert(..., inplace=True)` keeps a pre-existing optimizer connected; a non-inplace `convert` deep-copies first | `torch/_modules.py` |
+| Shared / aliased modules | converted once per distinct module; every alias (including inside nested containers) is replaced by the same SF object; reported under `shared` | `torch/_modules.convert` |
+| Root `Conv2d` | converted like a root `Linear`; an unconvertible one is reported as skipped | `torch/_modules.convert` |
+| Huge float64 values | the bias scale is derived with overflow guarded (`a_bias` from finite ratios, a bias no finite scale can encode is counted as `bias_saturated`); a result outside float64 is `inf`, as in float | `torch/_core.linear` |
+| Request-scoped status | `sft.capture_status()` collects statuses for the current thread or task (context-local), alongside the process-wide `last_status()`; use it for concurrent serving where models share layer names | `torch/_status.capture_status` |
+| Research `sf_quantize` | the spec says to promote it from the superfloat research code; that code is not in this repository, so `quantize` is written from the Stage 1 cast and gated on producing the same codes. Replace or cross-check when the research code is available | `torch/_core.fake_quantize` |

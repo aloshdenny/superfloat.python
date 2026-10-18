@@ -1,0 +1,13 @@
+---
+title: "Running"
+description: "Testing: running"
+---
+
+```
+pytest                       # full per-commit suite, about 8 minutes
+pytest -m "not slow"         # about 40 seconds while developing
+pytest tests/test_3_kernels.py tests/test_review_findings_3.py   # Stage 3 only
+python tools/exhaustive.py --bits 16                              # nightly gate, about 31 minutes
+```
+
+The C kernel backend tests run only when a C compiler (`cc`) is on PATH.

@@ -1,0 +1,14 @@
+---
+title: "Test cost"
+description: "Decision log: test cost"
+---
+
+Every commit: exhaustive sf4..sf10 (sf10 is ~1M pairs per op through the
+Fraction oracle, ~45 s per op) plus sampled sf11..sf16 and hypothesis.
+`pytest -m "not slow"` skips sf9/sf10 for a ~35 s loop while iterating.
+Nightly: `tools/exhaustive.py --bits 16` checks all 4.29e9 pairs per binary
+op with the vectorised reference against an independent int64 oracle
+(2 to 8 minutes per op), ties random samples back to the scalar reference,
+and then sweeps every code against every boundary-class code (both operand
+orders, about 7M pairs per op) through the public scalar operators and the
+Fraction oracle, counting the event transitions it crosses.

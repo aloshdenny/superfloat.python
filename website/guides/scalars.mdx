@@ -1,0 +1,20 @@
+---
+title: "Scalars"
+description: "Stage 1.0: values, arithmetic, comparisons"
+---
+
+(Stage 1.0)
+
+```python
+import sf
+
+a, b = sf.sf16(0.5), sf.sf16(0.25)
+a + b           # sf16(0.75)
+a * b           # sf16(0.125)
+b / a           # sf16(0.5)
+a / b           # SFOverflowError: 2.0 does not fit in sf16
+a < 1           # True, comparisons are exact
+
+with sf.errstate(over="ignore"):     # or just let it saturate, like the chip
+    sf.sf16(0.75) + 0.5              # sf16(0.999969482421875)
+```

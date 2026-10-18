@@ -1,0 +1,52 @@
+---
+title: "PyTorch (Stage 2)"
+description: "Detailed reference: pytorch (stage 2)"
+---
+
+Integrate, do not clone: PyTorch keeps autograd, modules, optimisers, data
+loading and serialisation; SF owns numerics and offload.
+
+* **2.0 `sft.quantize(t, dtype, scale=None|"dynamic"|float)`**: values snapped
+  to SF codes, float storage (float32, which holds every sf4..sf16 value
+  exactly; bfloat16 and float16 do not), the same codes and the same events as
+  `sf.asarray` under every policy, clipped straight-through gradient.
+* **2.1 `sft.convert(model, dtype, scale, headroom)`** swaps `nn.Linear` and
+  `nn.Conv2d` (groups=1, zero padding) for `SFLinear` / `SFConv2d`; everything
+  else stays float. `sft.autocast(dtype)` does the same for a block of code
+  through a `TorchFunctionMode`. Both run the **scale policy**, because real
+  activations exceed ±1: weights get a per-tensor or per-channel scale so the
+  largest weight maps to the largest code; activations get a dynamic per-call
+  scale; the float scales stay on the host. With `headroom="bound"` (default)
+  the activation scale is raised until the L1 bound (`_linalg.matmul_bound`)
+  proves that no partial sum of the accumulation chain and no bias add can
+  saturate, so `saturated` is an exact 0 on every layer, on the host and on the
+  device, and the bits given up are reported as `headroom_bits`.
+  `headroom="none"` uses the raw scale and lets the chain saturate (counted).
+  The chain itself is the Stage 1.1 reference: per-product truncation,
+  per-step saturation, sequential order, then one saturating bias add.
+  Training works through the straight-through gradient (quantization-aware
+  fine-tuning recovers most of sf8's loss in the tests).
+* **Status.** `sft.last_status(model)` is the most recent call of each of the
+  model's layers from a process-wide registry keyed by layer name;
+  `with sft.capture_status() as st:` collects the statuses of one request for
+  the current thread or task only, for concurrent serving. NaN and ±inf in an
+  input, weight or bias go through `sf.errstate` like any Stage 1 cast (NaN is
+  `invalid`, inf is `overflow`), never silently through the arithmetic.
+  `sft.convert` keeps the source layers' own parameters (identity,
+  `requires_grad`, train/eval state), so an optimizer built before an in-place
+  conversion keeps working, and shared layers are converted once.
+* **2.2 `torch.compile(model, backend="superfloat")`**: every `sf::linear` /
+  `sf::matmul` node the target supports (sf16 on Atreides v1) runs through the
+  Stage 1.1 heavy-op path (pre-flight gate, launch, `result.status`); other
+  widths are host-emulated; everything else stays on the CPU. Compiled output
+  equals emulated output bit for bit by construction (same core function,
+  different runner). `sft.compile_report()` lists what went where and flags
+  float linear algebra that was never converted. The backend is inference-only;
+  train with the eager emulation.
+* **2.3** (Atreides as a PyTorch `PrivateUse1` device) is deferred, as the spec
+  recommends, until 2.2 coverage is high.
+
+Measured on scikit-learn digits (tests): MLP float 0.947, sf16 0.947, sf12
+0.950, sf8 0.924; CNN float 0.980, sf16 0.980, sf12 0.982. Without headroom
+sf16 drops to 0.18 because the accumulation saturates, which is why `bound` is
+the default.

@@ -1,0 +1,15 @@
+---
+title: "Beyond the spec (decisions taken here; see NOTES.md)"
+description: "Detailed reference: beyond the spec (decisions taken here; see notes.md)"
+---
+
+* Divide by zero and sqrt of a negative return the spec's *proposed* device
+  values (sign(a) × max, 0 for 0/0, 0 for sqrt of a negative) when the policy is
+  not `raise`. Change `_reference.div` / `_reference.sqrt` if hardware decides otherwise.
+* `sf.sqrt` ships now (it is the invalid-event example in section 3.2); the
+  rest of 1.1.4 waits for arrays.
+* Strings are accepted by the constructor only (`sf.sf16("0.1")` quantizes the
+  exact decimal 1/10), never as operator literals. A foreign operand such as
+  `x + "0.25"` raises `SFTypeError`.
+* Values are immutable; `x ** n` stops as soon as the chain reaches 0, so it is
+  cheap for any `n`.

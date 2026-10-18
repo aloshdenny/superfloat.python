@@ -1,0 +1,152 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Superfloat Python",
+  "colors": {
+    "primary": "#0D9373",
+    "light": "#55D799",
+    "dark": "#0D9373"
+  },
+  "favicon": "/favicon.svg",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guides",
+        "icon": "book-open",
+        "groups": [
+          {
+            "group": "Start here",
+            "pages": [
+              "index",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Using sf",
+            "pages": [
+              "guides/scalars",
+              "guides/arrays",
+              "guides/pytorch",
+              "guides/kernels",
+              "guides/errors"
+            ]
+          },
+          {
+            "group": "Tours",
+            "pages": [
+              "tours/stage_1_0_tour",
+              "tours/stage_1_1_tour",
+              "tours/stage_2_tour",
+              "tours/stage_3_tour"
+            ]
+          },
+          {
+            "group": "Project",
+            "pages": [
+              "status"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API reference",
+        "icon": "code",
+        "groups": [
+          {
+            "group": "Semantics",
+            "pages": [
+              "reference/semantics"
+            ]
+          },
+          {
+            "group": "Stages 1 to 3",
+            "pages": [
+              "reference/scalars",
+              "reference/arrays",
+              "reference/config",
+              "reference/torch",
+              "reference/kernels"
+            ]
+          },
+          {
+            "group": "Types",
+            "pages": [
+              "reference/errors",
+              "reference/objects"
+            ]
+          },
+          {
+            "group": "Hardware",
+            "pages": [
+              "reference/hardware"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Testing",
+        "icon": "flask",
+        "groups": [
+          {
+            "group": "Testing",
+            "pages": [
+              "testing/matrix",
+              "testing/test-files",
+              "testing/running"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Internals",
+        "icon": "gear",
+        "groups": [
+          {
+            "group": "Detailed reference",
+            "pages": [
+              "details/install",
+              "details/what-is-in-the-package",
+              "details/semantics",
+              "details/arrays-and-the-device-path",
+              "details/pytorch",
+              "details/kernels",
+              "details/error-policy",
+              "details/beyond-the-spec",
+              "details/status-of-the-stage-1-1-gate"
+            ]
+          },
+          {
+            "group": "Decisions",
+            "pages": [
+              "decisions/overview",
+              "decisions/representation",
+              "decisions/semantics-not-fixed-by-the-spec",
+              "decisions/stage-1-1-decisions",
+              "decisions/stage-2-decisions",
+              "decisions/stage-3-decisions",
+              "decisions/immutability",
+              "decisions/error-policy-mechanics",
+              "decisions/still-open-for-the-compiler-hardware-teams",
+              "decisions/design-rule-for-the-device-path-decide-on-the-host-launch-only-the-undecidable",
+              "decisions/review-history",
+              "decisions/test-cost"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/aloshdenny/superfloat.python"
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/aloshdenny/superfloat.python"
+    }
+  }
+}

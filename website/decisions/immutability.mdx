@@ -1,0 +1,8 @@
+---
+title: "Immutability"
+description: "Decision log: immutability"
+---
+
+`SFScalar.__setattr__` allows `_code` to be set once (construction) and
+rejects everything else; `__delattr__` always rejects. Hash and equality can
+therefore never change after a value is used as a dict key.

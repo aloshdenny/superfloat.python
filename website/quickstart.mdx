@@ -1,0 +1,14 @@
+---
+title: "Install and run"
+description: "Install sf, run the tests, run the tours"
+---
+
+```
+pip install -e ".[test]"             # library + test tools
+pip install -e ".[torch]"            # add PyTorch for sf.torch
+pytest                               # the full per-commit suite (about 8 min)
+pytest -m "not slow"                 # quick run while developing (about 40 s)
+python examples/stage_3_tour.py      # see the kernels in action
+```
+
+Only NumPy is required. The C kernel back end needs a C compiler (`cc`).

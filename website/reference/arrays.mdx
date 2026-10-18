@@ -1,0 +1,70 @@
+---
+title: "Arrays and the device path (Stage 1.1)"
+description: "3. Stage 1.1: arrays, reductions, device path"
+---
+
+An `SFArray` holds an int64 NumPy array of codes, a dtype and a placement
+(`"host"` or a device name). Every scalar rule applies element by element
+with NumPy broadcasting.
+
+## Construction
+
+| Name | Description |
+|---|---|
+| `sf.array(obj, dtype=None, device="host")` | From nested lists, NumPy arrays, SF scalars or SF arrays. `dtype=` is required unless the input already holds SF values. Quantizes through the policy; a 0-d input gives a scalar. |
+| `sf.asarray(obj, dtype=None, device="host")` | Like `array` but returns the input itself when it already matches. |
+| `sf.zeros(shape, dtype="sf16", device="host")` | Zeros. |
+| `sf.ones(shape, ...)` | Filled with the literal 1, which does not fit: raises by default, saturates to max under `over="ignore"`. |
+| `sf.full(shape, value, dtype=None, device="host")` | Filled with `value`, quantized through the policy. |
+| `sf.from_codes(codes, dt, device="host")` | From an integer code array (validated in the target width). |
+| `sf.from_code(code, dt)`, `sf.from_bits(bits, dt)` | Also accept arrays. |
+
+## Array attributes and methods
+
+| Name | Description |
+|---|---|
+| `a.codes`, `a.bits` | Integer codes / sign-magnitude patterns as NumPy arrays. |
+| `a.dtype`, `a.shape`, `a.ndim`, `a.size`, `a.device` | As in NumPy, plus placement. |
+| `a.numpy()`, `a.tolist()` | Values as floats. |
+| `a.astype(dt)` | Same as `sf.cast`. |
+| `a.to(device)` | Move to `"host"` or a device by name. |
+| `a.copy()`, `a.reshape(...)`, `a.flatten()`, `a.T`, `a.transpose(*axes)` | Data movement; views where NumPy would give a view. |
+| `a[idx]` | NumPy indexing and slicing (read only). |
+| `a.sum(axis=None)`, `a.max(axis=None)`, `a.min(axis=None)`, `a.argmax(axis=None)`, `a.argmin(axis=None)` | Reductions (see below). |
+| `a.any()`, `a.all()` | On the codes. |
+| `a.status` | `SFStatus` of the heavy op that produced `a`, else `None`. |
+
+## Reductions and linear algebra
+
+| Name | Description |
+|---|---|
+| `sf.sum(x, axis=None)` | Saturating sum in the target's accumulation order (sequential from index 0, saturating at each step). |
+| `sf.dot(a, b)` | 1-D dot as a sequential chain of `fma`. Bit-identical to the scalar chain. |
+| `sf.matmul(a, b)`, `a @ b` | NumPy rules for 1-D operands and batching; each output equals `dot` of its row and column. Shape errors before any launch. |
+| `sf.addmm(a, b, d)` | `a @ b` then one saturating add of `d`. |
+| `sf.max(x, axis=None)`, `sf.min(x, axis=None)`, `sf.argmax`, `sf.argmin` | Exact selection, no events. |
+
+## Device path
+
+| Name | Description |
+|---|---|
+| `device="atreides"` | Placement that makes an array heavy. Any arithmetic op with a heavy operand runs on the target and returns an array with `.status`. Only sf16 is accepted on Atreides. |
+| `sf.devices()` | Names of registered targets: `host`, `atreides` (mock, no flags), `atreides-flags` (mock with sticky flags), `atreides-sim` (simulator), `atreides-hw` (hardware stub). |
+| `sf.device(name="atreides-sim")`, `sf.get_device(name)` | The target object. |
+| `sf.register_device(device)` | Add or replace a target (the simulator or hardware when they arrive). |
+| `sf.Device`, `sf.MockAtreides`, `sf.SimulatorAtreides`, `sf.HardwareAtreides` | Target classes. |
+
+**Pre-flight** (decide on the host, launch only the undecidable). Before
+every heavy op the host runs: static checks (shape, dtype, limits); known
+answers (`div0` and `invalid` read off the inputs and handled before
+launch); the range bound (if no element can saturate, launch with
+`status.exact=True`; if every element must saturate, refuse under
+`preflight="raise"`); and for the undecidable band a golden-vector probe
+whose hit is a suspicion (`SFPreflightWarning` by default).
+
+**Status honesty.** With no device flags, `status.saturated` for an
+elementwise op is an upper bound from scanning for ±max (`exact=False`);
+for a reduction it is `None` (unknown). With flags, or under
+`sf.config(status="replay")`, counts are exact.
+
+---

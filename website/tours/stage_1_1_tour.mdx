@@ -1,0 +1,70 @@
+---
+title: "Stage 1.1 tour"
+description: "examples/stage_1_1_tour.py, runnable end to end"
+---
+
+Run with `python examples/stage_1_1_tour.py`.
+
+```python
+"""A tour of Stage 1.1: arrays, linear algebra and the device path.
+Run: python examples/stage_1_1_tour.py"""
+import warnings
+
+import numpy as np
+
+import sf
+
+x = sf.array([0.10, -0.25, 0.50], dtype=sf.sf16)      # host array: light
+print("x =", x)
+print("x + 0.25 =", x + 0.25, "| x * x =", x * x, "| x > 0 =", x > 0)
+print("sum:", x.sum(), "| max:", x.max(), "| sqrt|x|:", sf.sqrt(abs(x)))
+
+m = sf.array([[0.5, 0.25], [0.125, -0.5]], dtype=sf.sf16)
+v = sf.array([0.5, 0.5], dtype=sf.sf16)
+print("m @ v =", m @ v, "| dot(v, v) =", sf.dot(v, v))
+
+rng = np.random.default_rng(0)
+with sf.errstate(under="ignore"):
+    h = sf.asarray(rng.uniform(-0.2, 0.2, (64, 128)), dtype=sf.sf16, device="atreides")
+    w = sf.asarray(rng.uniform(-0.2, 0.2, (128, 32)), dtype=sf.sf16, device="atreides")
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    y = h @ w                                            # heavy: built-in kernel on the target
+print("y.status =", y.status, "| device:", y.device, "| shape:", y.numpy().shape)
+for c in caught:
+    print("  warning:", c.category.__name__, "-", c.message)
+
+with sf.errstate(over="ignore"):
+    same = np.array_equal((h.to("host") @ w.to("host")).codes, y.codes)
+print("host and target bit-identical:", same)
+
+small = sf.full((4, 4), 0.01, sf.sf16, device="atreides")
+print("proven safe, no scan:", (small @ small).status)
+
+big = sf.full((4, 4), 0.9, sf.sf16, device="atreides")
+before = sf.get_device("atreides").launches
+try:
+    big + big                                            # provable on the host: refused, no launch
+except sf.SFOverflowError as e:
+    print("pre-flight refused (proof):", e)
+with sf.config(suspect="verify"):                        # probe hit, verified by exact host replay
+    try:
+        big @ big
+    except sf.SFOverflowError as e:
+        print("pre-flight refused (replay):", e)
+print("launches during the refused ops:", sf.get_device("atreides").launches - before)
+s = sf.array([0.75, 0.75, -0.75], dtype=sf.sf16, device="atreides").sum()
+print("reduction without flags:", s.status, "| ok:", s.status.ok)
+with sf.config(status="replay"), sf.errstate(over="ignore"):
+    s = sf.array([0.75, 0.75, -0.75], dtype=sf.sf16, device="atreides").sum()
+print("same, with host replay:  ", s.status, "| ok:", s.status.ok)
+
+a = sf.array([0.1, 0.2, 0.3], dtype=sf.sf16)
+b = sf.array([0.5, 0, 0.6], dtype=sf.sf16)
+print("masked div never raises:", sf.div(a, b, where=b != 0))
+try:
+    sf.where(b != 0, a / b, 0)
+except sf.SFZeroDivisionError as e:
+    print("sf.where evaluates both branches:", type(e).__name__)
+
+```

@@ -1,0 +1,56 @@
+---
+title: "Review history"
+description: "Decision log: review history"
+---
+
+A fourth independent review (Stage 3 drop, 2026-10-18) found: exact literal
+comparisons lowered as "code * denominator op numerator", which overflows
+int64 for small or huge literals (`v < 0.0001` true for 0.5); writes through
+a transposed or strided device view silently lost; the C backend continuing
+after a device fault, so partial writes differed from the interpreter; user
+parameter names interpolated into the generated C (a pointer called `o`
+collided with a loop local); and the shared-memory limit enforced in elements
+rather than bytes (64 KiB instead of 32 KiB). Also two risks: the C build
+cache keyed on the emitted source only, and `static` shared scratch in the
+generated C. All fixed and covered by `tests/test_review_findings_3.py`.
+The fixes: a literal comparison is now decided at trace time with Python
+integers (`k < q` becomes `k < ceil(q)` and so on, constants folded when the
+threshold leaves the format's range), so no backend ever multiplies at run
+time; non-contiguous pointer arguments are refused before launch with
+`SFLaunchError`; a fault returns from the C kernel at once and a faulting
+store writes nothing in either backend (writes by earlier ops and earlier
+programs stay visible, which is now the contract); every C argument is
+`arg<i>`; `Limits.max_shared` is bytes; the build key covers the emitted C,
+the builtins header, the compiler banner and the flags; shared scratch is a
+per-program local.
+
+A third independent review (Stage 2 drop, 2026-10-18) found: NaN silently
+treated as 0 in SF layers and a raw `ValueError` for a NaN bias; conversion
+re-creating parameters (losing `requires_grad`, training state, and the link
+to a pre-existing optimizer); shared layers converted only under their first
+name; a root `Conv2d` left unchanged; and an intermediate overflow in the
+bias scale search for a float64 bias near the maximum. All fixed and covered
+by `tests/test_review_findings_2.py`; `sft.capture_status()` addresses the
+process-wide status registry the review flagged for concurrent serving.
+
+A second independent review (Stage 1.1 drop, 2026-10-18) found: a probe
+sample promoted to a "certain" refusal; the ±max scan presented as a
+saturation count for reductions (false in both directions); array casts
+reversing the sign of huge inputs and `from_codes` accepting out-of-range
+unsigned codes; `sf.config` not re-entrant and not async-aware; masked `div`
+bypassing the device path; and `offload_threshold` broken for `sum`, `dot`
+and `@`. All fixed and covered by `tests/test_review_findings_1_1.py`; the
+README now describes 1.1 as a host/mock implementation with the hardware gate
+still open.
+
+## First review
+
+An independent review of the first Stage 1.0 drop (2026-10-17) found: mutable
+scalars; the decorator sharing one token list across threads and not wrapping
+coroutines; plain `TypeError` for foreign operands; NumPy ints rejected by
+`**`, `from_code`, `from_bits`; unbounded `x ** n`; sampled rather than
+exhaustive single-value tests on sf14..sf16; and the nightly oracle being too
+close to the implementation. All are fixed and covered by
+`tests/test_review_findings.py`; the nightly tool now adds a Fraction-oracle
+boundary sweep through the public operators, and `.github/workflows/ci.yml`
+automates the per-commit and nightly gates.

@@ -1,0 +1,20 @@
+---
+title: "Arrays and the device"
+description: "Stage 1.1: arrays, matmul, the pre-flight gate"
+---
+
+(Stage 1.1)
+
+```python
+x = sf.array([0.10, -0.25, 0.50], dtype=sf.sf16)       # lives on the host
+h = sf.asarray(inputs,  dtype=sf.sf16, device="atreides")
+w = sf.asarray(weights, dtype=sf.sf16, device="atreides")
+y = h @ w                                              # runs on the device
+y.status                                               # what saturated, if anything
+y.numpy()                                              # back to floats
+```
+
+Before anything is sent to the device, `sf` checks on the host whether the
+answer is already known (a divide by zero, a result that must saturate, a
+range that cannot saturate). Anything the host can decide never reaches the
+chip. This is the rule the whole device path follows.

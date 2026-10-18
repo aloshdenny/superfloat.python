@@ -1,0 +1,17 @@
+---
+title: "Status of the Stage 1.1 gate"
+description: "Detailed reference: status of the stage 1.1 gate"
+---
+
+Stage 1.1 is a **host and mock implementation**. `MockAtreides` runs the same
+vectorised reference as the host, so "host == mock" proves the routing,
+placement, pre-flight and status machinery, not hardware correctness. The
+spec's gate ("host and GPU bit-identical on every op") stays open until a
+simulator or silicon is registered with `sf.register_device`, tested against
+the Fraction oracle in `tests/oracle.py`, and its event reporting (flags or
+not, accumulation order, accumulator width, `mat_fma` meaning) is confirmed.
+Stage 2 runs on the same mock, so the same caveat applies to the
+`superfloat` backend. Stage 3 adds a simulator (`atreides-sim`) with two
+independent backends that agree bit for bit, which is the strongest check
+available without silicon; `atreides-hw` is a stub until the driver exists.
+Stage 1.2 (diagnostics) and Stage 2.3 are deferred.

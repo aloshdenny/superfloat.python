@@ -1,0 +1,38 @@
+---
+title: "What is in the package"
+description: "Detailed reference: what is in the package"
+---
+
+| Module | Role |
+|---|---|
+| `sf/_format.py` | Format constants for each width: scale, max code, LSB, cast thresholds, sign-magnitude bit packing |
+| `sf/_reference.py` | **Bit-exact host reference.** Pure functions on integer codes returning `(code, event)`. Never raises for numeric events |
+| `sf/_errstate.py` | `sf.seterr` / `sf.geterr` / `sf.errstate`, context-local (threads and asyncio safe). Turns an event into raise / warn / ignore |
+| `sf/_errors.py` | The exception and warning hierarchy of spec section 3.2 |
+| `sf/_scalar.py` | `sf.sf4` .. `sf.sf16` classes: construction, promotion, literals, operators, comparisons, unsupported ops |
+| `sf/_functions.py` | `sf.cast`, `sf.info`, `sf.fma`, `sf.div`, `sf.sqrt`, `sf.where`, `sf.from_code`, `sf.from_bits`, `sf.dtype` |
+| `sf/_vectorized.py` | The same ops over NumPy int64 code arrays: host arrays, the mock target and the nightly tool all run this |
+| `sf/_array.py` | `SFArray`: construction, indexing, broadcasting, elementwise ops, reductions, `dot`, `matmul`, `addmm`, and the light/heavy dispatch |
+| `sf/_linalg.py` | Reference accumulation: `sum`, `dot`, `@` as sequential saturating fma chains; the spec 3.4 matmul bound |
+| `sf/_device.py` | `Device` interface, `MockAtreides` (sf16 only, no flags, like v1), `register_device` for the simulator and hardware |
+| `sf/_preflight.py` | The gate every heavy op passes before launch: known answers, range bound, golden-vector probe |
+| `sf/_status.py` | `SFStatus(saturated, div0, invalid, exact)` |
+| `sf/_config.py` | `sf.config(preflight=, suspect=, probe=, probe_size=, status=, offload_threshold=)` |
+| `sf/torch/_core.py` | Torch-free chip-exact SF linear / matmul with the scale policy; one function for eager, autocast and the compile backend, parameterised by a runner (host reference or device) |
+| `sf/torch/_ops.py` | `sf::quantize`, `sf::linear`, `sf::matmul` custom ops with straight-through gradients; one opaque node each in a compiled graph |
+| `sf/torch/_modules.py` | `SFLinear`, `SFConv2d` (unfold + SF linear), `sft.convert`, the conversion report |
+| `sf/torch/_autocast.py` | `sft.autocast`: `F.linear`, `F.conv2d`, `matmul`/`@`/`mm`/`bmm` routed to the SF ops inside a block |
+| `sf/torch/_backend.py` | `torch.compile(..., backend="superfloat")`: SF nodes retargeted to the device runner, CPU fallback for the rest, per-graph coverage report |
+| `sf/torch/_status.py` | `sft.last_status()`: per-layer saturation, underflow, headroom and scale |
+| `sf/kernels/_ir.py` | SF IR: typed SSA values with static shapes, one op list per traced kernel, the trace context |
+| `sf/kernels/_sym.py` | Traced values: operators, exact literal comparisons, pointers, shared buffers; the lockstep rule (`if` on data raises) |
+| `sf/kernels/_lang.py` | The kernel language: `program_id`, `thread_idx`, `arange`, `load`/`store`, `shared`, `barrier`, `predicate`, `dot`, `sum`, ... |
+| `sf/kernels/_interp.py` | The simulator: NumPy interpreter of SF IR on the Stage 1.1 vectorised reference, exact events, cost-model cycles |
+| `sf/kernels/_cgen.py` | The C backend: SF IR to C on `sf16_builtins.h`, compiled with `cc`, loaded with ctypes |
+| `sf/kernels/sf16_builtins.h` | Reference C for the `__sf16_*` builtins the custom Clang will provide (spec section 11) |
+| `sf/kernels/_runtime.py` | `atreides-sim` and `atreides-hw` targets, launch limits, the kernel cache, `LaunchResult`, `sf.autotune` |
+
+The split that matters: **semantics live in `_reference.py` only.** The scalar
+classes are a thin layer that promotes operands, calls the reference, and hands
+the event to the error policy. A compiler backend or the device is correct when
+it agrees with `_reference.py` on codes and on events.

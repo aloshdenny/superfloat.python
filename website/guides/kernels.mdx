@@ -1,0 +1,27 @@
+---
+title: "Writing kernels"
+description: "Stage 3: thread and block kernels on the simulator"
+---
+
+(Stage 3)
+
+```python
+@sf.jit                                                # Triton style
+def axpy(a, x_ptr, y_ptr, out_ptr, n, BLOCK: sf.constexpr):
+    offs = sf.program_id(0) * BLOCK + sf.arange(0, BLOCK)
+    mask = offs < n
+    x = sf.load(x_ptr + offs, mask=mask)
+    y = sf.load(y_ptr + offs, mask=mask)
+    sf.store(out_ptr + offs, sf.fma(a, x, y), mask=mask)
+
+dev = sf.device("atreides-sim")
+x, y, out = dev.upload(xs), dev.upload(ys), dev.alloc(n)
+r = axpy[(sf.cdiv(n, 256),)](sf.sf16(0.75), x, y, out, n, BLOCK=256)
+r.status, r.cycles                                     # exact events, simulated cycles
+```
+
+There is also a CUDA-style `@sf.kernel` with `thread_idx`, shared memory and
+barriers. Kernels run on a simulator today (`atreides-sim`) which has two
+independent back ends, a Python interpreter and generated C, that must agree
+bit for bit. `atreides-hw` is reserved for the real chip and waits for its
+driver.
