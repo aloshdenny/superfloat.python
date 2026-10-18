@@ -35,6 +35,28 @@ _loaded: dict[str, ctypes.CDLL] = {}
 _CMP_C = {"lt": "<", "le": "<=", "gt": ">", "ge": ">=", "eq": "==", "ne": "!="}
 
 
+_FLAGS = ["-O2", "-shared", "-fPIC", "-std=c99"]
+_toolchains: dict[str, str] = {}
+
+
+def _header_text() -> str:
+    with open(os.path.join(_HERE, "sf16_builtins.h")) as f:
+        return f.read()
+
+
+def _toolchain(cc: str) -> str:
+    """Identity of the compiler (its version banner), cached per process."""
+    tc = _toolchains.get(cc)
+    if tc is None:
+        try:
+            proc = subprocess.run([cc, "--version"], capture_output=True, text=True)
+            tc = (proc.stdout or proc.stderr).splitlines()[0] if (proc.stdout or proc.stderr) else cc
+        except OSError:
+            tc = cc
+        _toolchains[cc] = tc
+    return tc
+
+
 def compiler() -> str | None:
     for cc in (os.environ.get("CC"), "cc", "gcc", "clang"):
         if cc and shutil.which(cc):
@@ -73,13 +95,18 @@ class Emitter:
     def __init__(self, ir: KernelIR) -> None:
         self.ir = ir
         self.lines: list[str] = []
+        # user parameter names never reach the C: every argument is mangled to
+        # ``arg<i>`` so a kernel parameter called ``o``, ``e``, ``C`` or ``px``
+        # cannot collide with the emitter's own locals
         self.ptr_names = {}
         self.scalar_names = {}
-        for p in ir.params:
+        self.cname = {}
+        for i, p in enumerate(ir.params):
+            self.cname[p.name] = f"arg{i}"
             if p.kind == "ptr":
-                self.ptr_names[p.vid] = p.name
+                self.ptr_names[p.vid] = f"arg{i}"
             elif p.kind in ("sf", "int"):
-                self.scalar_names[p.vid] = p.name
+                self.scalar_names[p.vid] = f"arg{i}"
 
     def w(self, s: str) -> None:
         self.lines.append(s)
@@ -98,17 +125,17 @@ class Emitter:
         self.w("#include <string.h>")
         self.w("typedef struct { int64_t programs, ops, lane_ops, loads, stores, macs, "
                "sat, under, div0, invalid, barriers, fault; } sf_counters;")
-        args = [f"int64_t *{p.name}, int64_t {p.name}__size" for p in ptrs]
-        args += [f"int64_t {p.name}" for p in scalars]
+        args = [f"int64_t *{self.cname[p.name]}, int64_t {self.cname[p.name]}__size" for p in ptrs]
+        args += [f"int64_t {self.cname[p.name]}" for p in scalars]
         args += ["int64_t gx, int64_t gy, int64_t gz", "sf_counters *C"]
         self.w(f"void sf_kernel({', '.join(args)}) {{")
-        for s in ir.shared:
-            self.w(f"  static int64_t shared{s.id}[{max(s.size, 1)}];")
         self.w("  for (int64_t pz = 0; pz < gz; pz++) for (int64_t py = 0; py < gy; py++) "
                "for (int64_t px = 0; px < gx; px++) {")
         self.w("    C->programs++;")
         for s in ir.shared:
-            self.w(f"    memset(shared{s.id}, 0, sizeof(shared{s.id}));")
+            # per program and per invocation (a local, not a static): concurrent launches
+            # of one compiled kernel do not share scratch
+            self.w(f"    int64_t shared{s.id}[{max(s.size, 1)}]; memset(shared{s.id}, 0, sizeof(shared{s.id}));")
         for op in ir.ops:
             self.op(op)
         self.w("  }")
@@ -154,7 +181,7 @@ class Emitter:
             if op.attrs["kind"] == "ptr":
                 w(f"    (void)0;")
             else:
-                w(f"    v{r.id}[0] = {op.attrs['param']};")
+                w(f"    v{r.id}[0] = {self.cname[op.attrs['param']]};")
             return
         if n == "const":
             v = op.attrs["value"]
@@ -192,7 +219,7 @@ class Emitter:
             loop(f"v{r.id}[e] = {a(0)} {sym} {a(1)};")
             return
         if n in ("idiv", "imod"):
-            w(f"    for (int64_t e = 0; e < {r.size}; e++) {{ int64_t d = {a(1)}; if (d == 0) {{ C->fault = 1; d = 1; }}"
+            w(f"    for (int64_t e = 0; e < {r.size}; e++) {{ int64_t d = {a(1)}; if (d == 0) {{ C->fault = 1; return; }}"
               f" int64_t q = {a(0)} / d; int64_t m = {a(0)} % d; if (m != 0 && ((m < 0) != (d < 0))) {{ q--; m += d; }}"
               f" v{r.id}[e] = {'q' if n == 'idiv' else 'm'}; }}")
             return
@@ -206,7 +233,7 @@ class Emitter:
             loop(f"v{r.id}[e] = {a(0)} {_CMP_C[op.attrs['op']]} {a(1)};")
             return
         if n == "cmp_lit":
-            loop(f"v{r.id}[e] = {a(0)} * {op.attrs['den']}LL {_CMP_C[op.attrs['op']]} {op.attrs['num']}LL;")
+            loop(f"v{r.id}[e] = {a(0)} {_CMP_C[op.attrs['op']]} {op.attrs['value']}LL;")
             return
         if n == "bool_to_int":
             loop(f"v{r.id}[e] = {a(0)} ? 1 : 0;")
@@ -266,7 +293,7 @@ class Emitter:
                 live = f"({live} && v{op.pred.id}[{_index(op.pred.shape, r.shape)}])"
             w(f"    C->loads++;")
             w(f"    for (int64_t e = 0; e < {r.size}; e++) {{ if ({live}) {{ int64_t o = v{offs.id}[{_index(offs.shape, r.shape)}];"
-              f" if (o < 0 || o >= {name}__size) {{ C->fault = 2; v{r.id}[e] = 0; }} else v{r.id}[e] = {name}[o]; }}"
+              f" if (o < 0 || o >= {name}__size) {{ C->fault = 2; return; }} v{r.id}[e] = {name}[o]; }}"
               f" else v{r.id}[e] = v{other.id}[{_index(other.shape, r.shape)}]; }}")
             return
         if n == "store":
@@ -278,8 +305,11 @@ class Emitter:
             if op.pred is not None:
                 live = f"({live} && v{op.pred.id}[{_index(op.pred.shape, shape)}])"
             w(f"    C->stores++;")
+            # a faulting store writes nothing: check every live offset, then write
             w(f"    for (int64_t e = 0; e < {size}; e++) {{ if ({live}) {{ int64_t o = v{offs.id}[{_index(offs.shape, shape)}];"
-              f" if (o < 0 || o >= {name}__size) C->fault = 3; else {name}[o] = v{val.id}[{_index(val.shape, shape)}]; }} }}")
+              f" if (o < 0 || o >= {name}__size) {{ C->fault = 3; return; }} }} }}")
+            w(f"    for (int64_t e = 0; e < {size}; e++) {{ if ({live}) {{ int64_t o = v{offs.id}[{_index(offs.shape, shape)}];"
+              f" {name}[o] = v{val.id}[{_index(val.shape, shape)}]; }} }}")
             return
         if n == "shared_load":
             idx, mask = op.args
@@ -288,7 +318,7 @@ class Emitter:
             if op.pred is not None:
                 live = f"({live} && v{op.pred.id}[{_index(op.pred.shape, r.shape)}])"
             w(f"    for (int64_t e = 0; e < {r.size}; e++) {{ if ({live}) {{ int64_t o = v{idx.id}[{_index(idx.shape, r.shape)}];"
-              f" if (o < 0 || o >= {buf.size}) {{ C->fault = 4; v{r.id}[e] = 0; }} else v{r.id}[e] = shared{buf.id}[o]; }}"
+              f" if (o < 0 || o >= {buf.size}) {{ C->fault = 4; return; }} v{r.id}[e] = shared{buf.id}[o]; }}"
               f" else v{r.id}[e] = 0; }}")
             return
         if n == "shared_store":
@@ -300,10 +330,12 @@ class Emitter:
             if op.pred is not None:
                 live = f"({live} && v{op.pred.id}[{_index(op.pred.shape, shape)}])"
             # lockstep semantics: every lane reads before any lane writes
-            w(f"    {{ static int64_t tmp[{max(size, 1)}]; char lv[{max(size, 1)}];"
+            w(f"    {{ int64_t tmp[{max(size, 1)}]; char lv[{max(size, 1)}];"
               f" for (int64_t e = 0; e < {size}; e++) {{ lv[e] = {live}; tmp[e] = v{val.id}[{_index(val.shape, shape)}]; }}"
               f" for (int64_t e = 0; e < {size}; e++) {{ if (lv[e]) {{ int64_t o = v{idx.id}[{_index(idx.shape, shape)}];"
-              f" if (o < 0 || o >= {buf.size}) C->fault = 5; else shared{buf.id}[o] = tmp[e]; }} }} }}")
+              f" if (o < 0 || o >= {buf.size}) {{ C->fault = 5; return; }} }} }}"
+              f" for (int64_t e = 0; e < {size}; e++) {{ if (lv[e]) {{ int64_t o = v{idx.id}[{_index(idx.shape, shape)}];"
+              f" shared{buf.id}[o] = tmp[e]; }} }} }}")
             return
         if n == "barrier":
             w("    C->barriers++;")
@@ -352,7 +384,10 @@ def build(ir: KernelIR) -> ctypes.CDLL:
     if cc is None:
         raise SFUnsupportedError("the C kernel backend needs a C compiler (cc, gcc or clang) on PATH")
     src = emit_c(ir)
-    key = hashlib.sha256(src.encode()).hexdigest()[:24]
+    # the key covers everything the .so depends on: the emitted C, the builtins header,
+    # the compiler and its flags.  A revised header or toolchain never reuses an old build
+    key = hashlib.sha256("\0".join([src, _header_text(), cc, _toolchain(cc), " ".join(_FLAGS)])
+                         .encode()).hexdigest()[:24]
     with _lock:
         lib = _loaded.get(key)
         if lib is not None:
@@ -363,7 +398,7 @@ def build(ir: KernelIR) -> ctypes.CDLL:
         if not os.path.exists(so_path):
             with open(c_path, "w") as f:
                 f.write(src)
-            cmd = [cc, "-O2", "-shared", "-fPIC", "-std=c99", f"-I{_HERE}", c_path, "-o", so_path, "-lm"]
+            cmd = [cc, *_FLAGS, f"-I{_HERE}", c_path, "-o", so_path, "-lm"]
             proc = subprocess.run(cmd, capture_output=True, text=True)
             if proc.returncode != 0:
                 raise SFCompileError(f"C backend: {cc} failed\n{proc.stderr}\n--- IR ---\n{ir.dump()}")

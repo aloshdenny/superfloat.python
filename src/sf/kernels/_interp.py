@@ -196,9 +196,8 @@ class Interpreter:
             return k
         if n == "cmp":
             return _CMP[op.attrs["op"]](a[0], a[1])
-        if n == "cmp_lit":
-            num, den = op.attrs["num"], op.attrs["den"]
-            return _CMP[op.attrs["op"]](np.asarray(a[0]) * den, num)
+        if n == "cmp_lit":                                     # integer threshold, decided at trace time
+            return _CMP[op.attrs["op"]](np.asarray(a[0]), np.int64(op.attrs["value"]))
         if n in ("maximum", "minimum"):
             return (np.maximum if n == "maximum" else np.minimum)(a[0], a[1])
         if n == "sum":

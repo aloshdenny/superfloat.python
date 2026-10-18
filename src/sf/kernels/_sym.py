@@ -7,6 +7,9 @@ decision per tile, so a per-thread ``if`` on data is never silently wrong.
 """
 from __future__ import annotations
 
+import numbers
+from decimal import Decimal
+
 from typing import Any
 
 import numpy as np
@@ -276,7 +279,7 @@ def as_sf(x, bits: int) -> Sym:
         return const_sf(x._code << (bits - x._fmt.bits), bits)
     if isinstance(x, (bool, np.bool_)):
         raise SFTypeError("expected an sf value, got bool")
-    if isinstance(x, (int, float, np.integer, np.floating)):
+    if isinstance(x, (int, float, np.integer, np.floating, numbers.Rational, Decimal)):
         from .. import _errstate
         from .._format import FORMATS
         fmt = FORMATS[bits]
@@ -312,7 +315,7 @@ def _kind(x) -> str:
         return "bool"
     if isinstance(x, (int, np.integer)):
         return "int"
-    if isinstance(x, (float, np.floating)):
+    if isinstance(x, (float, np.floating, numbers.Rational, Decimal)):   # host literals, as in Stage 1
         return "sf"
     if isinstance(x, Ptr):
         return "ptr"
@@ -397,10 +400,35 @@ def _compare_literal(op, x: Sym, lit, flipped: bool) -> Sym:
         r = {"lt": v > 0, "le": v > 0, "gt": v < 0, "ge": v < 0, "eq": False, "ne": True}[op]
         return const_bool(r, x.shape)
     fmt = x.type.fmt
-    q = v * fmt.scale                                          # exact rational code position
-    # compare integer code against rational q: code op q
-    return Sym(b_.emit("cmp_lit", [x.v], {"op": op, "num": q.numerator, "den": q.denominator},
-                       BOOL, x.shape))
+    q = Fraction(v) * fmt.scale                                # exact rational code position
+    # Lower "code op q" to an integer comparison decided here with Python big ints,
+    # so no backend ever multiplies a code by a denominator at run time:
+    #   k < q  <=> k < ceil(q)      k <= q <=> k <= floor(q)
+    #   k > q  <=> k > floor(q)     k >= q <=> k >= ceil(q)
+    #   k == q / k != q are constant unless q is an integer
+    floor_q = q.numerator // q.denominator
+    ceil_q = -((-q.numerator) // q.denominator)
+    if op in ("eq", "ne"):
+        if q.denominator != 1:
+            return const_bool(op == "ne", x.shape)
+        t = floor_q
+    else:
+        t = {"lt": ceil_q, "le": floor_q, "gt": floor_q, "ge": ceil_q}[op]
+    # every code lies in [-max, max]: a threshold outside it makes the answer constant
+    lo, hi = -fmt.max_code, fmt.max_code
+    if op in ("lt", "le"):
+        if t > hi:
+            return const_bool(True, x.shape)
+        if t < lo:
+            return const_bool(False, x.shape)
+    elif op in ("gt", "ge"):
+        if t < lo:
+            return const_bool(True, x.shape)
+        if t > hi:
+            return const_bool(False, x.shape)
+    elif t < lo or t > hi:
+        return const_bool(op == "ne", x.shape)
+    return Sym(b_.emit("cmp_lit", [x.v], {"op": op, "value": int(t)}, BOOL, x.shape))
 
 
 def reshape(x: Sym, shape: tuple) -> Sym:

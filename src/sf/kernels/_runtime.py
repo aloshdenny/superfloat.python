@@ -41,7 +41,7 @@ class Limits:
     max_block: int = 1024            # lanes per block (thread kernels)
     max_tile: int = 16384            # elements per block value (block kernels)
     max_grid: int = 65535            # programs per grid axis
-    max_shared: int = 32768          # sf16 elements of scratchpad per block
+    max_shared: int = 32768          # bytes of scratchpad per block (16384 sf16 values)
     max_elements: int = 1 << 28      # elements of any one buffer
 
 
@@ -97,12 +97,19 @@ class KernelDevice(_device.MockAtreides):
         biggest = max((v.size for v in ir.values), default=0)
         if biggest > L.max_tile:
             raise SFLaunchError(f"a block value has {biggest} elements; the {self.name} limit is {L.max_tile}")
-        sh = sum(s.size for s in ir.shared)
+        # the hardware budget is in bytes of the device format, whatever the host stores
+        sh = sum(s.size * s.bits // 8 for s in ir.shared)
         if sh > L.max_shared:
-            raise SFLaunchError(f"{sh} elements of shared memory; the {self.name} limit is {L.max_shared}")
+            raise SFLaunchError(f"{sh} bytes of shared memory; the {self.name} limit is {L.max_shared} bytes")
         for name, buf in buffers.items():
             if buf.size > L.max_elements:
                 raise SFLaunchError(f"buffer {name!r} has {buf.size} elements; the limit is {L.max_elements}")
+            if not buf.flags.c_contiguous:
+                # a transposed or strided view has no flat address space for the kernel to
+                # index; a copy would silently drop the kernel's writes, so refuse instead
+                raise SFLaunchError(f"pointer argument {name!r} is a non-contiguous view "
+                                    f"(a transpose or a strided slice); pass a contiguous array, "
+                                    f"e.g. {name}.copy(), and copy the result back yourself")
 
     def launch(self, ir, grid, block, buffers, scalars) -> Counters:
         raise NotImplementedError

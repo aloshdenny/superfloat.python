@@ -254,10 +254,11 @@ IR, same bits:
   with `sf.HardwareAtreides.attach(driver)`.
 * **Before launch** the runtime checks block size (1024 lanes), tile size
   (16384), grid (65535 per axis), shared memory (32 KiB), argument placement
-  (all on one device, no host arrays or raw floats) and widths (sf16 only on
-  the simulator); any of these raises `SFLaunchError` with nothing launched.
-  Out-of-bounds loads and stores and integer division by zero are device
-  faults (`SFDeviceError`).
+  (all on one device, no host arrays or raw floats, no transposed or strided
+  views: copy those first) and widths (sf16 only on the simulator); any of
+  these raises `SFLaunchError` with nothing launched. Out-of-bounds loads and
+  stores and integer division by zero are device faults (`SFDeviceError`):
+  the faulting op writes nothing, earlier writes stay, nothing after it runs.
 * **3.3** `@sf.autotune(configs=[...], key=[...])` runs each config once per
   distinct key and keeps the one with the fewest simulated cycles; every config
   goes through the same bit-exact backend. Traced kernels are cached per
@@ -319,6 +320,7 @@ boundary corners (sf11 to sf16), plus hypothesis property tests.
 | `test_2_1_convert.py` | 2.1 SF linear recomputed through the Stage 1 public API; adversarial no-saturation cases; conv as unfold + linear; convert report; autocast; accuracy gate on digits; QAT recovery |
 | `test_2_2_compile.py` | 2.2 compiled == emulated bit for bit on MLP, CNN and attention; coverage report; unsupported widths; inference-only; pre-flight on the compiled path |
 | `test_review_findings_2.py` | Regressions from the independent Stage 2 review |
+| `test_review_findings_3.py` | Regressions from the independent Stage 3 review |
 | `test_3_kernels.py` | 3.0 copies bit for bit, limits before launch, hardware stub; 3.1 axpy, reduction, matmul match the 1.1 built-ins; 3.2 the same kernels as block kernels, identical bits; predication, lockstep rejection, faults, status policy; the C backend bit- and event-identical to the interpreter; 3.3 cache, profiler, autotune (speed changes, bits do not) |
 
 Results are compared as integer codes, never with float tolerances.

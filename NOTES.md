@@ -82,14 +82,14 @@ them. Each one is a single place to change if the team decides differently.
 | Kernel representation | tracing, not AST rewriting: the Python function runs once per distinct (argument kinds, constexpr values, block) with symbolic arguments and emits SF IR, typed SSA with static shapes. Python control flow over Python ints and `sf.constexpr` runs at trace time and unrolls | `kernels/_ir.py`, `kernels/_runtime.Kernel` |
 | Lockstep rule | `if` / `while` / `and` / `or` / `not` on a traced value raise `SFCompileError` from `Sym.__bool__`; a traced value in `range()` raises from `Sym.__index__`; `sf.where` for values, `with sf.predicate(mask)` for statements | `kernels/_sym.py` |
 | Predication semantics | a predicate masks stores and event counts, never computation (every lane computes, as on the machine). Nested predicates AND. A scalar computed under a vector predicate is one value per lane: the IR broadcasts its shape with the predicate's at trace time, so the interpreter and the C backend agree on it | `kernels/_ir.Builder.emit` |
-| Literals | the Stage 1 rules: an arithmetic literal is quantized at trace time and goes through the policy (`v + 1` raises before anything is launched); comparisons against any host number are exact (`v < 1` always True, `v == 0.1` never) | `kernels/_sym._compare_literal` |
+| Literals | the Stage 1 rules: an arithmetic literal (int, float, Fraction, Decimal, NumPy scalar) is quantized at trace time and goes through the policy (`v + 1` raises before anything is launched); comparisons against any host number are exact (`v < 1` always True, `v == 0.1` never) and are lowered at trace time to one integer threshold per comparison, folded to a constant when the threshold leaves the format's range, so the backends compare integers only | `kernels/_sym._compare_literal` |
 | Store races | two live lanes storing to one address: the interpreter and C keep the lane-order last write, like NumPy fancy assignment. The machine is not specified here; kernels should not rely on it. Shared-memory stores are read-all-then-write-all inside one op (lockstep) | `kernels/_interp.py`, `_cgen.py` |
 | Status and events | the simulator returns an exact `SFStatus` (`exact=True`) with counts per *result that saturated*: an elementwise op counts lanes, a reduction (`sf.sum`, `sf.dot`) counts each output at most once, as the Stage 1.1 built-ins do; a hand-written loop of adds counts each add. Underflow is in `counters.underflow` only, since the spec's `SFStatus` carries none | `kernels/_interp.Counters`, `sf16_builtins.h: sf16_fold` |
 | Policy after launch | invalid, div0, overflow in catalogue order through `errstate`, like the Stage 1.1 heavy ops; `raise` is honoured because the counts are exact | `kernels/_runtime._apply_policy` |
-| Before launch | limits (1024 lanes, 16384-value tiles, 65535 per grid axis, 32 KiB shared, 2^28 elements), argument placement, widths; any failure is `SFLaunchError` with nothing launched. The Stage 1.1 pre-flight (range bound, probe) does not run for user kernels: the kernel body is opaque to it | `kernels/_runtime.KernelDevice.check_launch` |
-| Device faults | out-of-bounds load / store / shared access and integer division by zero stop the launch with `SFDeviceError`; the C backend records a fault code and returns, the interpreter raises at the op | both backends |
+| Before launch | limits (1024 lanes, 16384-value tiles, 65535 per grid axis, 32 KiB of shared memory in device-format bytes, 2^28 elements), argument placement (one device, no host arrays, no non-contiguous views: a transpose or strided slice must be copied first), widths; any failure is `SFLaunchError` with nothing launched. The Stage 1.1 pre-flight (range bound, probe) does not run for user kernels: the kernel body is opaque to it | `kernels/_runtime.KernelDevice.check_launch` |
+| Device faults | out-of-bounds load / store / shared access and integer division by zero stop the launch with `SFDeviceError`. Contract: the faulting op writes nothing; writes by earlier ops and by earlier programs stay visible; nothing after the fault runs. Both backends are tested to leave the same buffer state | both backends |
 | Cycle model | `ceil(lane_ops / 256) + ceil(macs / 4096) + loads + stores + barriers`. A placeholder for autotune ordering, not a performance claim; replace the constants when the hardware team publishes them | `kernels/_interp.Counters.cycles` |
-| C backend | sf16 only (the device format); every value a fixed-size `int64_t` array, every op a loop, events through the `sf16_events` block of `sf16_builtins.h`; compiled with `cc -O2 -std=c99` into a content-addressed cache in the temp directory. The header is the stand-in for the custom Clang's builtins: when the real ones arrive, the emitted C is what to hand them | `kernels/_cgen.py` |
+| C backend | sf16 only (the device format); every value a fixed-size `int64_t` array, every op a loop, events through the `sf16_events` block of `sf16_builtins.h`; user parameter names never appear in the C (`arg<i>`); compiled with `cc -O2 -std=c99` into a cache in the temp directory keyed on the emitted C, the header, the compiler banner and the flags. The header is the stand-in for the custom Clang's builtins: when the real ones arrive, the emitted C is what to hand them | `kernels/_cgen.py` |
 | Hardware target | `atreides-hw` registered now so code can be written against it; raises `SFDeviceError` until `HardwareAtreides.attach(driver)` is given an object with `launch(ir, grid, block, buffers, scalars) -> Counters` | `kernels/_runtime.HardwareAtreides` |
 | Autotune | by simulated cycles, ties by wall time, one tuning run per distinct key; configs supply constexpr names the launch does not pass; the grid may be a function of the chosen config | `kernels/_runtime.autotune` |
 | `from __future__ import annotations` | `BLOCK: sf.constexpr` arrives as a string in such modules; the kernel accepts both the object and the string | `kernels/_runtime._is_constexpr_annotation` |
@@ -156,6 +156,27 @@ Only step 4 costs anything, and it is host-side and small. Step 3 is also
 what `sf.explain` (Stage 1.2) reports per op.
 
 ## Review history
+
+A fourth independent review (Stage 3 drop, 2026-10-18) found: exact literal
+comparisons lowered as "code * denominator op numerator", which overflows
+int64 for small or huge literals (`v < 0.0001` true for 0.5); writes through
+a transposed or strided device view silently lost; the C backend continuing
+after a device fault, so partial writes differed from the interpreter; user
+parameter names interpolated into the generated C (a pointer called `o`
+collided with a loop local); and the shared-memory limit enforced in elements
+rather than bytes (64 KiB instead of 32 KiB). Also two risks: the C build
+cache keyed on the emitted source only, and `static` shared scratch in the
+generated C. All fixed and covered by `tests/test_review_findings_3.py`.
+The fixes: a literal comparison is now decided at trace time with Python
+integers (`k < q` becomes `k < ceil(q)` and so on, constants folded when the
+threshold leaves the format's range), so no backend ever multiplies at run
+time; non-contiguous pointer arguments are refused before launch with
+`SFLaunchError`; a fault returns from the C kernel at once and a faulting
+store writes nothing in either backend (writes by earlier ops and earlier
+programs stay visible, which is now the contract); every C argument is
+`arg<i>`; `Limits.max_shared` is bytes; the build key covers the emitted C,
+the builtins header, the compiler banner and the flags; shared scratch is a
+per-program local.
 
 A third independent review (Stage 2 drop, 2026-10-18) found: NaN silently
 treated as 0 in SF layers and a raw `ValueError` for a NaN bias; conversion
