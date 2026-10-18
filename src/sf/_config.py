@@ -17,6 +17,11 @@
   the host reference, exact, at the cost of running the op twice).
 * ``offload_threshold``: element count above which a host op runs on
   ``default_device`` instead (``None`` = never).
+* ``kernel_backend``: how the simulator executes SF IR: ``"interp"`` (the
+  host reference, default) or ``"c"`` (SF IR -> C with the ``__sf16_*``
+  builtins, compiled with the system C compiler).  Both are bit-identical.
+* ``kernel_device``: the target for a kernel launch whose arguments carry no
+  device array (default ``"atreides-sim"``).
 
 ``sf.config(...)`` applies for the rest of the context; ``with
 sf.config(...)`` scopes it; as a decorator it wraps plain and ``async``
@@ -38,12 +43,15 @@ _DEFAULTS: Mapping[str, object] = MappingProxyType({
     "status": "scan",
     "offload_threshold": None,
     "default_device": "atreides",
+    "kernel_backend": "interp",
+    "kernel_device": "atreides-sim",
 })
 _KEYS = tuple(_DEFAULTS)
 _CHOICES = {
     "preflight": ("raise", "warn", "ignore"),
     "suspect": ("raise", "warn", "verify", "ignore"),
     "status": ("scan", "replay"),
+    "kernel_backend": ("interp", "c"),
 }
 
 _state: contextvars.ContextVar[Mapping[str, object]] = contextvars.ContextVar(

@@ -6,7 +6,9 @@ the bit-exact host reference), **Stage 1.1** (NumPy-style arrays, reductions,
 dot, matmul, elementary functions, and the device path with a mock Atreides
 target behind a device interface) and **Stage 2** (PyTorch: fake quantization,
 model conversion with a scale policy, and a `torch.compile` backend that
-offloads SF ops to the target).
+offloads SF ops to the target) and **Stage 3** (GPU programming: a runtime
+with a simulator and a hardware target, CUDA-style thread kernels, Triton-style
+block kernels, a C backend on the `__sf16_*` builtins, and autotuning).
 
 ```python
 import sf
@@ -41,6 +43,20 @@ fast = torch.compile(model, backend="superfloat")                # offload to At
 with torch.no_grad():
     out = fast(x)
 sft.last_status(model)                                           # post-op events per layer
+```
+
+```python
+@sf.jit
+def axpy(a, x_ptr, y_ptr, out_ptr, n, BLOCK: sf.constexpr):     # Triton-style block kernel
+    offs = sf.program_id(0) * BLOCK + sf.arange(0, BLOCK)
+    mask = offs < n
+    sf.store(out_ptr + offs, sf.fma(a, sf.load(x_ptr + offs, mask=mask),
+                                        sf.load(y_ptr + offs, mask=mask)), mask=mask)
+
+dev = sf.device("atreides-sim")
+x, y, out = dev.upload(xs), dev.upload(ys), dev.alloc(n)
+r = axpy[(sf.cdiv(n, 256),)](sf.sf16(0.75), x, y, out, n, BLOCK=256)
+r.status, r.cycles                                               # exact events, simulated cycles
 ```
 
 ## Install
@@ -84,6 +100,13 @@ NumPy is the only runtime dependency (arrays are int64 code arrays).
 | `sf/torch/_autocast.py` | `sft.autocast`: `F.linear`, `F.conv2d`, `matmul`/`@`/`mm`/`bmm` routed to the SF ops inside a block |
 | `sf/torch/_backend.py` | `torch.compile(..., backend="superfloat")`: SF nodes retargeted to the device runner, CPU fallback for the rest, per-graph coverage report |
 | `sf/torch/_status.py` | `sft.last_status()`: per-layer saturation, underflow, headroom and scale |
+| `sf/kernels/_ir.py` | SF IR: typed SSA values with static shapes, one op list per traced kernel, the trace context |
+| `sf/kernels/_sym.py` | Traced values: operators, exact literal comparisons, pointers, shared buffers; the lockstep rule (`if` on data raises) |
+| `sf/kernels/_lang.py` | The kernel language: `program_id`, `thread_idx`, `arange`, `load`/`store`, `shared`, `barrier`, `predicate`, `dot`, `sum`, ... |
+| `sf/kernels/_interp.py` | The simulator: NumPy interpreter of SF IR on the Stage 1.1 vectorised reference, exact events, cost-model cycles |
+| `sf/kernels/_cgen.py` | The C backend: SF IR to C on `sf16_builtins.h`, compiled with `cc`, loaded with ctypes |
+| `sf/kernels/sf16_builtins.h` | Reference C for the `__sf16_*` builtins the custom Clang will provide (spec section 11) |
+| `sf/kernels/_runtime.py` | `atreides-sim` and `atreides-hw` targets, launch limits, the kernel cache, `LaunchResult`, `sf.autotune` |
 
 The split that matters: **semantics live in `_reference.py` only.** The scalar
 classes are a thin layer that promotes operands, calls the reference, and hands
@@ -201,6 +224,47 @@ Measured on scikit-learn digits (tests): MLP float 0.947, sf16 0.947, sf12
 sf16 drops to 0.18 because the accumulation saturates, which is why `bound` is
 the default.
 
+## Kernels (Stage 3)
+
+Kernels are Python functions traced once per distinct signature into **SF IR**
+(typed SSA values with static shapes) and run by a backend. Two styles, same
+IR, same bits:
+
+* **3.1 thread kernels, `@sf.kernel`**, CUDA style: `kernel[grid, block](...)`.
+  `sf.thread_idx(axis)`, `sf.block_idx`, `sf.block_dim`; `x[i]` loads and
+  `x[i] = v` stores on pointer arguments; `sf.shared(shape)` and `sf.barrier()`.
+* **3.2 block kernels, `@sf.jit`**, Triton style: `kernel[(grid,)](..., BLOCK=256)`.
+  `sf.program_id`, `sf.arange`, `sf.load(ptr + offs, mask=, other=)`,
+  `sf.store`, `sf.dot` on 2-D tiles (the systolic array), `sf.sum`/`max`/`min`.
+* **Lockstep.** Atreides takes one branch decision per tile, so `if`, `while`,
+  `and`/`or`/`not` on a traced value raise `SFCompileError` at trace time.
+  `sf.where(mask, a, b)` picks a value; `with sf.predicate(mask):` masks the
+  stores (and the event counts) of the statements inside. Loops run over
+  Python ints or `sf.constexpr` arguments and are unrolled.
+* **Literals** follow Stage 1: `v + 0.25` quantizes the literal (and applies
+  the policy, so `v + 1` raises `SFOverflowError` at trace time), `v < 1` and
+  `v == 0.1` compare exactly.
+* **Targets.** `sf.device("atreides-sim")` is the simulator: the interpreter
+  backend by default, or `sf.config(kernel_backend="c")` to go through SF IR to
+  C on `sf16_builtins.h`, `cc`, and ctypes. Both give the same bits and the
+  same events, which the test suite checks on every kernel. The simulator
+  returns an exact `SFStatus` and profiler counters (`r.counters`, `r.cycles`
+  from a cost model: lanes / 256 + macs / 4096 + memory ops + barriers).
+  `sf.device("atreides-hw")` raises `SFDeviceError` until a driver is attached
+  with `sf.HardwareAtreides.attach(driver)`.
+* **Before launch** the runtime checks block size (1024 lanes), tile size
+  (16384), grid (65535 per axis), shared memory (32 KiB), argument placement
+  (all on one device, no host arrays or raw floats) and widths (sf16 only on
+  the simulator); any of these raises `SFLaunchError` with nothing launched.
+  Out-of-bounds loads and stores and integer division by zero are device
+  faults (`SFDeviceError`).
+* **3.3** `@sf.autotune(configs=[...], key=[...])` runs each config once per
+  distinct key and keeps the one with the fewest simulated cycles; every config
+  goes through the same bit-exact backend. Traced kernels are cached per
+  signature and constexpr set (`kernel.cache`).
+
+See `examples/stage_3_tour.py`.
+
 ## Error policy
 
 ```python
@@ -255,6 +319,7 @@ boundary corners (sf11 to sf16), plus hypothesis property tests.
 | `test_2_1_convert.py` | 2.1 SF linear recomputed through the Stage 1 public API; adversarial no-saturation cases; conv as unfold + linear; convert report; autocast; accuracy gate on digits; QAT recovery |
 | `test_2_2_compile.py` | 2.2 compiled == emulated bit for bit on MLP, CNN and attention; coverage report; unsupported widths; inference-only; pre-flight on the compiled path |
 | `test_review_findings_2.py` | Regressions from the independent Stage 2 review |
+| `test_3_kernels.py` | 3.0 copies bit for bit, limits before launch, hardware stub; 3.1 axpy, reduction, matmul match the 1.1 built-ins; 3.2 the same kernels as block kernels, identical bits; predication, lockstep rejection, faults, status policy; the C backend bit- and event-identical to the interpreter; 3.3 cache, profiler, autotune (speed changes, bits do not) |
 
 Results are compared as integer codes, never with float tolerances.
 `SF_TEST_SEED` and `SF_TEST_RANDOM_PAIRS` control the sampled widths.
@@ -284,5 +349,7 @@ simulator or silicon is registered with `sf.register_device`, tested against
 the Fraction oracle in `tests/oracle.py`, and its event reporting (flags or
 not, accumulation order, accumulator width, `mat_fma` meaning) is confirmed.
 Stage 2 runs on the same mock, so the same caveat applies to the
-`superfloat` backend. Stage 1.2 (diagnostics) and Stage 2.3 are deferred;
-Stage 3 kernels next.
+`superfloat` backend. Stage 3 adds a simulator (`atreides-sim`) with two
+independent backends that agree bit for bit, which is the strongest check
+available without silicon; `atreides-hw` is a stub until the driver exists.
+Stage 1.2 (diagnostics) and Stage 2.3 are deferred.

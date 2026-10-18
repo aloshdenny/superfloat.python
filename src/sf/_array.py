@@ -548,8 +548,16 @@ def _as_sfarray(x, name: str) -> SFArray:
                       "convert host data with sf.asarray(x, dtype=...)")
 
 
+def _traced(*xs):
+    from .kernels import is_traced
+    return any(is_traced(x) for x in xs)
+
+
 def sum_(x, axis=None):
     """Saturating sum in the target's accumulation order (sequential)."""
+    if _traced(x):
+        from .kernels import _lang
+        return _lang.sum(x, axis)
     x = _as_sfarray(x, "sum")
     fmt, dtype = x.dtype._fmt, x.dtype
     codes = x._codes
@@ -578,6 +586,9 @@ def _minmax(x, axis, fn):
 
 def dot(a, b):
     """1-D · 1-D as a chain of fma in target order; higher ranks go to matmul."""
+    if _traced(a, b):
+        from .kernels import _lang
+        return _lang.dot(a, b)
     a, b = _as_sfarray(a, "dot"), _as_sfarray(b, "dot")
     if a.ndim == 1 and b.ndim == 1:
         if a.shape != b.shape:
@@ -602,6 +613,9 @@ def dot(a, b):
 def matmul(a, b):
     """``a @ b`` with NumPy's rules for 1-D operands and batching.
     Shape errors are raised on the host before any launch."""
+    if _traced(a, b):
+        from .kernels import _lang
+        return _lang.dot(a, b)
     a, b = _as_sfarray(a, "matmul"), _as_sfarray(b, "matmul")
     if a.ndim == 0 or b.ndim == 0:
         raise SFShapeError("matmul: operands must be at least 1-D (use * for scalars)")

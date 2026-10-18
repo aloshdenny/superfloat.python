@@ -75,6 +75,10 @@ def asarray(obj: Any, dtype: Any = None, device: str = _device.HOST) -> SFArray:
 
 
 def zeros(shape, dtype: Any = "sf16", device: str = _device.HOST) -> SFArray:
+    from .kernels._ir import in_kernel
+    if in_kernel():
+        from .kernels import _lang
+        return _lang.zeros(shape, dtype)
     cls = resolve_dtype(dtype)
     out = SFArray._wrap(np.zeros(shape, dtype=np.int64), cls)
     return out if device == _device.HOST else out.to(device)
@@ -82,6 +86,10 @@ def zeros(shape, dtype: Any = "sf16", device: str = _device.HOST) -> SFArray:
 
 def full(shape, value: Any, dtype: Any = None, device: str = _device.HOST) -> SFArray:
     """An array filled with ``value`` (quantized through the error policy)."""
+    from .kernels._ir import in_kernel
+    if in_kernel():
+        from .kernels import _lang
+        return _lang.full(shape, value, dtype or "sf16")
     if dtype is None:
         if not isinstance(value, SFScalar):
             raise SFTypeError("sf.full needs dtype= unless value is an SF scalar")
@@ -144,6 +152,9 @@ def cast(x: Any, dt: Any):
     scalars and arrays are quantized like the constructor."""
     cls = resolve_dtype(dt)
     fmt = cls._fmt
+    if _traced(x):
+        from .kernels import _lang
+        return _lang.cast(x, cls)
     if isinstance(x, SFScalar):
         if x._fmt.bits <= fmt.bits:
             return cls.from_code(widen_code(x._code, x._fmt, fmt))
@@ -196,8 +207,16 @@ def _scalar_operands(name: str, *xs: Any):
     return fmt, codes
 
 
+def _traced(*xs):
+    from .kernels import is_traced
+    return any(is_traced(x) for x in xs)
+
+
 def fma(a: Any, b: Any, c: Any):
     """a * b + c, bit-identical to ``a * b + c``.  Scalars or arrays."""
+    if _traced(a, b, c):
+        from .kernels import _lang
+        return _lang.fma(a, b, c)
     if _any_array(a, b, c):
         return _elementwise("fma", a, b, c)
     fmt, (ka, kb, kc) = _scalar_operands("fma", a, b, c)
@@ -215,6 +234,9 @@ def fma(a: Any, b: Any, c: Any):
 def div(a: Any, b: Any, where: Any = None):
     """``a / b``.  With ``where=mask`` (arrays) the division only happens
     where the mask is True; other elements are 0 and raise nothing."""
+    if _traced(a, b):
+        from .kernels import _lang
+        return _lang.where(where, a / b, 0) if where is not None else a / b
     if where is None:
         if _any_array(a, b):
             return _elementwise("div", a, b)
@@ -258,6 +280,9 @@ def _device_of_any(*xs):
 def sqrt(a: Any):
     """Square root, truncated toward zero.  Negative input is a domain error
     (invalid); the device value is 0.  Scalars or arrays."""
+    if _traced(a):
+        from .kernels import _lang
+        return _lang.sqrt(a)
     if isinstance(a, (SFArray, list, tuple)):
         return _elementwise("sqrt", _as_sfarray(a, "sqrt"))
     if not isinstance(a, SFScalar):
@@ -285,15 +310,24 @@ def _select(name, pick, *xs):
 
 
 def maximum(a: Any, b: Any):
+    if _traced(a, b):
+        from .kernels import _lang
+        return _lang.maximum(a, b)
     return _select("maximum", np.maximum, a, b)
 
 
 def minimum(a: Any, b: Any):
+    if _traced(a, b):
+        from .kernels import _lang
+        return _lang.minimum(a, b)
     return _select("minimum", np.minimum, a, b)
 
 
 def clip(x: Any, lo: Any, hi: Any):
     """Clamp to [lo, hi].  Exact on codes; lo and hi are quantized like literals."""
+    if _traced(x, lo, hi):
+        from .kernels import _lang
+        return _lang.minimum(_lang.maximum(x, lo), hi)
     fmt = _widest([x, lo, hi])
     dtype = _dtype_of(fmt)
     kx, klo, khi = (_to_codes(v, fmt) for v in (x, lo, hi))
@@ -308,6 +342,9 @@ def clip(x: Any, lo: Any, hi: Any):
 def where(cond: Any, x: Any, y: Any):
     """``x if cond else y``, elementwise for arrays.  Note that Python
     evaluates both ``x`` and ``y`` before ``where`` runs."""
+    if _traced(cond, x, y):
+        from .kernels import _lang
+        return _lang.where(cond, x, y)
     if not _any_array(cond, x, y):
         return x if cond else y
     fmt = _widest([x, y])

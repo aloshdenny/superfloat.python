@@ -75,6 +75,25 @@ them. Each one is a single place to change if the team decides differently.
 | Request-scoped status | `sft.capture_status()` collects statuses for the current thread or task (context-local), alongside the process-wide `last_status()`; use it for concurrent serving where models share layer names | `torch/_status.capture_status` |
 | Research `sf_quantize` | the spec says to promote it from the superfloat research code; that code is not in this repository, so `quantize` is written from the Stage 1 cast and gated on producing the same codes. Replace or cross-check when the research code is available | `torch/_core.fake_quantize` |
 
+## Stage 3 decisions
+
+| Question | Choice here | Where |
+|---|---|---|
+| Kernel representation | tracing, not AST rewriting: the Python function runs once per distinct (argument kinds, constexpr values, block) with symbolic arguments and emits SF IR, typed SSA with static shapes. Python control flow over Python ints and `sf.constexpr` runs at trace time and unrolls | `kernels/_ir.py`, `kernels/_runtime.Kernel` |
+| Lockstep rule | `if` / `while` / `and` / `or` / `not` on a traced value raise `SFCompileError` from `Sym.__bool__`; a traced value in `range()` raises from `Sym.__index__`; `sf.where` for values, `with sf.predicate(mask)` for statements | `kernels/_sym.py` |
+| Predication semantics | a predicate masks stores and event counts, never computation (every lane computes, as on the machine). Nested predicates AND. A scalar computed under a vector predicate is one value per lane: the IR broadcasts its shape with the predicate's at trace time, so the interpreter and the C backend agree on it | `kernels/_ir.Builder.emit` |
+| Literals | the Stage 1 rules: an arithmetic literal is quantized at trace time and goes through the policy (`v + 1` raises before anything is launched); comparisons against any host number are exact (`v < 1` always True, `v == 0.1` never) | `kernels/_sym._compare_literal` |
+| Store races | two live lanes storing to one address: the interpreter and C keep the lane-order last write, like NumPy fancy assignment. The machine is not specified here; kernels should not rely on it. Shared-memory stores are read-all-then-write-all inside one op (lockstep) | `kernels/_interp.py`, `_cgen.py` |
+| Status and events | the simulator returns an exact `SFStatus` (`exact=True`) with counts per *result that saturated*: an elementwise op counts lanes, a reduction (`sf.sum`, `sf.dot`) counts each output at most once, as the Stage 1.1 built-ins do; a hand-written loop of adds counts each add. Underflow is in `counters.underflow` only, since the spec's `SFStatus` carries none | `kernels/_interp.Counters`, `sf16_builtins.h: sf16_fold` |
+| Policy after launch | invalid, div0, overflow in catalogue order through `errstate`, like the Stage 1.1 heavy ops; `raise` is honoured because the counts are exact | `kernels/_runtime._apply_policy` |
+| Before launch | limits (1024 lanes, 16384-value tiles, 65535 per grid axis, 32 KiB shared, 2^28 elements), argument placement, widths; any failure is `SFLaunchError` with nothing launched. The Stage 1.1 pre-flight (range bound, probe) does not run for user kernels: the kernel body is opaque to it | `kernels/_runtime.KernelDevice.check_launch` |
+| Device faults | out-of-bounds load / store / shared access and integer division by zero stop the launch with `SFDeviceError`; the C backend records a fault code and returns, the interpreter raises at the op | both backends |
+| Cycle model | `ceil(lane_ops / 256) + ceil(macs / 4096) + loads + stores + barriers`. A placeholder for autotune ordering, not a performance claim; replace the constants when the hardware team publishes them | `kernels/_interp.Counters.cycles` |
+| C backend | sf16 only (the device format); every value a fixed-size `int64_t` array, every op a loop, events through the `sf16_events` block of `sf16_builtins.h`; compiled with `cc -O2 -std=c99` into a content-addressed cache in the temp directory. The header is the stand-in for the custom Clang's builtins: when the real ones arrive, the emitted C is what to hand them | `kernels/_cgen.py` |
+| Hardware target | `atreides-hw` registered now so code can be written against it; raises `SFDeviceError` until `HardwareAtreides.attach(driver)` is given an object with `launch(ir, grid, block, buffers, scalars) -> Counters` | `kernels/_runtime.HardwareAtreides` |
+| Autotune | by simulated cycles, ties by wall time, one tuning run per distinct key; configs supply constexpr names the launch does not pass; the grid may be a function of the chosen config | `kernels/_runtime.autotune` |
+| `from __future__ import annotations` | `BLOCK: sf.constexpr` arrives as a string in such modules; the kernel accepts both the object and the string | `kernels/_runtime._is_constexpr_annotation` |
+
 ## Immutability
 
 `SFScalar.__setattr__` allows `_code` to be set once (construction) and
@@ -105,6 +124,10 @@ therefore never change after a value is used as a dict key.
   `sticky_flags = True` gets exact status and honours `over="raise"`.
 * Confirm `__sf16_mat_fma` means `(A @ B) + D` and not `D` as the initial
   accumulator (see Stage 1.1 decisions).
+* Stage 3: the cycle model constants (lane width 256, systolic 4096 MACs per
+  cycle), what the machine does on two lanes storing to one address, and the
+  driver interface for `atreides-hw` (`launch(ir, grid, block, buffers,
+  scalars)` is the proposal).
 
 ## Design rule for the device path: decide on the host, launch only the undecidable
 
