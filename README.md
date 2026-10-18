@@ -291,6 +291,39 @@ Static errors are not subject to the policy: `SFTypeError`, `SFUnsupportedError`
 `SFShapeError`, `SFLaunchError`, `SFCompileError`, `SFDeviceError`.
 Everything inherits from `sf.SFError` or `sf.SFWarning`.
 
+## Testing matrix
+
+What is checked, against what, at which widths, on which targets, and when.
+Every comparison is on integer codes and event counts; there are no float
+tolerances anywhere in the suite.
+
+| What | Checked against | Widths | Targets | When | Status |
+|---|---|---|---|---|---|
+| 1.0 casts, add, sub, mul, div, fma, sqrt, comparisons | Fraction oracle (`tests/oracle.py`), golden files | sf4 to sf10 exhaustive (every pair); sf11 to sf16 seeded sample, boundary corners, hypothesis | host | every commit | passing |
+| 1.0 scalar ops, all 4.3 billion pairs per op | Fraction oracle, vectorised | sf16 exhaustive, sf14 exhaustive; Fraction boundary sweep through the public operators | host | nightly (`tools/exhaustive.py`), 31 min measured | passing |
+| 1.0 error policy, expression trees, algebraic properties, spec examples | catalogue types, first-error order, user-line attribution | sf4 to sf16 | host | every commit | passing |
+| 1.1 arrays: every 1.0 op on `()`, `(n,)`, `(m, n)`, broadcasting, literals, promotion, casts | the scalar op applied elementwise | sf4 to sf16 | host | every commit | passing |
+| 1.1 `sum`, `dot`, `@`, `addmm` | sequential saturating chain of scalar ops; `@` equals per-output `dot` | sf4 to sf16 | host, `atreides` mock, `atreides-flags` | every commit | passing |
+| 1.1 device path: placement, pre-flight gate (known answers, L1 bound, golden-vector probe), `result.status` | host == mock bit for bit; nothing launched when the host can decide | sf16 | mock targets | every commit | passing on mock; silicon gate open |
+| 1.1 sqrt, pow, clip, maximum, minimum, masked div, where | Fraction oracle and scalar rules | sf4 to sf16 | host | every commit | passing |
+| 2.0 `sft.quantize` | same codes and events as `sf.asarray` under every policy; STE gradient | sf4 to sf16 | host | every commit | passing |
+| 2.1 `SFLinear`, `SFConv2d`, `convert`, `autocast` | recomputed through the Stage 1.1 public API; adversarial no-saturation cases; accuracy gate on digits; QAT recovery | sf16 (sf8 for accuracy drop) | host | every commit | passing |
+| 2.2 `torch.compile(backend="superfloat")` | compiled == emulated bit for bit on MLP, CNN, attention; coverage report; pre-flight on the compiled path | sf16 | mock targets | every commit | passing on mock; silicon gate open |
+| 3.0 runtime: copies, limits, placement, hardware stub | round trip bit for bit; `SFLaunchError` before launch; `SFDeviceError` when no driver | sf16 | `atreides-sim`, `atreides-hw` stub | every commit | passing |
+| 3.1 thread kernels: axpy, shared-memory reduction, matmul | the 1.1 built-ins, bit for bit, including saturating inputs | sf16 | `atreides-sim`, interpreter and C backends | every commit | passing |
+| 3.2 block kernels: spec `add`, the 3.1 kernels rewritten, tiled `sf.dot` matmul | the 1.1 built-ins and the 3.1 kernels, identical bits | sf16 | `atreides-sim`, both backends | every commit | passing |
+| 3 lockstep rule, predication, literals, faults, status policy | `SFCompileError` at trace time; masked stores and event counts; fault contract | sf16 | both backends | every commit | passing |
+| Section 11 C backend | identical bits and identical event counts to the interpreter on every Stage 3 kernel; argument-name matrix; concurrent launches | sf16 | `atreides-sim` with `cc` | every commit (and the Stage 3 tour) | passing |
+| 3.3 cache, profiler, autotune | traced once per signature; every config identical bits; fastest by simulated cycles | sf16 | `atreides-sim` | every commit | passing |
+| Review regressions (four independent reviews) | the failing case from each finding | as found | as found | every commit | passing |
+| Real hardware: 1.1 built-ins, 2 models, 3 kernels | the same golden cases as above through `atreides-hw` | sf16 | silicon or RTL simulator | when a driver is attached | not started |
+
+Per-commit CI runs the suite on Python 3.10, 3.12 and 3.13, then the Stage
+1.0 and Stage 3 tours and `tools/exhaustive.py --bits 12`. The nightly job
+adds `--bits 16` and `--bits 14`. Totals today: 732 tests per commit; sf16
+exhaustive 4 ops x 4,294,836,225 pairs plus 4 x 11,403,090 boundary pairs
+nightly.
+
 ## Tests (spec section 10)
 
 `tests/oracle.py` is an independent oracle written on `fractions.Fraction`
