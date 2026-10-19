@@ -1,18 +1,93 @@
 ---
-title: "Superfloat in Python"
-description: "What sf is and what it is for"
+title: "Overview"
+description: "sf is the Python library for Superfloat, the number format of the Atreides chip. Write ordinary Python and get the chip's exact results, bit for bit."
 ---
 
-`sf` is the Python library for the Superfloat number formats (sf4 to sf16)
-used by the Atreides chip. You write normal Python, NumPy-style arrays,
-PyTorch models or GPU kernels, and `sf` makes sure every number behaves
-exactly as the chip would compute it, bit for bit, and tells you when
-something overflowed, underflowed, divided by zero or went invalid.
+Superfloat is a family of fixed-point number formats (sf4 to sf16) built for the Atreides accelerator. There is no exponent, no NaN and no infinity: every value lies strictly between -1 and 1, and when a result does not fit, the hardware saturates or flushes to zero instead of failing.
 
-## What is Superfloat, in one paragraph
+`sf` lets you work with those numbers from Python exactly as the chip would compute them. Every operation produces the same integer code the hardware produces, and every overflow, underflow, divide by zero and invalid input is reported to you instead of disappearing into the arithmetic.
 
-An sf16 value is a 16-bit signed fixed-point number strictly between -1 and 1.
-There is no exponent, no NaN, no infinity. Adding or subtracting can push a
-value past the edge: it then sticks at the largest value (saturates).
-Multiplying two small values can land on 0 (underflows). Dividing `a / b`
-only works when `|a| < |b|`. The chip does exactly this, and so does `sf`.
+## Get started
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/get-started/installation">
+    One `pip install`. NumPy is the only dependency.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/get-started/quickstart">
+    Five minutes from a scalar to a matrix multiply on the device.
+  </Card>
+  <Card title="Concepts" icon="lightbulb" href="/concepts/format">
+    What a Superfloat value is, how rounding works, and what the four events mean.
+  </Card>
+  <Card title="API reference" icon="code" href="/reference/types">
+    Every type and function, with signatures and verified examples.
+  </Card>
+</CardGroup>
+
+## What you can do
+
+<AccordionGroup>
+  <Accordion title="Compute with scalars" icon="calculator" defaultOpen>
+    Create a value, do arithmetic, compare. Overflow is an exception by default, so a result the chip would saturate never passes silently.
+
+    ```python
+    import sf
+
+    a, b = sf.sf16(0.5), sf.sf16(0.25)
+    a + b        # sf16(0.75)
+    a * b        # sf16(0.125)
+    b / a        # sf16(0.5)
+    a / b        # SFOverflowError: 0.5 / 0.25 = 2.0 is outside ±0.999969482421875
+    ```
+
+    [Scalars →](/scalars/creating)
+  </Accordion>
+
+  <Accordion title="Work with arrays, like NumPy" icon="table-cells">
+    Arrays hold integer codes and follow NumPy's broadcasting rules. Events are counted per element and reported together.
+
+    ```python
+    x = sf.array([0.1, -0.25, 0.5], dtype=sf.sf16)
+    x * x        # sfarray([0.00997925, 0.0625, 0.25], dtype=sf16)
+    x.sum()      # sf16(0.350006103515625)
+    ```
+
+    [Arrays →](/arrays/creating)
+  </Accordion>
+
+  <Accordion title="Run on the device" icon="microchip">
+    Place an array on a target and the heavy operations (matmul, dot, sum, elementwise arithmetic) run there. Before any launch, the host checks what it can decide on its own, and after the launch you get a status.
+
+    ```python
+    h = sf.asarray(inputs,  dtype=sf.sf16, device="atreides")
+    w = sf.asarray(weights, dtype=sf.sf16, device="atreides")
+    y = h @ w
+    y.status     # SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+    ```
+
+    [The device path →](/arrays/device)
+  </Accordion>
+
+  <Accordion title="Control what happens on an event" icon="shield">
+    Four events, three choices each: raise, warn or ignore. The value you get is always the chip's value; the policy only decides whether Python also tells you.
+
+    ```python
+    with sf.errstate(over="ignore"):
+        sf.sf16(0.75) + 0.5    # sf16(0.999969482421875), saturated silently
+    ```
+
+    [Error policy →](/errors/policy)
+  </Accordion>
+</AccordionGroup>
+
+## How it is verified
+
+Every result in this library is checked as an integer code, never with a float tolerance, against an independent oracle written in exact fractions. The scalar operations are tested on every possible pair of inputs for sf4 to sf10 on every commit, and on all 4.3 billion pairs of sf16 inputs nightly. See [how sf is tested](/testing/how-sf-is-tested).
+
+<Note>
+Everything on this site runs on the host and on a simulator of the chip. The simulator is tested to agree with the host reference bit for bit; validation on silicon is a separate step that needs the hardware. [What is done and what is not →](/get-started/status)
+</Note>
+
+## Beyond Stage 1
+
+PyTorch integration (quantize, convert, `torch.compile`) and writing your own kernels are implemented and tested, and their documentation is being rewritten in this format. Until then, the [Preview](/guides/pytorch) tab holds the current material.

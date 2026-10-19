@@ -1,0 +1,63 @@
+---
+title: "Policy and configuration"
+description: "sf.seterr, sf.geterr, sf.errstate, sf.config, sf.getconfig, and the SFStatus object."
+---
+
+## `sf.seterr(all=None, *, over=None, under=None, divide=None, invalid=None)`
+
+Set the error policy for the current thread. Each value is `"raise"`, `"warn"` or `"ignore"`. Returns the previous policy as a dict, so it can be restored with `sf.seterr(**old)`.
+
+Defaults: `over="raise"`, `under="warn"`, `divide="raise"`, `invalid="raise"`.
+
+## `sf.geterr()`
+
+The current policy as a dict.
+
+## `sf.errstate(all=None, **kw)`
+
+A scoped policy change. Context manager, or decorator on plain and `async def` functions. Thread and asyncio-task local.
+
+```python
+with sf.errstate(over="ignore"):
+    ...
+
+@sf.errstate(under="ignore")
+def f(): ...
+```
+
+## `sf.config(**kw)`
+
+Runtime options for the device path. A plain call sets them for the thread; as a context manager or decorator they are scoped. Thread and task local.
+
+| Key | Values | Default | Meaning |
+|---|---|---|---|
+| `preflight` | `raise`, `warn`, `ignore` | `raise` | when the host proves a heavy op saturates everywhere |
+| `suspect` | `warn`, `raise`, `verify`, `ignore` | `warn` | when the probe suspects it |
+| `probe` | bool | `True` | run the golden-vector probe |
+| `probe_size` | int | `256` | elements the probe samples |
+| `status` | `scan`, `replay` | `scan` | how `status.saturated` is obtained without flags |
+| `offload_threshold` | int or `None` | `None` | host ops above this size run on `default_device` |
+| `default_device` | name | `"atreides"` | target for offload and the compile backend |
+| `kernel_backend` | `interp`, `c` | `interp` | Stage 3 simulator backend |
+
+Invalid values raise `ValueError`. See [Configuration](/arrays/configuration) for the semantics.
+
+## `sf.getconfig()`
+
+The current options as a dict.
+
+## `sf.SFStatus`
+
+```python
+SFStatus(saturated=0, div0=0, invalid=0, exact=False, outputs_at_max=0)
+```
+
+<ResponseField name="saturated" type="int | None">Outputs that saturated; `None` when unknown.</ResponseField>
+<ResponseField name="div0" type="int">Divisions by zero (exact, decided before launch).</ResponseField>
+<ResponseField name="invalid" type="int">Invalid inputs (exact, decided before launch).</ResponseField>
+<ResponseField name="exact" type="bool">Whether `saturated` is a fact rather than a bound or unknown.</ResponseField>
+<ResponseField name="outputs_at_max" type="int">Outputs at ±max, the raw scan.</ResponseField>
+<ResponseField name="ok" type="bool | None">`True` if nothing happened, `False` if something did, `None` if unknown.</ResponseField>
+<ResponseField name="known" type="bool">`True` when no field is unknown.</ResponseField>
+
+The repr shows the kind of count: `saturated=0`, `saturated<=3` for a bound, `saturated=unknown (outputs_at_max=16)` for a reduction. [Reading status →](/arrays/status)

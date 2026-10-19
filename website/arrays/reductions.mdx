@@ -1,0 +1,62 @@
+---
+title: "Reductions"
+description: "sum, dot, max and min, and the one rule that makes a reduction reproducible: the order of accumulation."
+---
+
+## Sum
+
+`sum` adds sequentially from index 0, saturating at every step, in the width of the data. That is the target's accumulation order, and it is the only order that gives the same bits on the host and on the chip.
+
+```python
+import sf
+
+x = sf.array([0.1, -0.25, 0.5], dtype=sf.sf16)
+x.sum()                  # sf16(0.350006103515625)
+sf.sum(x)                # the same
+
+A = sf.array([[0.1, 0.2], [0.3, 0.4]], dtype=sf.sf16)
+A.sum(axis=0)            # sfarray([0.3999939, 0.6000061], dtype=sf16)
+```
+
+Because each step saturates, a sum that passes the edge and comes back is *not* the exact total:
+
+```python
+sf.array([0.5, 0.5, 0.5, -0.5], dtype=sf.sf16).sum()
+# SFOverflowError: sf16 sum: overflow in 1 of 1 element(s)
+```
+
+Under `over="ignore"` this returns 0.49996948 (max minus 0.5), not 1.0, and not 0.5 either: the running total stuck at max after the second element.
+
+<Tip>
+If your data can sum past 1, scale it down first. The PyTorch layer does exactly this with its headroom policy.
+</Tip>
+
+## Dot
+
+`sf.dot(a, b)` on two 1-D arrays is a chain of `fma` in the same sequential order: `acc = fma(a[k], b[k], acc)` for k from 0. It equals the scalar chain bit for bit, which is tested on every width.
+
+```python
+sf.dot(x, x)             # sf16(0.322479248046875)
+```
+
+Higher-rank inputs are passed to `matmul`.
+
+## Max, min, argmax, argmin
+
+Exact selection on codes. No events are possible.
+
+```python
+x.max()                  # sf16(0.5)
+x.min()                  # sf16(-0.25)
+x.argmax()               # 2
+```
+
+## Events in reductions
+
+A reduction produces one output per slice, so the count in the message is per output, not per step: `overflow in 1 of 1 element(s)` above means the one output saturated at least once on the way.
+
+On the device, a reduction's saturation count cannot be read from the output (a partial sum can saturate and come back into range), so `status.saturated` is `None` unless the host proved the operation safe, flags are available, or replay is on. [Status →](/arrays/status)
+
+## Why sequential, and why data width
+
+The accumulation order and accumulator width are hardware decisions that are not final yet. Sequential order at data width is the current assumption, isolated in one function (`sf._linalg.sum_codes`), and every reduction in the library (`sum`, `dot`, `@`, the PyTorch layers, the simulator) goes through it. When the hardware team confirms the real order, it changes in one place and the whole test suite re-checks.

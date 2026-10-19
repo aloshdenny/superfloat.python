@@ -1,0 +1,65 @@
+---
+title: "Rounding and truncation"
+description: "Casts round to nearest. Arithmetic truncates toward zero. This one distinction explains most results that look off by one code."
+---
+
+Two different rules apply depending on where a value comes from.
+
+## Casts round to nearest, ties to even
+
+When a host number enters the format (constructing a value, quantizing an array, a literal in an expression), the exact value is multiplied by the scale and rounded to the nearest integer code. A tie goes to the even code.
+
+```python
+import sf
+
+sf.sf16(0.1)          # sf16(0.100006103515625): 0.1 * 32768 = 3276.8, rounds to 3277
+sf.sf8(0.1)           # sf8(0.1015625):          0.1 * 128 = 12.8, rounds to 13
+```
+
+The `exact` attribute shows the fraction you actually got, so you can see the rounding error:
+
+```python
+sf.sf16(0.1).exact    # Fraction(3277, 32768)
+```
+
+## Arithmetic truncates toward zero
+
+Once values are in the format, the hardware computes on integers and drops any fractional part, always toward zero. There is no rounding step inside an operation.
+
+```python
+a = sf.sf16(0.3)                 # code 9830
+a * a                            # sf16(0.0899658203125)
+(a * a).code                     # 2948
+```
+
+Exactly, 9830 × 9830 / 32768 = 2949.12, and truncation gives 2948, not 2949. Float arithmetic would give 0.09; the chip gives 0.08997, and so does `sf`.
+
+Division truncates too: `sf.sf16(0.1) / sf.sf16(0.3)` is `sf16(0.333343505859375)`, code 10923, from 3277 × 32768 / 9830 = 10923.3.
+
+## Why the difference
+
+Rounding on the way in gives the best possible representation of your data. Truncation inside the arithmetic is what the silicon does, because it is cheaper, and the library's job is to match the silicon. If you compute something on the host in floats and compare with `sf`, expect the last code to differ in the direction of zero.
+
+## The operations, in one table
+
+| Operation | Result code | Rounding |
+|---|---|---|
+| `sf.sf16(v)`, literals, `sf.array(...)` | `round_half_even(v * 2^(N-1))` | nearest, ties to even |
+| `a + b`, `a - b` | `k_a + k_b`, `k_a - k_b` | exact (then saturates if outside the range) |
+| `a * b` | `trunc(k_a * k_b / 2^(N-1))` | toward zero |
+| `a / b` | `trunc(k_a * 2^(N-1) / k_b)` | toward zero |
+| `sf.fma(a, b, c)` | `k_c + trunc(k_a * k_b / 2^(N-1))` | the product toward zero, then an exact add |
+| `sf.sqrt(a)` | `isqrt(k_a * 2^(N-1))` | toward zero |
+
+`a * b + c` and `sf.fma(a, b, c)` give the same bits: the product is truncated once in both. This is tested on every width.
+
+## Comparisons never round
+
+`<`, `==` and friends compare the exact values. Comparing against a host number does not quantize it first:
+
+```python
+sf.sf16(0.1) == 0.1    # False: the value is 3277/32768, not 0.1
+sf.sf16(0.5) < 1       # True, always; 1 is outside the range
+```
+
+See [Exactness](/concepts/exactness).

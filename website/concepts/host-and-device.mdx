@@ -1,0 +1,83 @@
+---
+title: "Host and device"
+description: "Which operations run where, the rule that nothing reaches the chip that the host could decide, and what a result's status tells you."
+---
+
+## Light and heavy
+
+Every array has a placement: `"host"` or the name of a device. An operation is **light** when all its inputs are on the host, and **heavy** when any input is on a device.
+
+- Light operations run on the host, using the same bit-exact reference the simulator and the mock device use. They go through the error policy and carry no status.
+- Heavy operations (`+ - * /`, `fma`, `sqrt`, `sum`, `dot`, `@`, `addmm`) run on the device and return an array with a `.status`.
+- Selection and data movement (`maximum`, `minimum`, `clip`, `where`, `cast`, indexing, reshape) always run on the host, even on device arrays, because they cannot produce an event.
+
+```python
+import sf
+
+h = sf.asarray(A, dtype=sf.sf16, device="atreides")
+w = sf.asarray(B, dtype=sf.sf16, device="atreides")
+y = h @ w                 # heavy: runs on atreides
+y.device                  # 'atreides'
+y.status                  # SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+y.to("host")              # bring it back; y.numpy() does the same and converts to floats
+```
+
+Mixing placements in one operation is an error; move one side first with `.to(...)`.
+
+## The rule: decide on the host, launch only the undecidable
+
+The chip is for work whose answer the host does not know. Before any heavy operation is launched, the host runs a gate, in this order:
+
+<Steps>
+  <Step title="Static checks">
+    Shapes, dtype (only sf16 on Atreides), size limits. A mismatch raises `SFShapeError` or `SFTypeError`; nothing is launched.
+  </Step>
+  <Step title="Known answers">
+    A divisor array that contains a zero, a divide where every `|a| >= |b|`, a NaN: these are events the host can see in the inputs. They are reported through the policy *before* the launch, and the chip never sees them.
+  </Step>
+  <Step title="Range bound">
+    The host carries the inputs' magnitudes through the arithmetic rules. If no element can possibly saturate, the launch is marked safe and the result's status is exact without any scan. If every element must saturate, the operation is refused (`sf.config(preflight="raise")`, the default).
+  </Step>
+  <Step title="Golden-vector probe">
+    For the band in between, a small sample of the real inputs is run through the host reference. A hit is a *suspicion*, never a proof: by default it warns (`SFPreflightWarning`) and launches. `sf.config(suspect="raise")` refuses instead; `suspect="verify"` replays the whole operation on the host and refuses only on proof.
+  </Step>
+</Steps>
+
+Only the probe costs anything, and it is small and host-side.
+
+## What status can and cannot tell you
+
+Atreides v1 has no saturation flag the host can read back. `sf` is honest about that:
+
+| Operation | `status.saturated` | `exact` |
+|---|---|---|
+| Any op the range bound proved safe | `0` | `True` |
+| Elementwise op, not proven safe | an upper bound from scanning the output for ±max | `False` |
+| Reduction (`sum`, `dot`, `@`), not proven safe | `None` (unknown): a partial sum can saturate and come back into range, so a scan cannot see it | `False` |
+
+`status.outputs_at_max` always holds the raw count of outputs sitting at ±max. `status.ok` is `True`, `False`, or `None` when unknown.
+
+Two ways to get an exact count without flags:
+
+- `sf.config(status="replay")` recomputes the events on the host, at the cost of doing the work twice.
+- Use a target that reports flags. `"atreides-flags"` is a mock that does; a real target with `sticky_flags=True` would too. With exact counts, `over="raise"` is honoured for heavy ops.
+
+```python
+big = sf.asarray(np.full((4, 4), 0.9), dtype=sf.sf16, device="atreides")
+with sf.errstate(over="ignore"), sf.config(preflight="ignore"):
+    r = big @ big
+r.status
+# SFStatus(saturated=unknown (outputs_at_max=16), div0=0, invalid=0, exact=False)
+```
+
+## The targets
+
+| Name | What it is |
+|---|---|
+| `host` | The reference implementation, in NumPy. |
+| `atreides` | Mock of the v1 chip: runs the same reference, reports no flags. The default device. |
+| `atreides-flags` | The same mock with sticky flags, for testing the exact-status path. |
+| `atreides-sim` | The Stage 3 simulator that also runs user kernels. |
+| `atreides-hw` | Reserved for the real chip; raises until a driver is attached. |
+
+`sf.devices()` lists them; `sf.register_device(...)` adds your own. [Devices reference →](/reference/devices)

@@ -1,0 +1,87 @@
+---
+title: "Events: overflow, underflow, divide, invalid"
+description: "The four things that can go wrong in Superfloat arithmetic, what the hardware does for each, and how sf reports them."
+---
+
+Floating point has NaN and infinity to carry bad results forward. Superfloat has neither. When a result does not fit, the hardware produces a *substitute value* and, on targets that support it, raises a flag. `sf` calls these moments **events**, computes the same substitute value, and reports the event through the [error policy](/errors/policy).
+
+## The four events
+
+<Tabs>
+  <Tab title="Overflow">
+    The exact result is outside the representable range. The hardware **saturates**: it returns the largest value with the right sign.
+
+    ```python
+    sf.sf16(0.75) + sf.sf16(0.5)
+    # SFOverflowError: sf16: 0.75 + 0.5 = 1.25 is outside ±0.999969482421875 (saturates to 0.999969482421875)
+    ```
+
+    Where it happens: `+`, `-`, `fma`, any cast of a value with `|v| >= 1`, and `a / b` whenever `|a| >= |b|`.
+
+    Saturation is not undone by later operations: once a sum sticks at the maximum, subtracting what you added does not bring the original back.
+  </Tab>
+
+  <Tab title="Underflow">
+    The exact result is nonzero but so small that it truncates to 0. The hardware returns **0**.
+
+    ```python
+    sf.sf16(0.001) * sf.sf16(0.001)
+    # sf16(0.0)   SFUnderflowWarning: sf16: 0.001007080078125 * 0.001007080078125 underflows to 0
+    ```
+
+    Where it happens: `*` and the product inside `fma`, and casts of tiny values. The default policy only warns, because underflow is common and usually harmless.
+  </Tab>
+
+  <Tab title="Divide">
+    Division by a zero. The hardware's proposed value is `sign(a) × max`, or 0 for `0 / 0`.
+
+    ```python
+    sf.sf16(0.5) / sf.sf16(0)
+    # SFZeroDivisionError: sf16: 0.5 / 0.0: division by zero (device value 0.999969482421875)
+    ```
+
+    On the device path this is caught on the host before launch: a divisor containing a zero is a known answer, so nothing is sent to the chip. [Host and device →](/concepts/host-and-device)
+  </Tab>
+
+  <Tab title="Invalid">
+    No valid answer exists: a NaN input, or the square root of a negative. The hardware's proposed value is 0.
+
+    ```python
+    sf.sqrt(sf.sf16(-0.25))
+    # SFInvalidError: sf16: sqrt(-0.25) of a negative value (device value 0.0)
+
+    sf.sf16(float("nan"))
+    # SFInvalidError: nan is not a valid sf16 input
+    ```
+  </Tab>
+</Tabs>
+
+## The value is always the hardware value
+
+The policy decides whether Python raises, warns or stays quiet. It never changes the number. Under `ignore` you get exactly what the chip would hand back:
+
+```python
+with sf.errstate(all="ignore"):
+    sf.sf16(0.75) + sf.sf16(0.5)     # sf16(0.999969482421875)
+    sf.sf16(0.5) / sf.sf16(0)        # sf16(0.999969482421875)
+    sf.sqrt(sf.sf16(-0.25))          # sf16(0.0)
+```
+
+Every error message states the device value so that, when you do choose to raise, you still know what the silicon would have done.
+
+## Order when several events happen at once
+
+An array operation can produce different events in different elements, and the policy can only raise once. Events are handled in a fixed order, called the catalogue order: **invalid, divide, overflow, underflow**. The first one whose policy is `raise` wins; the rest are warned or ignored per their own setting.
+
+## Defaults
+
+| Event | Default | Exception / warning |
+|---|---|---|
+| overflow | raise | `SFOverflowError` / `SFOverflowWarning` |
+| underflow | warn | `SFUnderflowError` / `SFUnderflowWarning` |
+| divide | raise | `SFZeroDivisionError` / `SFZeroDivisionWarning` |
+| invalid | raise | `SFInvalidError` / `SFInvalidWarning` |
+
+<Note>
+Two of the substitute values, divide and invalid, are the chip's *proposed* behaviour and are still to be confirmed by the hardware team. They live in one place in the library and will be changed there if the silicon decides otherwise.
+</Note>

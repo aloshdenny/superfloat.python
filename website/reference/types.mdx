@@ -1,0 +1,88 @@
+---
+title: "Scalar types"
+description: "sf.sf4 to sf.sf16, their attributes and operators, and the helpers that describe a format."
+---
+
+## `sf.sfN(value=0)`
+
+Thirteen classes, `sf.sf4` through `sf.sf16`. Calling one quantizes `value` to the nearest code of that width, ties to even, through the error policy.
+
+<ParamField path="value" type="int | float | Fraction | Decimal | str | numpy scalar | SF value" default="0">
+  The number to quantize. Only the integer `0` fits; a string is parsed as an exact decimal; an SF value of a narrower width is widened exactly, a wider one raises `SFTypeError` (use `sf.cast`).
+</ParamField>
+
+**Events:** overflow when `|value|` rounds to 1 or beyond (including ±inf and any nonzero int); underflow when a nonzero value rounds to 0; invalid for NaN.
+
+```python
+sf.sf16(0.1)      # sf16(0.100006103515625)
+sf.sf8(0.1)       # sf8(0.1015625)
+sf.sf16(1)        # SFOverflowError: 1 is not representable in sf16 (max 0.999969482421875)
+```
+
+### Attributes
+
+<ResponseField name="code" type="int">The signed integer code, in `[-M, M]`.</ResponseField>
+<ResponseField name="bits" type="int">The sign-magnitude pattern the device stores.</ResponseField>
+<ResponseField name="sign" type="int">0 or 1.</ResponseField>
+<ResponseField name="mantissa" type="int">The magnitude, `abs(code)`.</ResponseField>
+<ResponseField name="exact" type="Fraction">The exact value, `code / 2^(N-1)`.</ResponseField>
+<ResponseField name="dtype" type="type">The class itself.</ResponseField>
+
+### Operators
+
+| Operator | Result | Events |
+|---|---|---|
+| `+`, `-` | saturating add / subtract | overflow |
+| `*` | truncated product | underflow |
+| `/` | truncated quotient | overflow when `\|a\| >= \|b\|`; divide when `b == 0` |
+| unary `-`, `abs()` | exact | none |
+| `**` k (int, k >= 1) | left-to-right chain of multiplies | underflow |
+| `< <= > >= == !=` | exact comparison, never quantizes | none |
+| `bool()` | `False` for 0 | none |
+| `float()` | the value, exact | none |
+| `int()` | always 0 | none |
+| `//`, `%`, `& \| ^ ~ << >>`, `round()`, non-integer or negative `**` | `SFUnsupportedError` | |
+
+A host number next to an SF value is quantized to that value's type for arithmetic and compared exactly for comparisons. Mixed widths promote to the wider.
+
+## `sf.dtypes`
+
+The tuple `(sf.sf4, sf.sf5, ..., sf.sf16)`.
+
+## `sf.dtype(spec)`
+
+<ParamField path="spec" type='str | int | type | SF value'>`"sf16"`, `16`, `sf.sf16` or an sf16 value.</ParamField>
+
+Returns the class. Raises `SFTypeError` for anything else.
+
+## `sf.info(dt)`
+
+<ParamField path="dt" type="dtype spec">Any of the forms `sf.dtype` accepts.</ParamField>
+
+Returns an `SFInfo` with the format's constants:
+
+<ResponseField name="bits" type="int">Width.</ResponseField>
+<ResponseField name="max" type="float">`(2^(N-1) - 1) / 2^(N-1)`, the largest value.</ResponseField>
+<ResponseField name="min" type="float">`-max`.</ResponseField>
+<ResponseField name="lsb" type="float">`2^-(N-1)`, the step between neighbouring values.</ResponseField>
+<ResponseField name="max_code" type="int">`2^(N-1) - 1`.</ResponseField>
+<ResponseField name="codes" type="int">The number of distinct values, `2^N - 1`.</ResponseField>
+<ResponseField name="exact_max, exact_lsb" type="Fraction">The same, exactly.</ResponseField>
+
+```python
+sf.info(sf.sf16)
+# SFInfo(sf16: bits=16, lsb=3.0517578125e-05, max=0.999969482421875, min=-0.999969482421875, codes=65535)
+```
+
+## `sf.from_code(code, dt)` and `sf.from_bits(bits, dt)`
+
+Build a value (or an array, when given an array) from its signed code or from its sign-magnitude pattern. The code is validated against the width; an out-of-range code raises `SFTypeError`. No events: these never quantize.
+
+```python
+sf.from_code(16384, sf.sf16)             # sf16(0.5)
+sf.from_bits(0x8000 | 16384, sf.sf16)    # sf16(-0.5)
+```
+
+## `sf.FORMATS`, `sf.SFFormat`, `sf.MIN_BITS`, `sf.MAX_BITS`
+
+The per-width constant records the library uses internally (`FORMATS[16].scale`, `.max_code`, ...), and the width range (4, 16). Prefer `sf.info` in user code.

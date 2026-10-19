@@ -1,0 +1,85 @@
+---
+title: "Running on the device"
+description: "Place arrays on a target, run the heavy operations there, and read the results back. Nothing is launched that the host could have decided."
+---
+
+## Place, compute, read back
+
+```python
+import sf
+import numpy as np
+
+inputs  = np.random.default_rng(0).uniform(-0.3, 0.3, (8, 16))
+weights = np.random.default_rng(1).uniform(-0.1, 0.1, (16, 4))
+
+h = sf.asarray(inputs,  dtype=sf.sf16, device="atreides")
+w = sf.asarray(weights, dtype=sf.sf16, device="atreides")
+
+y = h @ w                    # runs on the device
+y.device                     # 'atreides'
+y.status                     # SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+out = y.numpy()              # floats on the host
+```
+
+`sf.asarray(..., device=...)` quantizes on the host and uploads; `.to("host")` downloads; `.numpy()` downloads and converts. Only sf16 is accepted on Atreides.
+
+## What runs where
+
+| Operation | With a device operand |
+|---|---|
+| `+ - * /`, `fma`, `sqrt`, `sum`, `dot`, `@`, `addmm` | heavy: on the device, result has `.status` |
+| `maximum`, `minimum`, `clip`, `where`, `cast`, indexing, reshape, comparisons | on the host; no status (they cannot produce an event) |
+
+Two operands on different devices, or one on the host and one on a device, raise `SFTypeError`; move one side with `.to(...)`.
+
+## Before the launch
+
+Every heavy operation passes the pre-flight gate. In order: static checks (shape, dtype, limits), known answers (a divisor with a zero, a NaN), the range bound, and the golden-vector probe. See [Host and device](/concepts/host-and-device) for the reasoning; here is what you observe:
+
+```python
+n = sf.asarray(np.array([[0.1, 0.1], [0.1, 0.1]]), dtype=sf.sf16, device="atreides")
+d = sf.asarray(np.array([[0.5, 0.0], [0.25, 0.5]]), dtype=sf.sf16, device="atreides")
+n / d
+# SFZeroDivisionError: sf16 / on atreides: division by zero in 1 element(s) (status.div0)
+
+full = sf.asarray(np.full(4, 0.6), dtype=sf.sf16, device="atreides")
+full + full
+# SFOverflowError: pre-flight: add on sf16 would saturate on every element (every element of a and b overflows); not launched
+```
+
+Both exceptions came from the host before any launch: the zero is visible in the inputs, and the range bound proves 0.6 + 0.6 cannot fit anywhere. Under `sf.config(preflight="warn")` the second one launches with a warning instead.
+
+## After the launch
+
+The result's `status` says what the runtime knows. When the host proved the operation safe, `exact=True` and `saturated=0`. Otherwise, for an elementwise op the count is an upper bound from scanning the output; for a reduction it is unknown. [Reading status →](/arrays/status)
+
+The policy is applied to the status after the launch, in catalogue order. An exact count honours `over="raise"`; an upper bound only warns (`SFDeviceOverflowWarning`); an unknown count says nothing.
+
+```python
+a = sf.asarray(np.array([0.6, 0.1, 0.6, 0.2]), dtype=sf.sf16, device="atreides")
+r = a + a
+# SFDeviceOverflowWarning: sf16 + on atreides: saturation in <=2 element(s) (status.saturated)
+r
+# sfarray([0.99996948, 0.20001221, 0.99996948, 0.40002441], dtype=sf16, device='atreides')
+r.status
+# SFStatus(saturated<=2, div0=0, invalid=0, exact=False)
+```
+
+Here the bound could not decide (two elements fit, two do not), so the operation ran and the output was scanned: two outputs sit at max, which is an upper bound, hence `<=2` and a warning rather than an exception.
+
+## Offloading host work automatically
+
+`sf.config(offload_threshold=n)` sends host operations with more than `n` elements to the default device, so a large host computation gets the device path (and a status) without changing the code:
+
+```python
+with sf.config(offload_threshold=1_000_000):
+    big_host_array @ big_host_array      # runs on atreides, result on atreides
+```
+
+## Choosing a target
+
+```python
+sf.devices()     # ('host', 'atreides', 'atreides-flags', 'atreides-sim', 'atreides-hw')
+```
+
+`atreides` is the v1 mock (no flags). `atreides-flags` reports sticky flags, so statuses are exact and `over="raise"` works for heavy ops. `atreides-sim` is the kernel simulator, which also runs the built-ins. `atreides-hw` waits for the real driver. [Devices reference →](/reference/devices)

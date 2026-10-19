@@ -12,7 +12,7 @@ description: "6. Stage 3: kernels"
 | `sf.synchronize(device="atreides-sim")` | Wait for the device; returns its last `LaunchResult`. |
 | `sf.Limits` | `max_block=1024` lanes, `max_tile=16384` values, `max_grid=65535` per axis, `max_shared=32768` bytes, `max_elements=2^28`. |
 | `sf.cdiv(a, b)` | Ceiling division for grid sizes. |
-| `sf.config(kernel_backend="interp" \| "c")` | Interpreter (default) or generated C through `cc`. Same bits, same events. |
+| `sf.config(kernel_backend="interp" \\| "c")` | Interpreter (default) or generated C through `cc`. Same bits, same events. |
 
 ## Decorators and launch syntax
 
@@ -49,7 +49,7 @@ kernel must not return a value.
 | `sf.sum(x, axis=None)`, `sf.max(x, axis=None)`, `sf.min(x, axis=None)` | Tile reductions; `sum` is the sequential saturating chain. |
 | `sf.zeros(shape, dtype="sf16")`, `sf.full(shape, value, dtype="sf16")` | Tile constants. |
 | `v.reshape(...)`, `v[:, None]`, `v[None, :]` | Reshape and expand dims on tile values; NumPy broadcasting applies. |
-| `v + w`, `v - w`, `v * w`, `v / w`, `-v`, `abs(v)`, `v < w`, `v == 0.1`, `m & n`, `m \| n`, `~m`, `i // 2`, `i % 2` (ints) | Operators on traced values. Literals follow Stage 1 (quantized for arithmetic, exact for comparisons). |
+| `v + w`, `v - w`, `v * w`, `v / w`, `-v`, `abs(v)`, `v < w`, `v == 0.1`, `m & n`, `m \\| n`, `~m`, `i // 2`, `i % 2` (ints) | Operators on traced values. Literals follow Stage 1 (quantized for arithmetic, exact for comparisons). |
 | `sf.kernels.is_traced(x)` | True for a traced value. |
 
 **Lockstep rule.** `if`, `while`, `and`, `or`, `not` on a traced value, or

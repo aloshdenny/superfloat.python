@@ -1,0 +1,64 @@
+---
+title: "Installation"
+description: "Install sf from the repository. Python 3.10 or newer, NumPy is the only runtime dependency."
+---
+
+## Requirements
+
+- Python 3.10, 3.12 or 3.13 (these run in CI)
+- NumPy (installed automatically)
+- A C compiler such as `cc` or `gcc`, only if you want the generated-C kernel backend (Stage 3)
+- PyTorch, only for `sf.torch` (Stage 2)
+
+## Install
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/aloshdenny/superfloat.python
+    cd superfloat.python
+    ```
+  </Step>
+  <Step title="Install in a virtual environment">
+    ```bash
+    python3 -m venv .venv && source .venv/bin/activate
+    pip install -e .
+    ```
+
+    Add `[test]` to also get pytest and hypothesis, or `[torch]` for the PyTorch integration:
+
+    ```bash
+    pip install -e ".[test]"
+    pip install -e ".[torch]" --extra-index-url https://download.pytorch.org/whl/cpu
+    ```
+  </Step>
+  <Step title="Check it works">
+    ```python
+    import sf
+    sf.sf16(0.5) + sf.sf16(0.25)
+    # sf16(0.75)
+    ```
+  </Step>
+</Steps>
+
+## Run the tests
+
+```bash
+pytest -m "not slow"     # about 40 seconds
+pytest                   # the full per-commit suite, about 8 minutes
+```
+
+The quick run skips the exhaustive sf9 and sf10 sweeps. Both runs compare every result against the exact-fraction oracle; see [how sf is tested](/testing/how-sf-is-tested).
+
+## Run the tours
+
+Each stage ships a script that walks through its features and prints what it does:
+
+```bash
+python examples/stage_1_0_tour.py     # scalars and the error policy
+python examples/stage_1_1_tour.py     # arrays, matmul, the device path
+```
+
+<Tip>
+Everything in this documentation was produced by running the code shown. If an output on these pages differs from what you see, that is a bug in one or the other; please report it.
+</Tip>

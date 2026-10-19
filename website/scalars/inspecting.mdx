@@ -1,0 +1,53 @@
+---
+title: "Inspecting a value"
+description: "The code, the exact fraction, the bit pattern, and the format constants."
+---
+
+Every scalar exposes the integer underneath it and the exact value it represents.
+
+```python
+import sf
+
+v = sf.sf16(-0.1)
+v.code          # -3277          signed integer code
+v.exact         # Fraction(-3277, 32768)
+float(v)        # -0.100006103515625
+v.dtype         # <class 'sf.sf16'>
+```
+
+## The bit pattern
+
+The chip stores sign and magnitude. `bits` is that pattern as an unsigned integer; `sign` and `mantissa` are its two fields.
+
+```python
+v.bits          # 36045   (0x8CCD: sign bit 0x8000 plus magnitude 3277)
+v.sign          # 1
+v.mantissa      # 3277
+sf.sf16(0.5).bits   # 16384: positive values have the same bits and code
+```
+
+Round trips:
+
+```python
+sf.from_code(v.code, sf.sf16) == v     # True
+sf.from_bits(v.bits, sf.sf16) == v     # True
+```
+
+## Format constants
+
+`sf.info(dtype)` returns the constants of a width, in the spirit of `numpy.finfo`:
+
+```python
+i = sf.info(sf.sf16)
+i.bits          # 16
+i.max           # 0.999969482421875
+i.min           # -0.999969482421875
+i.lsb           # 3.0517578125e-05
+i.max_code      # 32767
+i.codes         # 65535, the number of distinct values
+i.exact_max     # Fraction(32767, 32768)
+```
+
+## Printing
+
+`repr` shows the type and the float value: `sf16(0.100006103515625)`. The float is exact for every width (every code is a dyadic rational, which float64 represents without error), so what you see is what is stored.

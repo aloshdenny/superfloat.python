@@ -1,0 +1,63 @@
+---
+title: "Exactness: literals and comparisons"
+description: "How sf treats plain Python numbers that appear next to Superfloat values. Arithmetic quantizes them; comparisons do not."
+---
+
+You will write `x + 0.25` and `x < 1` constantly. The two cases follow different rules on purpose.
+
+## A literal in arithmetic becomes a Superfloat value first
+
+In `x + 0.25`, the `0.25` is converted to `x`'s type before the add, exactly like calling `sf.sf16(0.25)`. That conversion goes through the [error policy](/errors/policy), so a literal that does not fit is caught at the literal, before any arithmetic:
+
+```python
+import sf
+
+x = sf.sf16(0.5)
+x + 0.25        # sf16(0.75)
+x + 1
+# SFOverflowError: literal 1 is not representable in sf16 (max 0.999969482421875)
+```
+
+`0` is the only integer that fits. int, float, `Fraction`, `Decimal` and NumPy scalars are all accepted as literals; strings are accepted by the constructor only (`sf.sf16("0.1")` quantizes the exact decimal 1/10), never as an operand.
+
+The literal takes the type of the Superfloat operand, so `sf.sf8(0.5) + 0.1` quantizes `0.1` to sf8.
+
+## A comparison compares exact values and never quantizes
+
+`x < 1` asks whether the value of `x` is less than the number 1. It is, always, because every Superfloat value is below 1. No conversion happens and nothing can raise:
+
+```python
+sf.sf16(0.5) < 1          # True
+sf.sf16(0.1) == 0.1       # False: the stored value is 3277/32768
+sf.sf16(0.5) == 0.5       # True: 0.5 is exactly representable
+sf.sf16(0.1) == sf.sf16(0.1)   # True: same code
+```
+
+If comparisons quantized, `sf.sf16(0.1) == 0.1` would be `True` and you would lose the ability to detect that the value is not what you asked for.
+
+## Width promotion
+
+Mixing widths promotes to the wider type. Narrowing never happens on its own:
+
+```python
+sf.sf8(0.5) + sf.sf16(0.25)      # sf16(0.75)
+sf.cast(sf.sf16(0.1), sf.sf8)    # sf8(0.1015625), re-quantized through the policy
+```
+
+## What is deliberately not supported
+
+Operations that would silently produce a float or an integer raise `SFUnsupportedError` so you never get a non-Superfloat result by accident:
+
+```python
+sf.sf16(0.5) // 2
+# SFUnsupportedError: // is not supported for SF values ...; use x.code for integer arithmetic on codes
+
+sf.sf16(0.5) ** 0.5
+# SFUnsupportedError: sf16 ** 0.5: only integer exponents k >= 1 are supported
+```
+
+`int(x)` is 0 for every value (the whole range is inside (-1, 1)); use `x.code` when you want the integer.
+
+## Values are immutable
+
+A Superfloat value cannot be changed in place; every operation returns a new one. This is what makes it safe to pass values around and cache them.
