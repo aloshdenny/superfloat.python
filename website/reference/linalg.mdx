@@ -1,0 +1,64 @@
+---
+title: "Reductions and linear algebra"
+description: "sum, dot, matmul, addmm, max, min, argmax, argmin."
+---
+
+All accumulation is sequential from index 0, saturating at every step, at the width of the data. This is the target's order; it is what makes host and device agree bit for bit.
+
+## `sf.sum(x, axis=None)`
+
+<ParamField path="axis" type="int | None" default="None">Reduce everything, or along one axis.</ParamField>
+
+**Events:** overflow, counted per output (an output that saturated at any step counts once).
+
+```python
+x = sf.array([0.1, -0.25, 0.5], dtype=sf.sf16)
+sf.sum(x)                 # sf16(0.350006103515625)
+A.sum(axis=0)             # one value per column
+```
+
+## `sf.dot(a, b)`
+
+1-D · 1-D as a chain of `fma`: `acc = fma(a[k], b[k], acc)`. Equals the scalar chain bit for bit. Higher ranks go to `matmul`.
+
+**Events:** overflow (per output), underflow (any product).
+
+```python
+sf.dot(x, x)              # sf16(0.322479248046875)
+```
+
+## `sf.matmul(a, b)` and `a @ b`
+
+NumPy's rules: 1-D operands are promoted and the extra axis dropped; leading dimensions broadcast as a batch. Each output is `dot` of a row and a column. Shape mismatches raise `SFShapeError` on the host before any launch.
+
+**Events:** overflow (per output), underflow.
+
+```python
+A = sf.array([[0.5, 0.25], [0.1, 0.2]], dtype=sf.sf16)
+B = sf.array([[0.5, 0.0], [0.25, 0.5]], dtype=sf.sf16)
+A @ B
+# sfarray([[0.3125    , 0.125     ],
+#          [0.09997559, 0.1000061 ]], dtype=sf16)
+```
+
+## `sf.addmm(a, b, d)`
+
+`a @ b` followed by one saturating add of `d` (broadcast). The bias-add semantics the PyTorch layer uses.
+
+```python
+sf.addmm(A, B, sf.full((2, 2), 0.1, sf.sf16))
+# sfarray([[0.4125061 , 0.2250061 ],
+#          [0.19998169, 0.20001221]], dtype=sf16)
+```
+
+## `sf.max(x, axis=None)`, `sf.min(x, axis=None)`
+
+Exact selection. No events. Also as methods.
+
+## `sf.argmax(x, axis=None)`, `sf.argmin(x, axis=None)`
+
+NumPy integer indices of the extreme codes.
+
+## On the device
+
+`sum`, `dot`, `matmul` and `addmm` are heavy. Before launch, the host runs the range bound: for matmul it uses `min(max_i ||a_i||_1 × max|b|, max|a| × max_j ||b_j||_1)` in exact integer arithmetic, which is never looser than the specification's `K × max|A| × max|B|`. When the bound proves no partial sum can saturate, the result's status is exact. `max`, `min`, `argmax` and `argmin` run on the host.

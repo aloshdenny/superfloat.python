@@ -15,7 +15,7 @@ description: "Decision log: stage 1.1 decisions"
 | Strings in `sf.array([...])` | accepted (constructor rule), rejected as operator literals | `_array._to_codes` |
 | Heavy-op underflow | not reported on v1 (no flags); only saturation, div0 and invalid (from inputs) | `_array._run_heavy` |
 | `status.saturated` | exact when the bound proved safety, when the target returns flags, or under `sf.config(status="replay")`; otherwise an upper bound (scan of ±max) for elementwise ops and `None` (unknown) for reductions, with `outputs_at_max` always reported | `_array._run_heavy`, `_status.py` |
-| Probe hit | `suspected`, never `certain`; `sf.config(suspect="warn"\|"raise"\|"verify"\|"ignore")` decides. Only a host proof (range bound, or exact replay under `verify`) can refuse a launch as `certain` | `_preflight.decide` |
+| Probe hit | `suspected`, never `certain`; `sf.config(suspect="warn"\\|"raise"\\|"verify"\\|"ignore")` decides. Only a host proof (range bound, or exact replay under `verify`) can refuse a launch as `certain` | `_preflight.decide` |
 | `Device.run` contract | returns `(codes, flags)`; `flags` is `None` for v1 and a dict of event masks for a target with sticky flags; trusted only when `sticky_flags` is True | `_device.Device` |
 | Masked `sf.div` on device arrays | heavy: masked-out elements become `0 / 1` (exact 0, no event) and the gate sees only the live elements | `_functions.div`, `_preflight._live` |
 | Selection ops on device arrays | `maximum`, `minimum`, `clip`, `where`, `cast`, indexing run on the host and return device-labelled arrays with no status (data movement, not kernels) | `_functions.py` |

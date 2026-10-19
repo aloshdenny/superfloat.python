@@ -1,0 +1,57 @@
+---
+title: "How sf is tested"
+description: "An independent oracle in exact fractions, every input pair for the small widths, all 4.3 billion sf16 pairs nightly, and integer codes only."
+---
+
+## The principle
+
+The library's implementation works on integer codes. The tests check it against an **oracle written separately on exact fractions**, straight from the format's definition, that never sees a code. The two must agree on the result *and* on the event for every case. Nothing is ever compared with a float tolerance.
+
+## What runs when
+
+| What | Checked against | Widths | Target | When |
+|---|---|---|---|---|
+| Scalar ops and casts | the fraction oracle, golden code files | sf4 to sf10: every pair of inputs; sf11 to sf16: seeded samples plus every boundary | host | every commit |
+| Scalar ops, all 4,294,836,225 pairs per op | the fraction oracle, vectorised | sf16 and sf14, plus a boundary sweep through the public operators | host | nightly, 31 minutes |
+| Error policy, random expression trees, spec examples | catalogue types, first-error order, user-line attribution | sf4 to sf16 | host | every commit |
+| Arrays, broadcasting, elementwise | the scalar rule, element by element | sf4 to sf16 | host | every commit |
+| `sum`, `dot`, `@` | the sequential saturating chain of scalar ops | sf4 to sf16 | host, mock devices | every commit |
+| Device path, pre-flight, status | host == device bit for bit; nothing launched when the host can decide | sf16 | mock devices | every commit |
+| Regressions from independent reviews | the failing case of each finding | as found | as found | every commit |
+| Stages 2 and 3 | see their own pages | sf16 | mock, simulator | every commit |
+| Real hardware | the same cases through `atreides-hw` | sf16 | silicon or RTL | when a driver exists |
+
+CI runs the suite on Python 3.10, 3.12 and 3.13 on every push, plus the stage tours. Today: 732 tests per commit.
+
+## Running it yourself
+
+```bash
+pytest -m "not slow"                 # about 40 seconds
+pytest                               # full per-commit suite, about 8 minutes
+python tools/exhaustive.py --bits 16 # the nightly gate, about 31 minutes
+```
+
+`SF_TEST_SEED` and `SF_TEST_RANDOM_PAIRS` control the sampled widths. The golden code files under `tests/golden/` are regenerated with `python tools/make_golden.py` only when the format definition itself changes.
+
+## Test files
+
+| File | Covers |
+|---|---|
+| `test_1_0_1_types_casts.py` | types and casts; golden files |
+| `test_1_0_2_add_sub.py` | add, sub, neg, abs; chains; saturation is not undone |
+| `test_1_0_3_mul_fma.py` | mul, fma, precedence |
+| `test_1_0_4_div.py` | div and sqrt |
+| `test_1_0_5_comparisons.py` | comparisons, bool, min/max, where, guarded division |
+| `test_bodmas.py` | random expression trees; the first raised error must match |
+| `test_properties.py` | commutativity, identities, monotonic saturation |
+| `test_errstate.py` | policy, catalogue types, user-line attribution, context locality |
+| `test_spec_examples.py` | every code example in the specification, as written |
+| `test_1_1_1_arrays.py` | every scalar op on `()`, `(n,)`, `(m, n)`; broadcasting, literals, promotion, casts |
+| `test_1_1_2_reductions.py` | `sum` is the sequential chain; `dot` equals the scalar chain; max, min, argmax |
+| `test_1_1_3_matmul_device.py` | `@` equals per-output `dot`; shape errors before launch; host and device bit-identical; status; pre-flight |
+| `test_1_1_4_functions.py` | sqrt, pow, clip, maximum, minimum, masked div, where |
+| `test_review_findings*.py` | regressions from the four independent reviews |
+
+## Plugging in a new target
+
+A simulator or the chip is tested the same way: register it as a device, point the device tests at its name, and run. Any difference in a code or an event count is a real disagreement between the hardware and the specification. [Plugging in hardware →](/reference/hardware)

@@ -1,0 +1,44 @@
+---
+title: "Exceptions and warnings"
+description: "Every exception and warning sf can raise, what triggers it, and what it inherits from."
+---
+
+Everything inherits from `sf.SFError` (exceptions) or `sf.SFWarning` (warnings), so `except sf.SFError` catches any numeric or structural problem from the library. The numeric exceptions also inherit from the matching built-in, so existing `except OverflowError` and `except ZeroDivisionError` handlers keep working.
+
+## Numeric events (subject to the policy)
+
+| Exception | Warning | Raised when | Also a |
+|---|---|---|---|
+| `SFOverflowError` | `SFOverflowWarning` | an exact result is outside ±max, or an input / literal does not fit | `OverflowError` |
+| `SFUnderflowError` | `SFUnderflowWarning` | a nonzero result becomes 0 | |
+| `SFZeroDivisionError` | `SFZeroDivisionWarning` | division by an SF zero | `ZeroDivisionError` |
+| `SFInvalidError` | `SFInvalidWarning` | NaN input, or sqrt of a negative | `ValueError` |
+
+## Device path warnings
+
+| Warning | When |
+|---|---|
+| `SFPreflightWarning` | the pre-flight probe suspects a heavy op will saturate everywhere, and `suspect="warn"` (the default) lets it launch |
+| `SFDeviceOverflowWarning` | a heavy op's status holds an upper-bound saturation count (a scan, not a fact) and overflow is not ignored |
+
+## Static errors (always raise)
+
+| Exception | When |
+|---|---|
+| `SFTypeError` | a foreign operand (`x + "0.25"`), a bad dtype, an implicit narrowing, mixing devices, a host array passed to a kernel |
+| `SFShapeError` | shapes do not broadcast or do not align for matmul; raised on the host before launch |
+| `SFUnsupportedError` | an operation the format does not define (`//`, `%`, `round()`, non-integer `**`), or a width a target does not support |
+| `SFLaunchError` | Stage 3: a kernel launch exceeds the target's limits; nothing launched |
+| `SFCompileError` | Stage 3: a kernel breaks the lockstep rule or cannot be compiled |
+| `SFDeviceError` | Stage 3: a device fault, or no hardware driver attached |
+
+## Reading a message
+
+Messages are written to be acted on. They name the width, the operation and the operands, the exact result, and the device value:
+
+```
+sf16: 0.75 + 0.5 = 1.25 is outside ±0.999969482421875 (saturates to 0.999969482421875)
+sf16 /: divide in 1 of 2 element(s)
+sf16 / on atreides: division by zero in 1 element(s) (status.div0)
+literal 1 is not representable in sf16 (max 0.999969482421875)
+```

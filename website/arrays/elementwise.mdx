@@ -1,0 +1,79 @@
+---
+title: "Elementwise operations and broadcasting"
+description: "Every scalar rule applied element by element, with NumPy broadcasting and events counted across the array."
+---
+
+## Operators
+
+The scalar operators work on arrays, element by element, with NumPy's broadcasting rules.
+
+```python
+import sf
+
+x = sf.array([0.1, -0.25, 0.5], dtype=sf.sf16)
+x * x           # sfarray([0.00997925, 0.0625    , 0.25      ], dtype=sf16)
+x + 0.25        # sfarray([0.3500061, 0.       , 0.75     ], dtype=sf16)
+
+A = sf.array([[0.1, 0.2], [0.3, 0.4]], dtype=sf.sf16)
+A + sf.array([0.1, 0.1], dtype=sf.sf16)       # the row broadcasts
+# sfarray([[0.20001221, 0.30001831],
+#          [0.3999939 , 0.5       ]], dtype=sf16)
+```
+
+Shapes that cannot broadcast raise `SFShapeError` before anything is computed.
+
+## Events are counted
+
+An event in any element is one event for the operation, reported with a count, and handled by the [policy](/errors/policy) in catalogue order:
+
+```python
+x + x
+# SFOverflowError: sf16 +: overflow in 1 of 3 element(s)
+
+sf.array([0.5, 0.25], dtype=sf.sf16) / sf.array([0.0, 0.5], dtype=sf.sf16)
+# SFZeroDivisionError: sf16 /: divide in 1 of 2 element(s)
+```
+
+Under a non-raising policy every element gets its hardware value:
+
+```python
+with sf.errstate(over="ignore"):
+    x + x       # sfarray([ 0.20001221, -0.5       ,  0.99996948], dtype=sf16)
+```
+
+## Masked division
+
+`sf.div(a, b, where=mask)` divides only where the mask is true. Other elements are 0 and raise nothing, which is the usual way to handle a divisor that may be zero:
+
+```python
+b = sf.array([0.5, 0.0, 0.75], dtype=sf.sf16)
+sf.div(x, b, where=b != 0)     # sfarray([0.20001221, 0.        , 0.66665649], dtype=sf16)
+```
+
+`where` only guards the zeros. An element where `|a| >= |b|` still overflows and is still reported.
+
+## Functions
+
+`sf.fma`, `sf.sqrt`, `sf.maximum`, `sf.minimum`, `sf.clip`, `sf.where` and `sf.cast` all accept arrays and broadcast.
+
+```python
+sf.sqrt(sf.array([0.25, 0.5], dtype=sf.sf16))    # sfarray([0.5       , 0.70709229], dtype=sf16)
+sf.clip(x, -0.2, 0.2)                            # sfarray([ 0.1000061 , -0.20001221,  0.20001221], dtype=sf16)
+sf.where(x > 0, x, 0)                            # sfarray([0.1000061, 0.       , 0.5      ], dtype=sf16)
+```
+
+## Comparisons give NumPy booleans
+
+```python
+x > 0           # array([ True, False,  True])
+x == 0.1        # array([False, False, False]): exact, as for scalars
+```
+
+## Casting
+
+```python
+x.astype(sf.sf8)          # sfarray([ 0.1015625, -0.25     ,  0.5      ], dtype=sf8)
+sf.cast(x, sf.sf8)        # the same
+```
+
+Narrowing re-quantizes through the policy with counts; widening is exact.

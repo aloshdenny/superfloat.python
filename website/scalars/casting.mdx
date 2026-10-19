@@ -1,0 +1,46 @@
+---
+title: "Casting between widths"
+description: "Widening is free and exact. Narrowing re-quantizes and goes through the error policy. Nothing narrows on its own."
+---
+
+## Widening is exact
+
+Every sf8 value is also an sf16 value (the code is shifted left by 8). Widening therefore never loses anything and never raises. It happens automatically when you mix widths:
+
+```python
+import sf
+
+sf.sf8(0.5) + sf.sf16(0.25)        # sf16(0.75)
+sf.cast(sf.sf8(0.1), sf.sf16)      # sf16(0.1015625): the sf8 rounding is kept
+sf.sf16(sf.sf8(0.5))               # sf16(0.5)
+```
+
+Note the second line: `sf.sf8(0.1)` is 13/128 = 0.1015625, and widening preserves that, not the original 0.1.
+
+## Narrowing must be explicit
+
+Going to fewer bits re-quantizes: the value is rounded to the nearest code of the narrower format (ties to even), and if that rounding overflows or underflows, the event goes through the [policy](/errors/policy).
+
+```python
+sf.cast(sf.sf16(0.1), sf.sf8)      # sf8(0.1015625)
+sf.cast(sf.sf16(0.999), sf.sf8)
+# SFOverflowError: sf16(0.998992919921875) is not representable in sf8 (max 0.9921875)
+sf.cast(sf.sf16(0.001), sf.sf8)    # sf8(0.0)   SFUnderflowWarning
+```
+
+Narrowing never happens implicitly. Passing a wider value where a narrower one is required raises `SFTypeError`:
+
+```python
+sf.sf8(sf.sf16(0.5))
+# SFTypeError: cannot store sf16 into sf8 implicitly; use sf.cast(x, sf.sf8)
+```
+
+This is deliberate: a silent narrowing could drop precision or saturate somewhere you did not expect.
+
+## Arrays
+
+`sf.cast(arr, dtype)` and `arr.astype(dtype)` do the same element by element, reporting events with counts. [Arrays: creating →](/arrays/creating)
+
+## Which widths exist
+
+All of sf4 to sf16 on the host. The device accepts sf16 only; placing a narrower array on a device raises `SFTypeError`.

@@ -1,0 +1,82 @@
+---
+title: "Creating arrays"
+description: "An SFArray is a NumPy int64 array of codes plus a dtype and a placement. Here is every way to make one."
+---
+
+## From values
+
+`sf.array` quantizes a list, a nested list or a NumPy array. The dtype is required unless the input already holds Superfloat values.
+
+```python
+import sf
+import numpy as np
+
+x = sf.array([0.1, -0.25, 0.5], dtype=sf.sf16)
+x               # sfarray([ 0.1000061, -0.25     ,  0.5      ], dtype=sf16)
+x.codes         # array([ 3277, -8192, 16384])
+x.shape         # (3,)
+x.dtype         # <class 'sf.sf16'>
+x.device        # 'host'
+
+sf.array([[0.1, 0.2], [0.3, 0.4]], dtype=sf.sf16)
+# sfarray([[0.1000061 , 0.20001221],
+#          [0.29998779, 0.3999939 ]], dtype=sf16)
+
+sf.asarray(np.array([0.5, 0.25]), dtype=sf.sf8)
+# sfarray([0.5 , 0.25], dtype=sf8)
+```
+
+`sf.asarray` returns the input itself when it is already an SFArray of the right dtype and placement; `sf.array` always copies.
+
+Quantization goes through the [error policy](/errors/policy) with counts, so one element at 1.0 in a thousand is reported as `overflow in 1 of 1000 element(s)`.
+
+## Filled arrays
+
+```python
+sf.zeros((2, 3))                     # sf16 zeros; dtype defaults to sf16 here
+sf.full((3,), 0.25, sf.sf16)         # sfarray([0.25, 0.25, 0.25], dtype=sf16)
+sf.ones((2,))
+# SFOverflowError: sf.ones: 1 is not representable in sf16 ...; use sf.full(shape, sf.info(sf.sf16).max, sf.sf16)
+```
+
+`sf.ones` exists for API symmetry but 1 does not fit in any width, so it follows the literal rule and raises unless overflow is ignored, in which case it saturates.
+
+## From codes
+
+When you have the integers the chip holds, skip quantization:
+
+```python
+sf.from_codes([16384, -8192], sf.sf16)     # sfarray([ 0.5 , -0.25], dtype=sf16)
+```
+
+Codes are validated against the width; an out-of-range code raises `SFTypeError`.
+
+## On a device
+
+Pass `device=` to place the array on a target. Only sf16 is accepted on Atreides.
+
+```python
+h = sf.asarray(x, device="atreides")
+h.device        # 'atreides'
+h.to("host")    # back to the host
+h.numpy()       # floats on the host
+```
+
+[The device path →](/arrays/device)
+
+## Attributes and methods
+
+| Name | Meaning |
+|---|---|
+| `codes`, `bits` | the integer codes / sign-magnitude patterns, as NumPy arrays |
+| `dtype`, `shape`, `ndim`, `size`, `device` | as in NumPy, plus placement |
+| `numpy()`, `tolist()` | values as floats |
+| `astype(dtype)` | cast, same as `sf.cast` |
+| `to(device)` | move |
+| `copy()`, `reshape(...)`, `flatten()`, `T`, `transpose(...)` | data movement; views where NumPy would give views |
+| `a[idx]` | NumPy indexing and slicing; a scalar index returns a scalar |
+| `sum`, `max`, `min`, `argmax`, `argmin` | reductions |
+| `any()`, `all()` | on the codes |
+| `status` | the `SFStatus` of the heavy op that produced the array, otherwise `None` |
+
+Arrays are immutable like scalars: no in-place assignment.

@@ -1,0 +1,55 @@
+---
+title: "Devices"
+description: "The registered targets, the Device interface, and how to add your own."
+---
+
+## `sf.devices()`
+
+The names of the registered targets, as a tuple:
+
+```python
+sf.devices()
+# ('host', 'atreides', 'atreides-flags', 'atreides-sim', 'atreides-hw')
+```
+
+| Name | Class | What it is |
+|---|---|---|
+| `host` | | The reference implementation in NumPy. |
+| `atreides` | `sf.MockAtreides` | Mock of the v1 chip: the same reference, no flags. The default device. |
+| `atreides-flags` | | The mock with sticky event flags, so statuses are exact. |
+| `atreides-sim` | `sf.SimulatorAtreides` | The Stage 3 simulator; runs the built-ins and user kernels. |
+| `atreides-hw` | `sf.HardwareAtreides` | Reserved for the chip. Raises `SFDeviceError` until a driver is attached. |
+
+## `sf.device(name="atreides-sim")` and `sf.get_device(name)`
+
+The target object by name. `SFUnsupportedError` for an unknown name.
+
+## `sf.register_device(device)`
+
+Add a target, or replace one with the same name. This is how a simulator or the real chip is plugged in.
+
+## The `Device` interface
+
+Subclass `sf.Device` and set:
+
+<ResponseField name="name" type="str">The name used in `device=` and `sf.devices()`.</ResponseField>
+<ResponseField name="supported_bits" type="tuple[int, ...]">Widths the target accepts; `(16,)` for Atreides.</ResponseField>
+<ResponseField name="sticky_flags" type="bool">`True` if `run` returns per-element event flags. With flags, statuses are exact and `over="raise"` applies to heavy ops.</ResponseField>
+<ResponseField name="accumulation_order, accumulator_bits" type="str, int">What the target does in reductions; the reference assumes sequential at data width.</ResponseField>
+<ResponseField name="max_elements" type="int">Largest buffer the target takes; checked before launch.</ResponseField>
+
+and implement:
+
+```python
+def run(self, op, fmt, *operands, **kw):
+    # op: "add" | "sub" | "mul" | "div" | "fma" | "sqrt" | "sum" | "dot" | "matmul" | ...
+    # fmt: the format record (fmt.bits, fmt.scale, fmt.max_code)
+    # operands: int64 NumPy arrays of codes
+    # returns (codes, flags): flags is None, or {"overflow": bool array, ...}
+```
+
+`sf.MockAtreides` in `src/sf/_device.py` is the reference implementation to copy from. Kernel-capable targets (Stage 3) add `limits`, `check_launch`, `launch`, `alloc`, `upload`, `download` and `synchronize`; see [plugging in hardware](/reference/hardware).
+
+## Counters
+
+Every device counts its launches in `device.launches`; kernel targets also count `kernel_launches`. The test suite uses these to prove that pre-flight refused a launch rather than running and discarding it.

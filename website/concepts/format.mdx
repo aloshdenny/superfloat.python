@@ -1,0 +1,81 @@
+---
+title: "The Superfloat format"
+description: "What an sfN value is: a signed integer code, a fixed scale, and a range that stops just short of 1."
+---
+
+## One integer, one scale
+
+An **sfN** value is a signed integer `k`, called the *code*, together with a fixed scale. Its value is
+
+```
+value = k / 2^(N-1)
+```
+
+For sf16 the scale is 2^15 = 32768, so the code 16384 means 16384 / 32768 = 0.5, and the smallest step between two values (the LSB) is 1 / 32768. There is no exponent: the spacing between neighbouring values is the same everywhere, unlike floating point.
+
+```python
+import sf
+
+v = sf.sf16(0.5)
+v.code        # 16384
+v.exact       # Fraction(1, 2), the value as an exact fraction (reduced)
+float(v)      # 0.5
+```
+
+## The range stops short of 1
+
+Codes run from `-M` to `+M` with `M = 2^(N-1) - 1`. For sf16 that is -32767 to 32767, so the largest value is 32767 / 32768 = 0.999969482421875. **1.0 is not representable in any width**, nor is -1.0, nor any other nonzero integer.
+
+```python
+sf.sf16(1)
+# SFOverflowError: 1 is not representable in sf16 (max 0.999969482421875)
+
+sf.info(sf.sf16).max    # 0.999969482421875
+```
+
+This matters in practice: `x + 1`, `x / x` and `sf.ones(...)` all hit this edge. The library tells you each time rather than quietly clipping.
+
+## The widths
+
+Every width from 4 to 16 bits is available on the host. The device format is sf16; the narrower widths exist for experiments and for models that must fit in fewer bits.
+
+| Type | Codes | Largest value | LSB |
+|---|---|---|---|
+| `sf.sf4` | -7 to 7 | 0.875 | 0.125 |
+| `sf.sf8` | -127 to 127 | 0.9921875 | 0.0078125 |
+| `sf.sf12` | -2047 to 2047 | 0.99951171875 | 0.000244140625 |
+| `sf.sf16` | -32767 to 32767 | 0.999969482421875 | 0.000030517578125 |
+
+`sf.info(dtype)` returns these constants for any width:
+
+```python
+sf.info(sf.sf8)
+# SFInfo(sf8: bits=8, lsb=0.0078125, max=0.9921875, min=-0.9921875, codes=255)
+```
+
+## Sign and magnitude on the wire
+
+The chip stores a code as a sign bit plus a magnitude, not as two's complement. `x.bits` gives that pattern; `x.code` gives the signed integer. They are the same for positive values and differ for negative ones.
+
+```python
+sf.sf16(0.5).bits      # 16384
+sf.sf16(-0.5).bits     # 49152   (sign bit set, magnitude 16384)
+sf.sf16(-0.5).code     # -16384
+```
+
+Negative zero does not exist: `sf.sf16(-0.0)` is `sf16(0.0)`.
+
+## What the format does not have
+
+- No NaN. A NaN input is an *invalid* event.
+- No infinity. An infinite input is an *overflow* event.
+- No subnormals and no exponent. The precision near 0 is the same as near 1.
+
+<Note>
+The term Superfloat comes from the chip's design; in fixed-point language sf16 is a Q1.15 number. Everything here follows from that one definition.
+</Note>
+
+## See also
+
+- [Rounding and truncation](/concepts/rounding-and-truncation): what happens when a result lands between two codes.
+- [Events](/concepts/events): what happens when a result lands outside the range.

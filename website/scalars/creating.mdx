@@ -1,0 +1,82 @@
+---
+title: "Creating values"
+description: "The thirteen scalar types, what they accept, and what you get back."
+---
+
+## The types
+
+`sf.sf4` through `sf.sf16` are classes; calling one quantizes your input.
+
+```python
+import sf
+
+sf.sf16(0.5)        # sf16(0.5)
+sf.sf16(0.1)        # sf16(0.100006103515625)
+sf.sf8(0.1)         # sf8(0.1015625)
+sf.sf4(0.3)         # sf4(0.25)
+sf.sf16()           # sf16(0.0)
+```
+
+`sf.dtypes` is the tuple of all thirteen. `sf.dtype(spec)` resolves a name, a bit count, a class or a value to the class:
+
+```python
+sf.dtype("sf8")     # <class 'sf.sf8'>
+sf.dtype(16)        # <class 'sf.sf16'>
+```
+
+## What the constructor accepts
+
+| Input | Behaviour |
+|---|---|
+| `int` | `0` only; any other integer is an overflow |
+| `float` | rounded to the nearest code, ties to even |
+| `Fraction`, `Decimal` | exact rational, then rounded |
+| `str` | parsed as an exact decimal: `sf.sf16("0.1")` is the fraction 1/10, not the float |
+| NumPy scalar | as the matching Python type |
+| another SF value | widened if narrower; a wider one must go through `sf.cast` |
+
+```python
+sf.sf16("0.1")               # sf16(0.100006103515625), same code as the float here
+sf.sf16(sf.sf8(0.5))         # sf16(0.5)
+sf.sf8(sf.sf16(0.5))
+# SFTypeError: cannot store sf16 into sf8 implicitly; use sf.cast(x, sf.sf8)
+```
+
+## Inputs that do not fit
+
+A value at or beyond ±1 overflows; a tiny value underflows to 0; NaN is invalid. Each goes through the [error policy](/errors/policy):
+
+```python
+sf.sf16(1)
+# SFOverflowError: 1 is not representable in sf16 (max 0.999969482421875)
+
+sf.sf16(0.99999)
+# SFOverflowError: 0.99999 is not representable in sf16 (max 0.999969482421875)
+
+sf.sf16(1e-6)
+# sf16(0.0)   SFUnderflowWarning: 1e-06 underflows to 0 in sf16
+
+sf.sf16(float("nan"))
+# SFInvalidError: nan is not a valid sf16 input
+```
+
+The overflow threshold is `1 - 2^-N` (the point where rounding would reach 1), not 1 itself: 0.99999 already rounds up to the unrepresentable 1.0 in sf16.
+
+## From a code or a bit pattern
+
+When you already have the integer the chip holds:
+
+```python
+sf.from_code(16384, sf.sf16)            # sf16(0.5)
+sf.from_bits(0x8000 | 16384, sf.sf16)   # sf16(-0.5): sign bit plus magnitude
+```
+
+`from_code` validates the range; a code outside ±M raises `SFTypeError`.
+
+## The largest value
+
+Since 1 is not representable, use `sf.info` when you need the top of the range:
+
+```python
+top = sf.sf16(sf.info(sf.sf16).max)     # sf16(0.999969482421875)
+```

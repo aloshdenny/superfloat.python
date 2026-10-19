@@ -1,0 +1,85 @@
+---
+title: "Arithmetic"
+description: "Add, subtract, multiply, divide, fused multiply-add, square root and powers, each with the exact rule the chip applies."
+---
+
+All arithmetic is integer arithmetic on codes with truncation toward zero, and the result keeps the wider of the two operand types. Literals are quantized first (see [Exactness](/concepts/exactness)).
+
+## Add and subtract
+
+Exact on codes, saturating at the edge. Never underflows.
+
+```python
+import sf
+
+sf.sf16(0.5) + sf.sf16(0.25)     # sf16(0.75)
+sf.sf16(0.3) - sf.sf16(0.7)      # sf16(-0.4000244140625)
+sf.sf16(0.75) + sf.sf16(0.5)
+# SFOverflowError: sf16: 0.75 + 0.5 = 1.25 is outside ±0.999969482421875 (saturates to 0.999969482421875)
+```
+
+## Multiply
+
+The product of two codes divided by the scale, truncated toward zero. It can never overflow (both inputs are below 1) but it can underflow to 0.
+
+```python
+sf.sf16(0.5) * sf.sf16(0.25)     # sf16(0.125)
+sf.sf16(0.3) * sf.sf16(0.3)      # sf16(0.0899658203125), truncated from 2949.12 codes to 2948
+sf.sf16(0.001) * sf.sf16(0.001)  # sf16(0.0)   SFUnderflowWarning
+```
+
+## Divide
+
+`a / b` computes `k_a × scale / k_b`, truncated. Because every value is below 1, the quotient fits only when `|a| < |b|`; otherwise it overflows. Dividing by zero is a divide event.
+
+```python
+sf.sf16(0.25) / sf.sf16(0.5)     # sf16(0.5)
+sf.sf16(0.1) / sf.sf16(0.3)      # sf16(0.333343505859375)
+sf.sf16(0.5) / sf.sf16(0.5)
+# SFOverflowError: sf16: 0.5 / 0.5 = 1.0 is outside ±0.999969482421875 ...
+sf.sf16(0.5) / sf.sf16(0)
+# SFZeroDivisionError: sf16: 0.5 / 0.0: division by zero (device value 0.999969482421875)
+```
+
+<Warning>
+`x / x` always overflows, because 1 is not representable. If you need a ratio that may reach 1, scale the numerator down first or compute on the host in floats and quantize the result.
+</Warning>
+
+`sf.div(a, b, where=mask)` on arrays divides only where the mask is true and never raises for the other elements. [Arrays: elementwise →](/arrays/elementwise)
+
+## Fused multiply-add
+
+`sf.fma(a, b, c)` is `a * b + c` with the product truncated once, then one saturating add. It gives the same bits as writing `a * b + c`, which is tested on every width; it exists because the chip has an fma instruction and reductions are built from it.
+
+```python
+sf.fma(sf.sf16(0.5), sf.sf16(0.5), sf.sf16(0.25))     # sf16(0.5)
+```
+
+## Square root
+
+`isqrt(k × scale)`, truncated. A negative input is an invalid event with device value 0.
+
+```python
+sf.sqrt(sf.sf16(0.25))     # sf16(0.5)
+sf.sqrt(sf.sf16(0.5))      # sf16(0.70709228515625)
+sf.sqrt(sf.sf16(-0.25))
+# SFInvalidError: sf16: sqrt(-0.25) of a negative value (device value 0.0)
+```
+
+## Negation, absolute value, powers
+
+```python
+-sf.sf16(0.5)              # sf16(-0.5)
+abs(sf.sf16(-0.5))         # sf16(0.5)
+sf.sf16(0.5) ** 3          # sf16(0.125): a left-to-right chain of multiplies
+```
+
+`**` accepts integer exponents of 1 or more only. The chain stops as soon as it reaches 0, so a large exponent is cheap.
+
+## Precedence
+
+Python's. `a * b + c` is the product, truncated, then the add, and matches `sf.fma`. There is no reassociation: `(a + b) + c` and `a + (b + c)` can differ by saturation, exactly as on the chip.
+
+## What raises `SFUnsupportedError`
+
+`//`, `%`, bitwise operators, `round()`, and `**` with a non-integer or negative exponent. Each would silently produce a non-Superfloat result; use `x.code` if you want integer arithmetic on the code.

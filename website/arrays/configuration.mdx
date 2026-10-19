@@ -1,0 +1,61 @@
+---
+title: "Configuration"
+description: "sf.config: the pre-flight strictness, the probe, how status is obtained, offloading, and the default device."
+---
+
+`sf.config(...)` sets runtime options. Like `errstate`, it works as a plain call, a context manager, or a decorator, and the settings are local to the current thread or asyncio task.
+
+```python
+import sf
+
+sf.config(preflight="warn")                 # process-wide for this thread
+
+with sf.config(suspect="verify"):           # for a block
+    y = h @ w
+
+@sf.config(status="replay")                 # for a function
+def exact_layer(h, w):
+    return h @ w
+
+sf.getconfig()
+# {'preflight': 'raise', 'suspect': 'warn', 'probe': True, 'probe_size': 256,
+#  'status': 'scan', 'offload_threshold': None, 'default_device': 'atreides', ...}
+```
+
+## Options
+
+<ParamField path="preflight" type='"raise" | "warn" | "ignore"' default="raise">
+  What to do when the host *proves* a heavy operation would saturate on every element. `raise` refuses it before launch with `SFOverflowError`; `warn` launches with `SFPreflightWarning`; `ignore` launches silently.
+</ParamField>
+
+<ParamField path="suspect" type='"warn" | "raise" | "verify" | "ignore"' default="warn">
+  What to do when the golden-vector probe *suspects* saturation everywhere. `warn` launches with `SFPreflightWarning`; `raise` refuses; `verify` replays the whole operation on the host and refuses only on proof; `ignore` launches silently.
+</ParamField>
+
+<ParamField path="probe" type="bool" default="true">
+  Run the probe at all for operations the range bound cannot decide.
+</ParamField>
+
+<ParamField path="probe_size" type="int" default="256">
+  How many elements the probe samples from the real inputs.
+</ParamField>
+
+<ParamField path="status" type='"scan" | "replay"' default="scan">
+  How `status.saturated` is obtained on a target without flags. `scan` counts outputs at ±max (a bound for elementwise ops, unknown for reductions); `replay` recomputes the events on the host for an exact count.
+</ParamField>
+
+<ParamField path="offload_threshold" type="int | None" default="None">
+  Host operations with more elements than this run on `default_device` instead. `None` never offloads.
+</ParamField>
+
+<ParamField path="default_device" type="str" default='"atreides"'>
+  The target used by offloading and by the PyTorch compile backend.
+</ParamField>
+
+<ParamField path="kernel_backend" type='"interp" | "c"' default="interp">
+  Stage 3: how the simulator executes kernels.
+</ParamField>
+
+## The error policy is separate
+
+`sf.config` controls the device path. What happens on an event (raise, warn, ignore) is `sf.seterr` / `sf.errstate`, documented under [Error policy](/errors/policy). The two compose: pre-flight decides whether to launch, and the policy decides how an event is surfaced, before or after.

@@ -143,4 +143,4 @@ Not done:
 | [docs/DETAILS.md](docs/DETAILS.md) | Module map, exact semantics tables, every config option, design notes per stage. |
 | [NOTES.md](NOTES.md) | Design decisions, open hardware questions, review history. |
 | `examples/` | A runnable tour per stage. |
-| `website/` | The developer docs site (Mintlify), generated from the files above by `python tools/build_site.py`. Edit the markdown, not the site. |
+| `website/` | The developer docs site at [docs.superfloat.si](https://docs.superfloat.si) (Mintlify, hand-written). |

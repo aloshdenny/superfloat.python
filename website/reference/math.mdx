@@ -1,0 +1,71 @@
+---
+title: "Math functions"
+description: "fma, div, sqrt, maximum, minimum, clip, where. All accept scalars and arrays and broadcast."
+---
+
+Every function here takes SF scalars, SF arrays, or host numbers where a literal is allowed, and returns the wider operand type. Host numbers are quantized like literals (through the policy); comparisons inside `where` masks are whatever you computed them with.
+
+## `sf.fma(a, b, c)`
+
+`a * b + c`: the product truncated toward zero once, then one saturating add. Identical bits to writing `a * b + c`.
+
+**Events:** overflow on the add; underflow on the product.
+
+```python
+sf.fma(sf.sf16(0.5), sf.sf16(0.5), sf.sf16(0.25))    # sf16(0.5)
+```
+
+## `sf.div(a, b, where=None)`
+
+`a / b`, truncated toward zero.
+
+<ParamField path="where" type="bool array | None" default="None">
+  Arrays only. Divide where the mask is true; other elements are 0 and raise nothing.
+</ParamField>
+
+**Events:** overflow when `|a| >= |b|`; divide when `b == 0` (unless masked out).
+
+```python
+b = sf.array([0.5, 0.0, 0.75], dtype=sf.sf16)
+sf.div(x, b, where=b != 0)     # sfarray([0.20001221, 0.        , 0.66665649], dtype=sf16)
+```
+
+## `sf.sqrt(a)`
+
+`isqrt(k × 2^(N-1))`, truncated toward zero.
+
+**Events:** invalid for a negative input (device value 0).
+
+```python
+sf.sqrt(sf.sf16(0.5))          # sf16(0.70709228515625)
+sf.sqrt(sf.sf16(-0.25))        # SFInvalidError: sf16: sqrt(-0.25) of a negative value (device value 0.0)
+```
+
+## `sf.maximum(a, b)` and `sf.minimum(a, b)`
+
+Elementwise selection on codes. Exact, no events. Run on the host even for device arrays.
+
+```python
+sf.maximum(sf.sf16(0.5), sf.sf16(0.25))     # sf16(0.5)
+```
+
+## `sf.clip(x, lo, hi)`
+
+Clamp to `[lo, hi]`. `lo` and `hi` are quantized like literals (so a bound of 1 raises); the clamp itself is exact.
+
+```python
+sf.clip(sf.sf16(0.9), -0.5, 0.5)     # sf16(0.5)
+```
+
+## `sf.where(cond, x, y)`
+
+`x` where `cond` is true, else `y`, elementwise. At least one branch must be an SF value; the other may be a literal. Exact, no events beyond quantizing a literal branch.
+
+```python
+x = sf.array([0.1, -0.25, 0.5], dtype=sf.sf16)
+sf.where(x > 0, x, 0)          # sfarray([0.1000061, 0.       , 0.5      ], dtype=sf16)
+```
+
+## Placement
+
+`fma`, `div` and `sqrt` are heavy when an operand is on a device (they run there and return a status). `maximum`, `minimum`, `clip` and `where` are selection: they run on the host and carry no status.

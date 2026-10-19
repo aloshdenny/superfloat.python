@@ -1,0 +1,75 @@
+---
+title: "Error policy"
+description: "Raise, warn or ignore, per event. Set it globally, for a block, or for a function. The value is always the hardware value."
+---
+
+Four events, three responses each. The policy decides whether Python tells you; it never changes the number.
+
+## Defaults
+
+```python
+import sf
+
+sf.geterr()
+# {'over': 'raise', 'under': 'warn', 'divide': 'raise', 'invalid': 'raise'}
+```
+
+Overflow, divide and invalid raise because they usually mean the data is outside what the format can hold. Underflow only warns because small products vanishing is normal.
+
+## Set it globally
+
+`sf.seterr` changes the policy for the current thread and returns the previous one, like `numpy.seterr`:
+
+```python
+old = sf.seterr(over="warn")
+sf.sf16(0.75) + sf.sf16(0.5)
+# sf16(0.999969482421875)   SFOverflowWarning: sf16: 0.75 + 0.5 = 1.25 is outside ±0.999969482421875 ...
+sf.seterr(**old)
+```
+
+`all=` sets every event at once: `sf.seterr(all="ignore")`.
+
+## Scope it
+
+`sf.errstate` is a context manager and a decorator. It works on plain and `async` functions, and each thread or asyncio task has its own policy, so a change in one request never leaks into another.
+
+```python
+with sf.errstate(over="ignore"):
+    sf.sf16(0.75) + 0.5          # sf16(0.999969482421875), silently
+
+@sf.errstate(under="ignore")
+def forward(x):
+    return x * w
+
+@sf.errstate(all="ignore")
+async def handler(request):
+    ...
+```
+
+## What you get under each response
+
+| Response | Overflow | Underflow | Divide | Invalid |
+|---|---|---|---|---|
+| `raise` | `SFOverflowError` | `SFUnderflowError` | `SFZeroDivisionError` | `SFInvalidError` |
+| `warn` | `SFOverflowWarning` | `SFUnderflowWarning` | `SFZeroDivisionWarning` | `SFInvalidWarning` |
+| `ignore` | the saturated value | 0 | `sign(a) × max`, 0 for 0/0 | 0 |
+
+Every exception and warning message states the device value, so you know what the chip would have returned even when you chose to raise.
+
+## Where errors point
+
+Errors are raised at, and warnings point to, *your* line, not a line inside the library. This holds through the operator overloads and the array machinery.
+
+## Arrays and the device
+
+On arrays an event is counted across elements and reported once: `overflow in 3 of 1000 element(s)`. When several events occur in one operation they are handled in catalogue order (invalid, divide, overflow, underflow): the first whose policy is `raise` raises; the others warn or are ignored per their setting.
+
+On the device path the same policy applies, but when: `div0` and `invalid` are decided on the host before launch; saturation is applied after launch from `result.status`. An exact count honours `raise`; an upper bound only warns (`SFDeviceOverflowWarning`); an unknown count is silent. [Status →](/arrays/status)
+
+## Static errors are not events
+
+`SFTypeError`, `SFShapeError`, `SFUnsupportedError` and the Stage 3 errors are programming errors, not numeric events. They always raise, whatever the policy. [Exceptions →](/errors/exceptions)
+
+## Turning warnings into errors in tests
+
+`sf` warnings are ordinary Python warnings. The library's own test suite runs with `filterwarnings = error::sf.SFWarning` so that an unexpected underflow fails a test; you can do the same with `warnings.simplefilter("error", sf.SFWarning)`.

@@ -26,7 +26,6 @@ jobs:
       - run: python examples/stage_1_0_tour.py
       - run: python examples/stage_3_tour.py                 # both kernel backends on the simulator
       - run: python tools/exhaustive.py --bits 12          # fast vectorised + Fraction boundary sweep
-      - run: python tools/build_site.py && git diff --exit-code -- website   # docs site is generated from the markdown
 
   nightly:
     # Spec section 10: sf16 exhaustive over all 4.3 billion pairs per binary op.

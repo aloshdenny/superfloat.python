@@ -1,0 +1,54 @@
+---
+title: "Comparisons and selection"
+description: "Exact comparisons, truth value, and the selection functions that never produce an event."
+---
+
+## Comparisons
+
+All six comparisons compare exact values. They never quantize a host number and never raise.
+
+```python
+import sf
+
+a = sf.sf16(0.5)
+a < sf.sf16(0.75)      # True
+a < 1                  # True (always: every value is below 1)
+a == 0.5               # True
+sf.sf16(0.1) == 0.1    # False: the stored value is 3277/32768
+a != 0.5               # False
+```
+
+Comparing values of different widths compares their exact values, so `sf.sf8(0.5) == sf.sf16(0.5)` is `True`.
+
+## Truth value
+
+`bool(x)` is `False` for zero and `True` otherwise. `int(x)` is 0 for every value, because the whole range lies inside (-1, 1); use `x.code` for the integer.
+
+```python
+bool(sf.sf16(0))       # False
+bool(sf.sf16(0.5))     # True
+```
+
+## Selection
+
+These pick one of their inputs. They work on codes, are exact, and cannot produce an event.
+
+```python
+sf.maximum(sf.sf16(0.5), sf.sf16(0.25))     # sf16(0.5)
+sf.minimum(sf.sf16(0.5), sf.sf16(0.25))     # sf16(0.25)
+sf.clip(sf.sf16(0.9), -0.5, 0.5)            # sf16(0.5)
+sf.where(a > 0, a, sf.sf16(0))              # sf16(0.5)
+```
+
+`clip`'s bounds and `where`'s branches follow the literal rule: a host number is quantized to the operand's type first. At least one branch of `where` must be a Superfloat value so the result type is known.
+
+## Guarded division
+
+The usual pattern for a division that might hit zero: compare first, select after.
+
+```python
+b = sf.sf16(0)
+sf.where(b != 0, sf.sf16(0.25) / sf.where(b != 0, b, sf.sf16(0.5)), sf.sf16(0))
+```
+
+On arrays this is what `sf.div(a, b, where=b != 0)` does for you. [Arrays: elementwise →](/arrays/elementwise)

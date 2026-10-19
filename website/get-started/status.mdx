@@ -1,0 +1,25 @@
+---
+title: "Project status"
+description: "What is implemented, what is verified, and what still needs the hardware."
+---
+
+## Implemented and verified
+
+| Stage | What | Verified against |
+|---|---|---|
+| 1.0 Scalars | types sf4 to sf16, casts, `+ - * /`, `fma`, `sqrt`, comparisons, the error policy | exact-fraction oracle; every input pair for sf4 to sf10 on each commit, every sf16 pair nightly |
+| 1.1 Arrays | NumPy-style arrays, broadcasting, reductions, `dot`, `@`, elementary functions, the device path with pre-flight and status | the scalar rules element by element; host and mock device bit for bit |
+| 2 PyTorch | `quantize`, `convert`, `autocast`, `torch.compile(backend="superfloat")` | recomputed through the array API; compiled equals emulated bit for bit |
+| 3 Kernels | thread and block kernels, the simulator with interpreter and C backends, autotune | the array built-ins; both backends identical in bits and event counts |
+
+Each stage went through an independent review and every finding is fixed with a regression test. 732 tests run on every commit.
+
+## Not yet done
+
+<Warning>
+**Silicon.** Everything above is proved on the host, a mock device and a simulator. Running the same cases on the chip needs the compiler, a driver, and the hardware team's answers to a few open questions (division and square-root fault values, accumulation order and width, flag readback). The hooks are in place; see [plugging in hardware](/reference/hardware).
+</Warning>
+
+- **Stage 1.2 diagnostics** (`sf.explain`): optional in the plan, deferred.
+- **Stage 2.3** (Atreides as a PyTorch device): deferred until the real transfer cost exists.
+- **Documentation for Stages 2 and 3** is being rewritten in this format; the current material is under Preview.

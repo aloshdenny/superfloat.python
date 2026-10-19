@@ -11,39 +11,61 @@
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "icon": "book-open",
         "groups": [
           {
-            "group": "Start here",
+            "group": "Get started",
             "pages": [
               "index",
-              "quickstart"
+              "get-started/installation",
+              "get-started/quickstart",
+              "get-started/status"
             ]
           },
           {
-            "group": "Using sf",
+            "group": "Concepts",
             "pages": [
-              "guides/scalars",
-              "guides/arrays",
-              "guides/pytorch",
-              "guides/kernels",
-              "guides/errors"
+              "concepts/format",
+              "concepts/rounding-and-truncation",
+              "concepts/events",
+              "concepts/exactness",
+              "concepts/host-and-device"
             ]
           },
           {
-            "group": "Tours",
+            "group": "Scalars",
             "pages": [
-              "tours/stage_1_0_tour",
-              "tours/stage_1_1_tour",
-              "tours/stage_2_tour",
-              "tours/stage_3_tour"
+              "scalars/creating",
+              "scalars/arithmetic",
+              "scalars/comparisons",
+              "scalars/casting",
+              "scalars/inspecting"
             ]
           },
           {
-            "group": "Project",
+            "group": "Arrays",
             "pages": [
-              "status"
+              "arrays/creating",
+              "arrays/elementwise",
+              "arrays/reductions",
+              "arrays/matmul",
+              "arrays/device",
+              "arrays/status",
+              "arrays/configuration"
+            ]
+          },
+          {
+            "group": "Errors",
+            "pages": [
+              "errors/policy",
+              "errors/exceptions"
+            ]
+          },
+          {
+            "group": "Testing",
+            "pages": [
+              "testing/how-sf-is-tested"
             ]
           }
         ]
@@ -53,26 +75,14 @@
         "icon": "code",
         "groups": [
           {
-            "group": "Semantics",
+            "group": "Stage 1",
             "pages": [
-              "reference/semantics"
-            ]
-          },
-          {
-            "group": "Stages 1 to 3",
-            "pages": [
-              "reference/scalars",
+              "reference/types",
               "reference/arrays",
-              "reference/config",
-              "reference/torch",
-              "reference/kernels"
-            ]
-          },
-          {
-            "group": "Types",
-            "pages": [
-              "reference/errors",
-              "reference/objects"
+              "reference/math",
+              "reference/linalg",
+              "reference/devices",
+              "reference/policy-and-config"
             ]
           },
           {
@@ -84,15 +94,23 @@
         ]
       },
       {
-        "tab": "Testing",
+        "tab": "Preview: PyTorch and kernels",
         "icon": "flask",
         "groups": [
           {
-            "group": "Testing",
+            "group": "PyTorch (Stage 2)",
             "pages": [
-              "testing/matrix",
-              "testing/test-files",
-              "testing/running"
+              "guides/pytorch",
+              "reference/torch",
+              "tours/stage_2_tour"
+            ]
+          },
+          {
+            "group": "Kernels (Stage 3)",
+            "pages": [
+              "guides/kernels",
+              "reference/kernels",
+              "tours/stage_3_tour"
             ]
           }
         ]
@@ -102,33 +120,19 @@
         "icon": "gear",
         "groups": [
           {
-            "group": "Detailed reference",
-            "pages": [
-              "details/install",
-              "details/what-is-in-the-package",
-              "details/semantics",
-              "details/arrays-and-the-device-path",
-              "details/pytorch",
-              "details/kernels",
-              "details/error-policy",
-              "details/beyond-the-spec",
-              "details/status-of-the-stage-1-1-gate"
-            ]
-          },
-          {
-            "group": "Decisions",
+            "group": "Design decisions",
             "pages": [
               "decisions/overview",
+              "decisions/design-rule-for-the-device-path-decide-on-the-host-launch-only-the-undecidable",
+              "decisions/error-policy-mechanics",
+              "decisions/immutability",
               "decisions/representation",
+              "decisions/review-history",
               "decisions/semantics-not-fixed-by-the-spec",
               "decisions/stage-1-1-decisions",
               "decisions/stage-2-decisions",
               "decisions/stage-3-decisions",
-              "decisions/immutability",
-              "decisions/error-policy-mechanics",
               "decisions/still-open-for-the-compiler-hardware-teams",
-              "decisions/design-rule-for-the-device-path-decide-on-the-host-launch-only-the-undecidable",
-              "decisions/review-history",
               "decisions/test-cost"
             ]
           }

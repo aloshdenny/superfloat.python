@@ -7,7 +7,7 @@ description: "Decision log: stage 2 decisions"
 |---|---|---|
 | Default scale policy (spec section 12 open question) | weights per tensor by default, per channel on request (`scale=`); activations dynamic per call; float scales on the host | `torch/_core.py` |
 | Headroom | `"bound"` (default): raise the activation scale until the L1 bound proves no partial sum or bias add can saturate; `"none"`: raw scale, saturation counted. Measured: without headroom a trained MLP drops from 0.95 to 0.18 accuracy | `torch/_core._activation` |
-| Matmul bound | tightened from the spec's `K max\|A\| max\|B\|` to `min(max_i \|\|a_i\|\|_1 max\|b\|, max\|a\| max_j \|\|b_j\|\|_1)`, never looser, exact integer arithmetic; used by both pre-flight and the headroom search, so what the host proves safe the device pre-flight proves safe too | `_linalg.matmul_bound` |
+| Matmul bound | tightened from the spec's `K max\\|A\\| max\\|B\\|` to `min(max_i \\|\\|a_i\\|\\|_1 max\\|b\\|, max\\|a\\| max_j \\|\\|b_j\\|\\|_1)`, never looser, exact integer arithmetic; used by both pre-flight and the headroom search, so what the host proves safe the device pre-flight proves safe too | `_linalg.matmul_bound` |
 | Bias | added after the chain as one saturating add (`addmm` semantics of 1.1), quantized in the accumulator scale `a s_w`; a bias that does not fit is counted as `bias_saturated` | `torch/_core.linear` |
 | Gradients | straight-through: `quantize` passes the gradient where the input was in range, 0 where it saturated; `linear` / `matmul` use the float gradient with the dequantized weight | `torch/_ops.py` |
 | Output dtype | float32 for float16 / bfloat16 / float32 inputs, float64 for float64 (bfloat16 and float16 cannot hold 32767/32768) | `torch/_ops.out_dtype` |

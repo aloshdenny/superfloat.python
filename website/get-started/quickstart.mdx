@@ -1,0 +1,121 @@
+---
+title: "Quickstart"
+description: "From a single value to a matrix multiply on the device, with the chip's exact results at every step."
+---
+
+This walk-through takes about five minutes. Every output shown is what the code prints.
+
+<Steps>
+  <Step title="Create a value">
+    An sf16 value is a 16-bit fixed-point number between -1 and 1. Creating one rounds your input to the nearest representable value.
+
+    ```python
+    import sf
+
+    a = sf.sf16(0.5)
+    a                   # sf16(0.5)
+
+    b = sf.sf16(0.1)
+    b                   # sf16(0.100006103515625)
+    b.code              # 3277, the integer the chip stores (3277 / 32768)
+    ```
+
+    0.1 is not exactly representable, so you get the nearest code. `sf` never hides this: comparisons are exact, so `b == 0.1` is `False`.
+  </Step>
+
+  <Step title="Do arithmetic">
+    The operators do what the chip does: exact integer arithmetic, truncated toward zero.
+
+    ```python
+    a + b               # sf16(0.600006103515625)
+    a * b               # sf16(0.04998779296875)
+    b / a               # sf16(0.20001220703125)
+    ```
+  </Step>
+
+  <Step title="See what happens at the edge">
+    Results that do not fit are not silent. The default policy raises on overflow and divide by zero and warns on underflow.
+
+    ```python
+    sf.sf16(0.75) + sf.sf16(0.5)
+    # SFOverflowError: sf16: 0.75 + 0.5 = 1.25 is outside ±0.999969482421875 (saturates to 0.999969482421875)
+
+    sf.sf16(0.001) * sf.sf16(0.001)
+    # sf16(0.0), with SFUnderflowWarning: ... underflows to 0
+
+    sf.sf16(0.5) / sf.sf16(0)
+    # SFZeroDivisionError: sf16: 0.5 / 0.0: division by zero (device value 0.999969482421875)
+    ```
+
+    To get the hardware value without the exception, change the policy for a block:
+
+    ```python
+    with sf.errstate(over="ignore"):
+        sf.sf16(0.75) + sf.sf16(0.5)    # sf16(0.999969482421875)
+    ```
+
+    The message always tells you the device value, because that is what the chip would have produced.
+  </Step>
+
+  <Step title="Move to arrays">
+    Arrays follow NumPy's rules and apply the scalar rules element by element.
+
+    ```python
+    x = sf.array([0.1, -0.25, 0.5], dtype=sf.sf16)
+    x * x               # sfarray([0.00997925, 0.0625, 0.25], dtype=sf16)
+    x + 0.25            # sfarray([0.3500061, 0., 0.75], dtype=sf16)
+    x.sum()             # sf16(0.350006103515625)
+    x.codes             # array([ 3277, -8192, 16384])
+    ```
+
+    An event in any element is reported with a count:
+
+    ```python
+    x + x
+    # SFOverflowError: sf16 +: overflow in 1 of 3 element(s)
+    ```
+  </Step>
+
+  <Step title="Multiply matrices on the device">
+    Place arrays on a target with `device=` and the heavy operations run there. The result carries a status.
+
+    ```python
+    A = sf.array([[0.5, 0.25], [0.1, 0.2]], dtype=sf.sf16)
+    B = sf.array([[0.5, 0.0], [0.25, 0.5]], dtype=sf.sf16)
+
+    h = sf.asarray(A, device="atreides")
+    w = sf.asarray(B, device="atreides")
+    y = h @ w
+    y
+    # sfarray([[0.3125, 0.125], [0.09997559, 0.1000061]], dtype=sf16, device='atreides')
+    y.status
+    # SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+    y.numpy()           # back to floats on the host
+    ```
+
+    `exact=True` here means the host proved before the launch that no partial sum could saturate, so the status is a fact, not a scan.
+  </Step>
+</Steps>
+
+## What just happened
+
+- Every value you saw is an integer code divided by 32768. The float you print is a convenience; the code is the truth.
+- Casts round to nearest; arithmetic truncates toward zero; adds and subtracts saturate. These are the hardware's rules, and `sf` follows them exactly. [The format →](/concepts/format)
+- Nothing reaches the device that the host could decide on its own. The matmul above was proven safe before launch. [Host and device →](/concepts/host-and-device)
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Scalars" href="/scalars/creating" icon="1">
+    Creating values, arithmetic, comparisons, casting, inspecting bits.
+  </Card>
+  <Card title="Arrays" href="/arrays/creating" icon="table-cells">
+    Creating, broadcasting, reductions, matmul, the device path, status.
+  </Card>
+  <Card title="Error policy" href="/errors/policy" icon="shield">
+    Raise, warn or ignore, per event, per block of code.
+  </Card>
+  <Card title="API reference" href="/reference/types" icon="code">
+    Every function with its signature, events and an example.
+  </Card>
+</CardGroup>

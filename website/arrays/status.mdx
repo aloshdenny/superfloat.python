@@ -1,0 +1,78 @@
+---
+title: "Reading result.status"
+description: "What SFStatus contains, when its numbers are exact, and how to make them exact when they are not."
+---
+
+Every array produced by a heavy operation carries an `SFStatus`:
+
+```python
+y.status
+# SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+```
+
+## The fields
+
+| Field | Meaning |
+|---|---|
+| `saturated` | how many outputs saturated: an int, or `None` when the runtime cannot know |
+| `div0` | how many divisions by zero; always exact, found on the host before launch |
+| `invalid` | how many invalid inputs (NaN, sqrt of a negative); always exact, found before launch |
+| `exact` | `True` when `saturated` is a fact, `False` when it is a bound or unknown |
+| `outputs_at_max` | how many outputs sit at ±max, the raw scan |
+| `ok` | `True` if no event, `False` if any, `None` if `saturated` is unknown and nothing else fired |
+| `known` | `True` when nothing in the status is unknown |
+
+## Three kinds of saturation count
+
+Atreides v1 has no saturation flag the host can read back, so the library distinguishes what it knows from what it guesses.
+
+<Tabs>
+  <Tab title="Exact: proven on the host">
+    The pre-flight range bound showed no element could saturate. The launch was marked safe and no scan ran.
+
+    ```python
+    SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+    ```
+  </Tab>
+  <Tab title="Upper bound: elementwise op">
+    The output was scanned for ±max. An element at max may have arrived there legitimately, so the count is a ceiling, shown as `<=`.
+
+    ```python
+    SFStatus(saturated<=1, div0=0, invalid=0, exact=False)
+    ```
+
+    The policy only warns on a bound (`SFDeviceOverflowWarning`), never raises.
+  </Tab>
+  <Tab title="Unknown: reduction">
+    A partial sum in `sum`, `dot` or `@` can saturate and come back into range, so a scan cannot see it. The count is `None`.
+
+    ```python
+    SFStatus(saturated=unknown (outputs_at_max=16), div0=0, invalid=0, exact=False)
+    ```
+
+    `ok` is `None` here: the library will not claim the result is fine.
+  </Tab>
+</Tabs>
+
+## Making it exact
+
+Two options when you need a real count:
+
+**Replay on the host.** `sf.config(status="replay")` recomputes the events with the host reference after the launch. Exact, at the cost of doing the work twice.
+
+```python
+with sf.config(status="replay"):
+    (h @ w).status      # SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+```
+
+**A target with flags.** A device whose `run` returns per-element event flags (`sticky_flags=True`) gives exact counts for free. `atreides-flags` is the mock that does this; with it, `over="raise"` applies to heavy ops like any other.
+
+```python
+hf = sf.asarray(A, device="atreides-flags")
+wf = sf.asarray(B, device="atreides-flags")
+(hf @ wf).status        # SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+```
+
+## Host arrays
+
+A host array has no status: `x.status` is `None`. Host operations report their events immediately through the policy instead.
