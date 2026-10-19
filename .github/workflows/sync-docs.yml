@@ -1,0 +1,42 @@
+name: sync docs to superfloat-site
+
+# website/ is the Mintlify site behind docs.superfloat.si. Mintlify builds it from docs/ in
+# aloshdenny/superfloat-site, so every change here is copied there. SITE_DEPLOY_KEY is a
+# deploy key with write access to that repo only.
+
+on:
+  push:
+    branches: [main]
+    paths: ["website/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: sync-docs
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: python
+      - uses: actions/checkout@v4
+        with:
+          repository: aloshdenny/superfloat-site
+          ssh-key: ${{ secrets.SITE_DEPLOY_KEY }}
+          path: site
+      # website/ replaces docs/ wholesale, except the README the site keeps for that folder
+      - run: rsync -a --delete --exclude README.md python/website/ site/docs/
+      - name: Commit and push if anything changed
+        working-directory: site
+        run: |
+          git add -A docs
+          if git diff --cached --quiet; then
+            echo "docs/ is already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Sync docs from superfloat.python@${GITHUB_SHA::7}"
+          git push
