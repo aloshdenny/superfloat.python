@@ -263,3 +263,16 @@ def test_known_answers_still_come_first_on_a_target_without_divide(v1):
     z = sf.asarray(np.array([0.0, 0.5]), dtype=sf.sf16, device=v1.name)
     with pytest.raises(sf.SFZeroDivisionError):
         a / z
+
+
+# --- 4. a converted model compiles to one graph (torch 2.11 broke it into five) -------------------
+
+def test_converted_models_compile_without_graph_breaks():
+    torch = pytest.importorskip("torch")
+    import sf.torch as sft
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_2_2_compile import Attention
+    torch.manual_seed(0)
+    with torch.no_grad():
+        ex = torch._dynamo.explain(sft.convert(Attention()))(torch.randn(2, 5, 16))
+    assert ex.graph_count == 1, [str(b.reason)[:200] for b in ex.break_reasons]

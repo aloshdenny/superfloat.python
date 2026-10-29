@@ -157,6 +157,25 @@ what `sf.explain` (Stage 1.2) reports per op.
 
 ## Review history
 
+The v1 RTL report (superfloat.gpu, 2026-10-19 and 2026-10-27) ran the suite on the
+signed-off v1 chip in Verilator: 727 of 732, the four device failures being the
+missing divide and square-root instructions. Framework findings fixed, with
+regressions in `tests/test_review_findings_rtl.py`:
+(1) a kernel driver that cannot read events back reports counts as `None` and the
+status says unknown instead of "0, exact"; `exact=False` makes counts a bound;
+`status="replay"` reruns on the host, takes exact counts and checks the target's
+bits; (2) `SFStatus.underflow`, exact with flags or replay, 0 where impossible,
+proven 0 on the host when the two smallest nonzero factors multiply to at least
+the scale, otherwise unknown; the policy applies to it; (3) the C build cache
+compiles to a temp name and publishes with `os.replace`; (4) `sf.torch._bits`
+no longer calls `sf.info`, whose Fraction-to-float Dynamo 2.11 cannot trace (5
+graphs became 1); (5) a layer's saturation is the union of the matmul's and the
+bias add's per-output masks when the target gives them; two nonzero counts are
+summed and marked inexact. `Device.supported_ops` lets a target without divide or
+square root refuse those ops on the host before launch. Open, for discussion:
+finding 6 (a v4 numeric mode: wide accumulator, one rounding at the pop,
+power-of-two scales) and finding 7 (packed N-bit storage at the device boundary).
+
 A fourth independent review (Stage 3 drop, 2026-10-18) found: exact literal
 comparisons lowered as "code * denominator op numerator", which overflows
 int64 for small or huge literals (`v < 0.0001` true for 0.5); writes through
