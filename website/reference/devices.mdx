@@ -37,6 +37,7 @@ Subclass `sf.Device` and set:
 <ResponseField name="sticky_flags" type="bool">`True` if `run` returns per-element event flags. With flags, statuses are exact and `over="raise"` applies to heavy ops.</ResponseField>
 <ResponseField name="accumulation_order, accumulator_bits" type="str, int">What the target does in reductions; the reference assumes sequential at data width.</ResponseField>
 <ResponseField name="max_elements" type="int">Largest buffer the target takes; checked before launch.</ResponseField>
+<ResponseField name="supported_ops" type="frozenset[str] | None">The heavy ops the target has instructions for; `None` means all. Any other op is refused on the host with `SFUnsupportedError` before `run` is called, after the known-answer checks (a divide by zero is still reported as one). Atreides v1, for example, has no divide or square root.</ResponseField>
 
 and implement:
 

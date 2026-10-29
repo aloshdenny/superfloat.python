@@ -82,17 +82,27 @@ class DeviceRunner:
         A, B = self._arrays(fmt, ka, kb)
         with sf.errstate(all="ignore"):
             C = A @ B
-        st = C.status
-        return np.asarray(C.codes, dtype=np.int64), {"saturated": st.saturated, "underflow": None,
-                                                     "exact": st.exact}
+        return np.asarray(C.codes, dtype=np.int64), self._events(C, under=True)
 
     def add(self, fmt, ka, kb):
         import sf
         A, B = self._arrays(fmt, ka, kb)
         with sf.errstate(all="ignore"):
             C = A + B
+        return np.asarray(C.codes, dtype=np.int64), self._events(C, under=False)
+
+    @staticmethod
+    def _events(C, under: bool) -> dict:
+        """Per-output masks when the target reported them (flags or replay),
+        so a layer can take the union of its steps' events like the host does;
+        otherwise the status counts."""
         st = C.status
-        return np.asarray(C.codes, dtype=np.int64), {"saturated": st.saturated, "exact": st.exact}
+        masks = getattr(C, "_events", None)
+        if masks is not None:
+            return {"saturated": np.asarray(masks.get("overflow", np.zeros(np.shape(C.codes), bool))),
+                    "underflow": np.asarray(masks["underflow"]) if "underflow" in masks else st.underflow,
+                    "exact": True}
+        return {"saturated": st.saturated, "underflow": st.underflow if under else 0, "exact": st.exact}
 
 
 # --- results -----------------------------------------------------------------------
@@ -272,8 +282,8 @@ def linear(x: np.ndarray, w: np.ndarray, b: np.ndarray | None, bits: int,
             kb, ev_b = _cast(fmt, b / (a * s_w))
         bias_sat = _count(ev_b["overflow"])
         acc, ev2 = runner.add(fmt, acc, np.broadcast_to(kb, acc.shape))
-        sat = _merge(sat, ev2["saturated"])
-        exact = exact and ev2["exact"]
+        sat, merged_exact = _merge(sat, ev2["saturated"])
+        exact = exact and ev2["exact"] and merged_exact
     with np.errstate(over="ignore"):                  # a true float64 overflow is inf, as in float
         y = acc / S * a * s_w[None, :]
     return CoreResult(
@@ -284,12 +294,23 @@ def linear(x: np.ndarray, w: np.ndarray, b: np.ndarray | None, bits: int,
 
 
 def _merge(a, b):
-    """Combine two per-output saturation reports (masks, counts or None)."""
+    """Combine the matmul's and the bias add's per-output saturation reports
+    (masks, counts or None).  Returns ``(report, exact)``.
+
+    The layer's count is the number of outputs that saturated in either step,
+    the union.  Masks give it exactly.  Two nonzero counts cannot: an output
+    can saturate in both steps, so their sum is only an upper bound and the
+    result is marked inexact.  A zero count adds nothing, so it stays exact."""
     if a is None or b is None:
-        return None
+        return None, False
     if isinstance(a, np.ndarray) and isinstance(b, np.ndarray):
-        return a | b
-    return _count(a) + _count(b)      # counts from a device: an upper bound on the union
+        return a | b, True
+    ca, cb = _count(a), _count(b)
+    if ca == 0:
+        return b, True
+    if cb == 0:
+        return a, True
+    return ca + cb, False
 
 
 # --- matmul of two activations --------------------------------------------------------------

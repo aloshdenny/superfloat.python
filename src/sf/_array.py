@@ -147,7 +147,7 @@ def _nest(obj, leaf):
 class SFArray:
     """N-dimensional array of one SF dtype."""
 
-    __slots__ = ("_codes", "_dtype", "_device", "_status")
+    __slots__ = ("_codes", "_dtype", "_device", "_status", "_events")
     __array_ufunc__ = None          # NumPy defers to our reflected operators
 
     def __init__(self, obj: Any, dtype: Any = None, device: str = _device.HOST) -> None:
@@ -171,6 +171,7 @@ class SFArray:
         self._dtype = cls
         self._device = _device.HOST
         self._status = None
+        self._events = None
         if device != _device.HOST:
             self._device = _device.get_device(device).name
             _device.get_device(device).check(fmt, codes.size)
@@ -182,6 +183,7 @@ class SFArray:
         obj._dtype = dtype
         obj._device = device
         obj._status = status
+        obj._events = None
         return obj
 
     # --- introspection ---------------------------------------------------------
@@ -481,6 +483,25 @@ def _should_offload(total: int) -> bool:
 _REDUCTIONS = ("sum", "matmul")
 
 
+# ops whose result can underflow (a nonzero product truncated to 0); the rest never do
+_CAN_UNDERFLOW = ("mul", "fma", "matmul", "pow")
+
+
+def _no_underflow_possible(op, fmt, codes) -> bool:
+    """A nonzero product underflows only when |k_a k_b| < scale.  If the two
+    smallest nonzero magnitudes already multiply to at least the scale, no
+    product of the op can underflow: O(inputs), no launch needed."""
+    if op not in ("mul", "fma", "matmul"):
+        return False
+    mins = []
+    for c in codes[:2]:
+        nz = np.abs(np.asarray(c))[np.asarray(c) != 0]
+        if nz.size == 0:
+            return True                                    # every product is exactly 0
+        mins.append(int(nz.min()))
+    return mins[0] * mins[1] >= fmt.scale
+
+
 def _run_heavy(op, fmt, dtype, device, codes, out_shape, kw):
     dev = _device.get_device(device)
     dev.check(fmt, max(int(np.prod(out_shape)) if out_shape else 1,
@@ -495,26 +516,45 @@ def _run_heavy(op, fmt, dtype, device, codes, out_shape, kw):
         _errstate.handle("divide", f"{fmt.name} {opname} on {dev.name}: division by zero in "
                                    f"{verdict.events['div0']} element(s) (status.div0)")
     verdict = _preflight.decide(verdict, op, fmt, *codes, **kw)
+    ops = getattr(dev, "supported_ops", None)
+    if ops is not None and op not in ops:              # the target has no instruction for it
+        raise SFUnsupportedError(f"{fmt.name} {opname} has no instruction on {dev.name} "
+                                 f"(supported: {', '.join(sorted(ops))}); nothing was launched")
     kw = {k: v for k, v in kw.items() if k != "live"}        # the gate's mask never reaches a kernel
     result, flags = dev.run(op, fmt, *codes, **kw)
     result = np.asarray(result, dtype=np.int64)
     result = np.broadcast_to(result, out_shape).copy() if result.shape != tuple(out_shape) else result
     at_max = int(np.count_nonzero(np.abs(result) == fmt.max_code))
-    if verdict.kind == "safe":
-        saturated, exact = 0, True                         # proved on the host; no scan needed
-    elif dev.sticky_flags and flags is not None and "overflow" in flags:
-        saturated, exact = int(np.count_nonzero(flags["overflow"])), True
+    can_under = op in _CAN_UNDERFLOW
+    masks = None                                           # per-output event masks, when known exactly
+    if dev.sticky_flags and flags is not None:
+        masks = {k: np.broadcast_to(np.asarray(v, dtype=bool), out_shape) for k, v in flags.items()}
     elif _config.get("status") == "replay":
         _, events = _preflight.host_events(op, fmt, *codes, **kw)
-        saturated, exact = int(np.count_nonzero(events.get("overflow", 0))), True
+        masks = {k: np.broadcast_to(np.asarray(v, dtype=bool), out_shape)
+                 for k, v in events.items() if k in ("overflow", "underflow")}
+    if can_under and masks is None and _no_underflow_possible(op, fmt, codes):
+        can_under = False                                  # proved on the host: no product reaches 0
+    if masks is not None:
+        saturated, exact = int(np.count_nonzero(masks.get("overflow", False))), True
+        underflow = int(np.count_nonzero(masks["underflow"])) if "underflow" in masks else \
+            (None if can_under else 0)
+    elif verdict.kind == "safe":
+        saturated, exact = 0, True                         # proved on the host; no scan needed
+        underflow = None if can_under else 0
     elif op in _REDUCTIONS:
-        saturated, exact = None, False                      # a partial sum can saturate and come back
+        saturated, exact = None, False                     # a partial sum can saturate and come back
+        underflow = None if can_under else 0
     else:
-        saturated, exact = at_max, False                    # elementwise: a true upper bound
+        saturated, exact = at_max, False                   # elementwise: a true upper bound
+        underflow = None if can_under else 0
     status = SFStatus(saturated=saturated, div0=verdict.events.get("div0", 0),
-                      invalid=verdict.events.get("invalid", 0), exact=exact, outputs_at_max=at_max)
+                      invalid=verdict.events.get("invalid", 0), exact=exact, outputs_at_max=at_max,
+                      underflow=underflow)
     _apply_status_policy(status, fmt, opname, dev)
-    return SFArray._wrap(result, dtype, dev.name, status)
+    out = SFArray._wrap(result, dtype, dev.name, status)
+    out._events = masks                                    # for callers that merge events per output
+    return out
 
 
 def _apply_status_policy(status: SFStatus, fmt: SFFormat, opname: str, dev) -> None:
@@ -522,8 +562,14 @@ def _apply_status_policy(status: SFStatus, fmt: SFFormat, opname: str, dev) -> N
     div0 and invalid were already handled before launch (they are exact).
     An exact saturation count honours the policy; an upper bound only warns
     (spec 3.4); an unknown count says nothing."""
-    if status.saturated is None or status.saturated == 0:
-        return
+    if status.saturated:
+        _overflow_policy(status, fmt, opname, dev)
+    if status.underflow:                                   # only ever an exact count
+        _errstate.handle("underflow", f"{fmt.name} {opname} on {dev.name}: underflow in "
+                                      f"{status.underflow} element(s) (status.underflow)")
+
+
+def _overflow_policy(status: SFStatus, fmt: SFFormat, opname: str, dev) -> None:
     msg = (f"{fmt.name} {opname} on {dev.name}: saturation in "
            f"{'' if status.exact else '<='}{status.saturated} element(s) (status.saturated)")
     if status.exact:
@@ -651,7 +697,12 @@ def matmul(a, b):
         codes = codes[..., 0] if not squeeze_row else codes[..., 0]
     if codes.ndim == 0 and out.device == _device.HOST:
         return dtype.from_code(int(codes))
-    return SFArray._wrap(codes, dtype, out.device, out.status)
+    res = SFArray._wrap(codes, dtype, out.device, out.status)
+    ev = getattr(out, "_events", None)
+    if ev is not None:                                     # keep per-output masks, squeezed like the codes
+        res._events = {k: np.asarray(v).reshape(out._codes.shape).reshape(codes.shape)
+                       if v.size == codes.size else v for k, v in ev.items()}
+    return res
 
 
 def addmm(a, b, d):

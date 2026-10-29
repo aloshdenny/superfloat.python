@@ -24,7 +24,8 @@ import numpy as np
 
 from .. import _config, _device, _errstate
 from .._array import SFArray
-from .._errors import SFCompileError, SFDeviceError, SFLaunchError, SFTypeError, SFUnsupportedError
+from .._errors import (SFCompileError, SFDeviceError, SFDeviceOverflowWarning, SFLaunchError, SFTypeError,
+                       SFUnsupportedError)
 from .._scalar import SFScalar
 from .._status import SFStatus
 from . import _ir
@@ -366,17 +367,44 @@ def _launch(k: Kernel, grid, block, bound, constexpr, config_tag=None) -> Launch
     scalars = {n: (v._code if isinstance(v, SFScalar) else int(v)) for n, v in bound
                if not isinstance(v, SFArray) and n not in constexpr}
     dev.check_launch(ir, grid, block, buffers)                 # before launch (3.0 gate)
+    replay = _config.get("status") == "replay"
+    before = {n: b.copy() for n, b in buffers.items()} if replay else None
     t0 = time.perf_counter()
     counters = dev.launch(ir, grid, block, buffers, scalars)
     counters_wall = time.perf_counter() - t0
-    status = SFStatus(saturated=counters.saturated, div0=counters.div0, invalid=counters.invalid,
-                      exact=True, outputs_at_max=0)
+    status = _kernel_status(k, ir, grid, buffers, scalars, before, counters, dev)
     res = LaunchResult(k.name, grid, block, dev.name, status, counters,
                        _config.get("kernel_backend"), config=dict(constexpr))
     res.wall = counters_wall
     dev.last = res
     _apply_policy(status, k.name, dev)
     return res
+
+
+_EVENTS = ("saturated", "underflow", "div0", "invalid")
+
+
+def _kernel_status(k, ir, grid, buffers, scalars, before, counters, dev) -> SFStatus:
+    """Build the launch status from what the target reported.  A count the
+    target could not read back (``None``) stays unknown and a bound stays a
+    bound, unless ``status="replay"`` recomputes every event on the host
+    reference; replay also checks the target's output bits against it."""
+    got = {e: getattr(counters, e, None) for e in _EVENTS}
+    exact = bool(getattr(counters, "exact", True))
+    complete = exact and all(v is not None for v in got.values())
+    if before is not None and not complete:
+        ref_bufs = {n: b.copy() for n, b in before.items()}
+        ref = Interpreter(ir, ref_bufs, scalars, grid, dev.limits).run()
+        for n, b in ref_bufs.items():
+            if not np.array_equal(b, buffers[n]):
+                bad = int(np.count_nonzero(b != buffers[n]))
+                raise SFDeviceError(f"kernel {k.name!r} on {dev.name}: {bad} element(s) of {n!r} differ "
+                                    f"from the host reference (status replay)")
+        got = {e: getattr(ref, e) for e in _EVENTS}
+        exact = True
+    return SFStatus(saturated=got["saturated"], div0=got["div0"] or 0, invalid=got["invalid"] or 0,
+                    exact=exact and got["saturated"] is not None, outputs_at_max=0,
+                    underflow=got["underflow"] if exact else None)
 
 
 def _apply_policy(status: SFStatus, name: str, dev) -> None:
@@ -386,9 +414,17 @@ def _apply_policy(status: SFStatus, name: str, dev) -> None:
     if status.div0:
         _errstate.handle("divide", f"kernel {name!r} on {dev.name}: division by zero in "
                                    f"{status.div0} lane(s) (status.div0)")
-    if status.saturated:
+    if status.saturated and status.exact:
         _errstate.handle("overflow", f"kernel {name!r} on {dev.name}: saturation in "
                                      f"{status.saturated} lane(s) (status.saturated)")
+    elif status.saturated and _errstate.geterr()["over"] != "ignore":
+        import warnings
+        warnings.warn(f"kernel {name!r} on {dev.name}: saturation in <={status.saturated} lane(s) "
+                      f"(status.saturated, a bound from the target)", SFDeviceOverflowWarning,
+                      stacklevel=_errstate._user_stacklevel())
+    if status.underflow:
+        _errstate.handle("underflow", f"kernel {name!r} on {dev.name}: underflow in "
+                                      f"{status.underflow} lane(s) (status.underflow)")
 
 
 # --- autotune (3.3) -------------------------------------------------------------------------------

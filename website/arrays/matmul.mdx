@@ -48,7 +48,7 @@ With device arrays, `@` is a heavy operation: it goes through the pre-flight gat
 h = sf.asarray(A, device="atreides")
 w = sf.asarray(B, device="atreides")
 y = h @ w
-y.status         # SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+y.status         # SFStatus(saturated=0, underflow=0, div0=0, invalid=0, exact=True)
 ```
 
 The `exact=True` comes from the range bound: the host computed that no partial sum of any output could exceed the maximum, so the launch was marked safe and no scan was needed. [The device path →](/arrays/device)

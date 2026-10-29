@@ -25,17 +25,24 @@ _CMP = {"lt": np.less, "le": np.less_equal, "gt": np.greater, "ge": np.greater_e
 
 @dataclass
 class Counters:
+    """What a launch reports.  A hardware driver that cannot read an event
+    back (Atreides v1 has no flag register) sets that count to ``None``;
+    one whose counts are only an upper bound sets ``exact=False``.  The
+    runtime then reports the status as unknown or as a bound instead of a
+    false "0, exact", and ``sf.config(status="replay")`` recomputes it."""
+
     programs: int = 0
     ops: int = 0
     lane_ops: int = 0
     loads: int = 0
     stores: int = 0
     macs: int = 0
-    saturated: int = 0
-    underflow: int = 0
-    div0: int = 0
-    invalid: int = 0
+    saturated: int | None = 0
+    underflow: int | None = 0
+    div0: int | None = 0
+    invalid: int | None = 0
     barriers: int = 0
+    exact: bool = True
 
     @property
     def cycles(self) -> int:

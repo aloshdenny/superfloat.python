@@ -149,7 +149,7 @@ def test_status_fields_and_policy():
         y = a + a
     assert y.codes.tolist() == [32767, 16384, -32767, 32767]       # hardware value, no raise
     assert y.status == sf.SFStatus(saturated=3, div0=0, invalid=0, exact=False, outputs_at_max=3)
-    assert repr(y.status) == "SFStatus(saturated<=3, div0=0, invalid=0, exact=False)"
+    assert repr(y.status) == "SFStatus(saturated<=3, underflow=0, div0=0, invalid=0, exact=False)"
     assert len(w) == 1 and issubclass(w[0].category, sf.SFDeviceOverflowWarning)
     assert not y.status.ok
     # v1 cannot raise on saturation (upper bound), even with over='raise'
