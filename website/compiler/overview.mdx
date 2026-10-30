@@ -1,0 +1,68 @@
+---
+title: "Lowering spec"
+description: "Everything the compiler needs to lower every Superfloat op: types, events, global rules, and where the machine-readable spec lives."
+---
+
+**Spec version 1.0.0.** Generated from `spec/ops.py` by `tools/gen_spec.py`; do not edit by hand.
+
+This section is written for the compiler (MLIR) side. The Python reference is the ground truth: if the compiled code gives different bits from the reference on any input, the compiler is wrong (or the spec is, and we fix it).
+
+## What you get
+
+| File | Use |
+|---|---|
+| `spec/ops.json` | Every IR op as JSON: operands, attributes, result, shape rule, semantics, events, memory, faults, predication, v1 hardware unit, suggested MLIR op and traits, legal rewrites. Generate your op definitions or tests from it. |
+| `spec/golden/<op>.json` | Conformance vectors per op at sf16, sf8 and sf4 (edge codes and random), from the exact-fraction oracle. Run your lowered op on `in`, compare `out` and the events bit for bit. |
+| [IR ops](/compiler/ops) | The same content as readable pages. |
+| [Python API map](/compiler/python-api) | Which IR op each public Python function becomes, and where it runs. |
+| [Versioning](/compiler/versioning) | How versions change and the changelog. |
+
+## Global rules
+
+1. Static shapes. Every value has a static shape of rank &lt;= 3. No dynamic shapes.
+2. Lockstep. A program (block) is one vector of lanes. Control flow is if-converted: `if` on a lane value becomes a predicate carried on each op (`pred=`).
+3. Ops with a predicate: values on dead lanes are don't-care, but events and memory effects must be masked.
+4. Events never change the bits. The policy (raise / warn / ignore) is applied by the host after the launch from the event counts.
+5. Arithmetic truncates toward zero; only narrow rounds (half to even). Add/sub/sum saturate; mul underflows; div overflows when \|a\| >= \|b\|.
+6. No reassociation of add, sum, or the k loop of dot. No distributivity. No float math anywhere: lower on integer codes.
+7. Faults (out of bounds, integer division by zero) abort the launch with SFDeviceError and leave buffers undefined.
+8. Host pre-flight: before a launch the host decides everything it can (a zero divisor, an op that must saturate everywhere, an op that cannot saturate). The compiler never needs to handle those cases specially, but must still produce correct bits for them.
+9. Width: sfN for N &lt; 16 runs on the sf16 datapath shifted left by 16-N and must be re-truncated (low bits masked) after every op so the result equals true sfN.
+
+## Types
+
+| Type | Meaning |
+|---|---|
+| `sfN` | Superfloat code, N in 4..16. Stored as a signed integer k in [-M, M], M = 2^(N-1) - 1. Value = k / 2^(N-1). Sign-magnitude on the chip; the IR carries k as a plain signed integer. There is no code -2^(N-1), no NaN, no infinity. |
+| `int` | 64-bit signed integer (indices, offsets, loop math). Never overflows in practice; the reference uses int64 and does not wrap-check. |
+| `bool` | 1-bit predicate / mask. |
+| `ptr<sfN>` | Base address of a global buffer of sfN codes. Only appears as a kernel parameter; address arithmetic is `ptr + int offsets` and is folded into load/store. |
+
+## Events
+
+Catalogue order (the order the host applies the policy): invalid, divide, overflow, underflow.
+
+| Event | Meaning and result value |
+|---|---|
+| `overflow` | the exact result did not fit; the result is saturated to +-M (sign of the exact result). |
+| `underflow` | the exact result was nonzero but the stored result is 0. |
+| `divide` | division by a zero code. Result is +-M with the sign of the dividend (0 if dividend is 0). |
+| `invalid` | no real answer (sqrt of a negative). Result is 0. |
+
+Events are per lane flags. The kernel returns a count per event (live lanes only). On v1 there is no flag register, so the runtime may replay the kernel on the host to get exact counts (`config(status="replay")`).
+
+## Predication classes
+
+| Class | Rule |
+|---|---|
+| `pure` | No side effects. Under a predicate the op may run on every lane; masked lanes produce values that are never observed. Safe to speculate. |
+| `events` | Value is pure, but events are only counted on live lanes (lanes where the predicate in force is true). Lowering may compute every lane but MUST mask the event flags with the predicate, or it will report events from dead lanes. |
+| `memory` | Only live lanes (mask AND predicate) touch memory. Masked lanes must not read, write or fault. |
+
+## Golden vector format
+
+```json
+{"op": "add", "cases": [{"bits": 16, "in": [32767, 1], "out": 32767, "event": "overflow"}]}
+```
+
+`narrow` and `widen` cases also carry `to_bits`. `sum` and `dot` cases carry `events` (a list) instead of `event`.

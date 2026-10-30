@@ -141,6 +141,7 @@ Not done:
 | [docs/API.md](docs/API.md) | Every function, decorator and object for Stages 1 to 3, with syntax and the Python semantics of SF values. The reference to use when writing tests against the simulator. |
 | [docs/TESTING.md](docs/TESTING.md) | The testing matrix, the test files, how to run each gate. |
 | [docs/DETAILS.md](docs/DETAILS.md) | Module map, exact semantics tables, every config option, design notes per stage. |
+| [spec/](spec/ops.py) | The lowering spec for the compiler: every IR op with operands, results, events, memory effects and legal rewrites, plus golden vectors. Generated pages under `website/compiler/`. Run `python tools/gen_spec.py` after editing `spec/ops.py`. |
 | [NOTES.md](NOTES.md) | Design decisions, open hardware questions, review history. |
 | `examples/` | A runnable tour per stage. |
 | `website/` | The developer docs site at [docs.superfloat.si](https://docs.superfloat.si) (Mintlify, hand-written). |

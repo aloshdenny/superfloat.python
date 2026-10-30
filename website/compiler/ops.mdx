@@ -1,0 +1,936 @@
+---
+title: "IR ops"
+description: "Every SF IR op, one section each. Spec version 1.0.0."
+---
+
+Each op lists its operands, attributes, result, shape rule, exact semantics on integer codes, events, memory effects, faults, predication, the v1 hardware unit, a suggested MLIR op with traits, and the rewrites that are and are not legal. Ops with golden vectors say so.
+
+## SF arithmetic
+
+### add
+
+`%r:sfN = add %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN, b: sfN (same N) |
+| Result | sfN |
+| Shape | numpy broadcast of the operand shapes (rank &lt;= 3); scalars are shape () |
+| Semantics | s = a + b (exact integer). If \|s\| > M: result = sign(s)*M, overflow. Else result = s. |
+| Events | overflow |
+| Memory | none |
+| Predication | events |
+| v1 hardware | ACT unit (add) |
+| MLIR | sf.add; traits: Pure, Commutative, Elementwise, SameOperandsAndResultType |
+| From Python | a + b |
+| Golden vectors | `spec/golden/add.json` |
+
+**Rewrites:**
+
+- commutative: a+b = b+a (legal)
+- NOT associative: (a+b)+c != a+(b+c) when an intermediate saturates. Do not reassociate, do not reorder a chain, do not tree-reduce.
+- x + 0 -> x (legal)
+- never turn a+a into 2*a via mul (mul cannot represent 2)
+
+**Notes:**
+
+- sfN &lt; 16 on the sf16 datapath: shift left by 16-N, add, saturate at the sfN max shifted, shift back. The saturation threshold must be sfN's M, not sf16's.
+
+### sub
+
+`%r:sfN = sub %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN, b: sfN |
+| Result | sfN |
+| Shape | numpy broadcast of the operand shapes (rank &lt;= 3); scalars are shape () |
+| Semantics | s = a - b; saturate like add. |
+| Events | overflow |
+| Memory | none |
+| Predication | events |
+| v1 hardware | ACT unit (sub) |
+| MLIR | sf.sub; traits: Pure, Elementwise, SameOperandsAndResultType |
+| From Python | a - b |
+| Golden vectors | `spec/golden/sub.json` |
+
+**Rewrites:**
+
+- a - b -> a + neg(b) is legal (neg is exact since the range is symmetric)
+- NOT associative: (a+b)+c != a+(b+c) when an intermediate saturates. Do not reassociate, do not reorder a chain, do not tree-reduce.
+
+### mul
+
+`%r:sfN = mul %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN, b: sfN |
+| Result | sfN |
+| Shape | numpy broadcast of the operand shapes (rank &lt;= 3); scalars are shape () |
+| Semantics | p = a * b (exact, up to 2(N-1)+1 bits). result = trunc_toward_zero(p / 2^(N-1)). underflow if p != 0 and result == 0. \|result\| &lt; M always, so mul never overflows. |
+| Events | underflow |
+| Memory | none |
+| Predication | events |
+| v1 hardware | FMA unit (c = 0) |
+| MLIR | sf.mul; traits: Pure, Commutative, Elementwise, SameOperandsAndResultType |
+| From Python | a * b |
+| Golden vectors | `spec/golden/mul.json` |
+
+**Rewrites:**
+
+- commutative (legal)
+- NOT associative: truncation after each product
+- NOT distributive over add
+- x * 0 -> 0 (legal, no event)
+- there is no 1.0, so there is no multiplicative identity to fold
+
+**Notes:**
+
+- truncation is toward zero, NOT floor: an arithmetic right shift on a negative product is wrong. Shift the magnitude, then reapply the sign.
+
+### div
+
+`%r:sfN = div %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN (dividend), b: sfN (divisor) |
+| Result | sfN |
+| Shape | numpy broadcast of the operand shapes (rank &lt;= 3); scalars are shape () |
+| Semantics | b == 0: divide event, result = sign(a)*M (0 if a == 0). \|a\| >= \|b\|: overflow, result = sign(a)*sign(b)*M. Else result = trunc_toward_zero(a * 2^(N-1) / b). |
+| Events | divide, overflow |
+| Memory | none |
+| Predication | events |
+| v1 hardware | NOT SUPPORTED on v1 (no divider). Device.supported_ops excludes it; the runtime raises SFUnsupportedError. Host pre-flight decides every b == 0 lane before launch. |
+| MLIR | sf.div; traits: Elementwise, SameOperandsAndResultType |
+| From Python | a / b, sf.div(a, b, where=mask) |
+| Golden vectors | `spec/golden/div.json` |
+
+**Rewrites:**
+
+- no rewrites; in particular a/b is not a * (1/b) (1/b always overflows)
+
+**Notes:**
+
+- the event check order is divide first, then overflow; a lane with b == 0 reports divide only
+- sf.div(where=mask) lowers to a predicated div: masked lanes give 0 and no event
+
+### fma
+
+`%r:sfN = fma %a, %b, %c` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN, b: sfN, c: sfN |
+| Result | sfN |
+| Shape | broadcast(a, b, c) |
+| Semantics | t = mul(a, b) (truncated, may underflow); result = add(t, c) (may saturate). Bit-identical to add(mul(a, b), c). This is NOT a fused single-rounding fma. |
+| Events | overflow, underflow |
+| Memory | none |
+| Predication | events |
+| v1 hardware | FMA unit |
+| MLIR | sf.fma; traits: Pure, Elementwise, SameOperandsAndResultType |
+| From Python | sf.fma(a, b, c), a * b + c |
+| Golden vectors | `spec/golden/fma.json` |
+
+**Rewrites:**
+
+- add(mul(a,b),c) &lt;-> fma(a,b,c) is legal both ways (same bits)
+- commutative in a and b
+
+**Notes:**
+
+- on v4.8.1 hardware (wide accumulator, single rounding) this would change: major version bump
+
+### neg
+
+`%r:sfN = neg %a` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN |
+| Result | sfN |
+| Shape | a |
+| Semantics | -a. Exact (range is symmetric), no events. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer op (sign flip) |
+| MLIR | sf.neg; traits: Pure, Elementwise, Involution |
+| From Python | -a |
+| Golden vectors | `spec/golden/neg.json` |
+
+**Rewrites:**
+
+- neg(neg(x)) -> x
+
+### abs
+
+`%r:sfN = abs %a` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN |
+| Result | sfN |
+| Shape | a |
+| Semantics | \|a\|. Exact, no events. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer op (clear sign) |
+| MLIR | sf.abs; traits: Pure, Elementwise, Idempotent |
+| From Python | abs(a) |
+| Golden vectors | `spec/golden/abs.json` |
+
+### sqrt
+
+`%r:sfN = sqrt %a` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN |
+| Result | sfN |
+| Shape | a |
+| Semantics | a &lt; 0: invalid, result 0. Else result = isqrt(a * 2^(N-1)) (floor of the exact root). Never overflows. |
+| Events | invalid |
+| Memory | none |
+| Predication | events |
+| v1 hardware | NOT SUPPORTED on v1 (no sqrt unit); runtime raises SFUnsupportedError |
+| MLIR | sf.sqrt; traits: Elementwise, SameOperandsAndResultType |
+| From Python | sf.sqrt(a) |
+| Golden vectors | `spec/golden/sqrt.json` |
+
+### cmp
+
+`%r:bool = cmp %a, %b {op}` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN, b: sfN |
+| Attributes | op: lt \| le \| gt \| ge \| eq \| ne |
+| Result | bool |
+| Shape | broadcast(a, b) |
+| Semantics | Integer compare of the codes (exact). |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer compare |
+| MLIR | arith.cmpi on codes; traits: Pure |
+| From Python | a &lt; b, a == b, ... |
+
+### cmp_lit
+
+`%r:bool = cmp_lit %a {op, value}` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN |
+| Attributes | op: lt \| le \| gt \| ge \| eq \| ne; value: int code threshold, decided at trace time |
+| Result | bool |
+| Shape | a |
+| Semantics | Compare against a Python literal that may not be representable (e.g. x &lt; 1). The tracer turns the exact literal into an equivalent integer threshold, so the op is a plain integer compare. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer compare with immediate |
+| MLIR | arith.cmpi with constant; traits: Pure |
+| From Python | x &lt; 0.3, x > 1 |
+
+## Casts
+
+### widen
+
+`%r:sfM = widen %a {bits}` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN, N &lt; M |
+| Attributes | bits: target width M |
+| Result | sfM |
+| Shape | a |
+| Semantics | result = a &lt;&lt; (M - N). Exact, no events. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | shift |
+| MLIR | sf.cast (widening); traits: Pure, Elementwise |
+| From Python | sf.cast(x, wider), x.astype(wider) |
+| Golden vectors | `spec/golden/widen.json` |
+
+### narrow
+
+`%r:sfM = narrow %a {bits}` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN, N > M |
+| Attributes | bits: target width M |
+| Result | sfM |
+| Shape | a |
+| Semantics | q = round_half_to_even(a / 2^(N-M)) (floor divmod, then round up if remainder > half, or == half and q odd). If \|q\| > M_max: overflow, clip to +-M_max. underflow if a != 0 and result == 0. |
+| Events | overflow, underflow |
+| Memory | none |
+| Predication | events |
+| v1 hardware | shift + round (ACT) |
+| MLIR | sf.cast (narrowing); traits: Pure, Elementwise |
+| From Python | sf.cast(x, narrower), x.astype(narrower) |
+| Golden vectors | `spec/golden/narrow.json` |
+
+**Notes:**
+
+- this is the ONLY op that rounds to nearest. All arithmetic truncates toward zero.
+
+## Reductions
+
+### sum
+
+`%r:sfN = sum %x {axis}` · version 1.0
+
+| | |
+|---|---|
+| Operands | x: sfN |
+| Attributes | axis: int or None (None = all) |
+| Result | sfN |
+| Shape | x.shape with axis removed (() for None) |
+| Semantics | acc = 0; for i = 0 .. n-1 in index order: acc = add(acc, x[i]) (saturating each step). Overflow if any step saturated. Saturation is sticky in the sense that later steps continue from +-M. |
+| Events | overflow |
+| Memory | none |
+| Predication | events |
+| v1 hardware | ACT chain, sequential |
+| MLIR | sf.reduce_sum; traits: Pure |
+| From Python | sf.sum(x, axis), x.sum() |
+| Golden vectors | `spec/golden/sum.json` |
+
+**Rewrites:**
+
+- NOT associative: (a+b)+c != a+(b+c) when an intermediate saturates. Do not reassociate, do not reorder a chain, do not tree-reduce.
+- result DEPENDS on order: [M, 1, -1] gives M-1, [1, -1, M] gives M
+
+### max
+
+`%r = max %x {axis}` · version 1.0
+
+| | |
+|---|---|
+| Operands | x: sfN |
+| Attributes | axis: int or None |
+| Result | sfN |
+| Shape | axis removed |
+| Semantics | max along axis. Exact. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer max tree |
+| MLIR | sf.reduce_max; traits: Pure |
+| From Python | sf.max |
+
+**Rewrites:**
+
+- any order / tree is legal
+
+### min
+
+`%r = min %x {axis}` · version 1.0
+
+| | |
+|---|---|
+| Operands | x: sfN |
+| Attributes | axis: int or None |
+| Result | sfN |
+| Shape | axis removed |
+| Semantics | min along axis. Exact. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer min tree |
+| MLIR | sf.reduce_min; traits: Pure |
+| From Python | sf.min |
+
+**Rewrites:**
+
+- any order / tree is legal
+
+## Contraction
+
+### dot
+
+`%r:sfN[m,n] = dot %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN[m, k], b: sfN[k, n] |
+| Result | sfN |
+| Shape | (m, n) |
+| Semantics | For each (i, j): acc = 0; for t = 0 .. k-1: acc = fma(a[i,t], b[t,j], acc). Every product truncated, every add saturated, at width N, in increasing t. |
+| Events | overflow, underflow |
+| Memory | none |
+| Predication | events |
+| v1 hardware | 8x8 systolic array per tile (4 tiles) |
+| MLIR | sf.matmul (linalg.matmul with sf semantics); traits: Pure |
+| From Python | sf.dot(a, b) in a kernel, a @ b, sf.matmul, sf.addmm |
+| Golden vectors | `spec/golden/dot.json` |
+
+**Rewrites:**
+
+- k must be accumulated in increasing order. Tiling over m and n is free; tiling over k is legal ONLY if the partial sum of tile 1 is fed as the initial acc of tile 2 (no separate partials added later)
+- split-k, tree reduction, and wider accumulators are NOT legal
+
+**Notes:**
+
+- addmm(c, a, b) = acc starts at c, not 0, then the same chain
+
+## Selection
+
+### where
+
+`%r = where %c, %x, %y` · version 1.0
+
+| | |
+|---|---|
+| Operands | c: bool, x, y (same type as x) |
+| Result | type of x |
+| Shape | broadcast(c, x, y) |
+| Semantics | x where c else y, per lane. Exact, no events. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | select / predicated move |
+| MLIR | arith.select; traits: Pure |
+| From Python | sf.where(cond, x, y) |
+
+### maximum
+
+`%r = maximum %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN, b: sfN |
+| Result | sfN |
+| Shape | broadcast(a, b) |
+| Semantics | max of codes. Exact. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer max |
+| MLIR | arith.maxsi; traits: Pure, Commutative |
+| From Python | sf.maximum, ReLU = maximum(x, 0) |
+
+**Rewrites:**
+
+- associative and commutative (legal to reorder)
+
+### minimum
+
+`%r = minimum %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: sfN, b: sfN |
+| Result | sfN |
+| Shape | broadcast(a, b) |
+| Semantics | min of codes. Exact. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer min |
+| MLIR | arith.minsi; traits: Pure, Commutative |
+| From Python | sf.minimum, sf.clip |
+
+**Rewrites:**
+
+- associative and commutative
+
+## Memory
+
+### load
+
+`%r:sfN = load %ptr, %offs, %mask, %other` · version 1.0
+
+| | |
+|---|---|
+| Operands | ptr: ptr&lt;sfN> param, offs: int, mask: bool, other: sfN (value for masked lanes) |
+| Result | sfN |
+| Shape | broadcast(offs, mask, other) |
+| Semantics | live = mask AND predicate. Live lanes: ptr[offs]. Others: other. Offsets are element indices, not bytes. |
+| Events | none |
+| Memory | READ global buffer ptr at offs on live lanes only |
+| Faults | any live lane with offs &lt; 0 or offs >= buffer size faults the launch. Masked lanes never fault. |
+| Predication | memory |
+| v1 hardware | global load (64K-word data window) |
+| MLIR | sf.load (masked, like triton.load); traits: MemRead |
+| From Python | sf.load(ptr + offs, mask=, other=) |
+
+### store
+
+`store %ptr, %offs, %val, %mask` · version 1.0
+
+| | |
+|---|---|
+| Operands | ptr: ptr&lt;sfN>, offs: int, val: sfN, mask: bool |
+| Result | none |
+| Shape | lanes = broadcast(offs, val, mask) |
+| Semantics | live = mask AND predicate. ptr[offs] = val on live lanes. If two live lanes hit the same offset, the reference keeps the last lane in row-major order; kernels should not rely on this. |
+| Events | none |
+| Memory | WRITE global buffer ptr at offs on live lanes only |
+| Faults | a live lane out of bounds faults the launch. Earlier writes are NOT rolled back: after a fault the buffers are undefined. |
+| Predication | memory |
+| v1 hardware | global store |
+| MLIR | sf.store; traits: MemWrite |
+| From Python | sf.store(ptr + offs, val, mask=) |
+
+**Notes:**
+
+- two programs writing the same address is a race; the result is undefined (the simulator runs programs in order)
+
+### shared_load
+
+`%r:sfN = shared_load %idx, %mask {buf}` · version 1.0
+
+| | |
+|---|---|
+| Operands | idx: int, mask: bool |
+| Attributes | buf: shared buffer id (declared on the kernel) |
+| Result | sfN |
+| Shape | broadcast(idx, mask) |
+| Semantics | Live lanes read shared[buf][idx]; masked lanes give 0. |
+| Events | none |
+| Memory | READ block-local shared buffer |
+| Faults | live lane out of bounds faults |
+| Predication | memory |
+| v1 hardware | tile-local SRAM |
+| MLIR | memref.load on workgroup memory; traits: MemRead |
+| From Python | buf[idx] where buf = sf.shared(shape) |
+
+### shared_store
+
+`shared_store %idx, %val, %mask {buf}` · version 1.0
+
+| | |
+|---|---|
+| Operands | idx: int, val: sfN, mask: bool |
+| Attributes | buf: shared buffer id |
+| Result | none |
+| Shape | broadcast(idx, val, mask) |
+| Semantics | Live lanes write shared[buf][idx] = val. |
+| Events | none |
+| Memory | WRITE block-local shared buffer. Shared memory is zeroed at the start of every program. |
+| Faults | live lane out of bounds faults |
+| Predication | memory |
+| v1 hardware | tile-local SRAM |
+| MLIR | memref.store on workgroup memory; traits: MemWrite |
+| From Python | buf[idx] = val |
+
+## Synchronisation
+
+### barrier
+
+`barrier` · version 1.0
+
+| | |
+|---|---|
+| Operands | none |
+| Result | none |
+| Shape | - |
+| Semantics | All lanes of the block reach this point before any continues. In lockstep IR this orders shared-memory accesses; nothing may be moved across it. |
+| Events | none |
+| Memory | orders shared memory |
+| Predication | pure |
+| v1 hardware | tile barrier |
+| MLIR | gpu.barrier; traits: MemRead, MemWrite (barrier) |
+| From Python | sf.barrier() |
+
+**Notes:**
+
+- must not be placed under a divergent predicate
+
+## Indices and parameters
+
+### param
+
+`%r = param {param, kind}` · version 1.0
+
+| | |
+|---|---|
+| Operands | none |
+| Attributes | param: kernel parameter name; kind: 'ptr' \| 'int' \| 'sf' |
+| Result | int or sfN scalar for kind int/sf; none for ptr (the buffer is bound by value id) |
+| Shape | () |
+| Semantics | Reads a scalar kernel argument. Pointer params produce no value; loads and stores refer to them directly. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | kernel argument register / constant bank |
+| MLIR | func argument; traits: Pure |
+| From Python | kernel signature |
+
+### const
+
+`%r = const {value, kind}` · version 1.0
+
+| | |
+|---|---|
+| Operands | none |
+| Attributes | value: Python int / code / bool; kind: 'int' \| 'sf' \| 'bool' |
+| Result | int, sfN or bool, filled to the result shape |
+| Shape | from the result type |
+| Semantics | A literal. For sf the value is already a code (quantized at trace time with round half to even, through the policy). |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | immediate |
+| MLIR | sf.constant / arith.constant; traits: Pure, ConstantLike |
+| From Python | Python literals inside a kernel |
+
+### program_id
+
+`%r:int = program_id {axis}` · version 1.0
+
+| | |
+|---|---|
+| Operands | none |
+| Attributes | axis: 0, 1 or 2 |
+| Result | int |
+| Shape | () |
+| Semantics | Index of this program (block) in the launch grid on that axis. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | tile / block id register |
+| MLIR | gpu.block_id; traits: Pure |
+| From Python | sf.program_id(axis), sf.block_idx(axis) |
+
+### thread_idx
+
+`%r:int[...] = thread_idx {axis}` · version 1.0
+
+| | |
+|---|---|
+| Operands | none |
+| Attributes | axis: 0, 1 or 2 |
+| Result | int vector |
+| Shape | block_dim laid out on the used axes (rank = highest axis with block_dim > 1) |
+| Semantics | Lane index along axis. @sf.kernel only. The IR is lockstep: the whole block is one vector. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | lane id (8 threads per tile in v1) |
+| MLIR | gpu.thread_id; traits: Pure |
+| From Python | sf.thread_idx(axis) |
+
+### arange
+
+`%r:int[n] = arange {start, end}` · version 1.0
+
+| | |
+|---|---|
+| Operands | none |
+| Attributes | start: constexpr int; end: constexpr int, end > start |
+| Result | int vector |
+| Shape | (end - start,) |
+| Semantics | start, start+1, ..., end-1. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | lane id + start |
+| MLIR | sf.arange (or tensor.generate); traits: Pure |
+| From Python | sf.arange(start, end) |
+
+## Shape
+
+### broadcast
+
+`%r = broadcast %x {shape}` · version 1.0
+
+| | |
+|---|---|
+| Operands | x: any type |
+| Attributes | shape: target static shape |
+| Result | same type as x |
+| Shape | attr shape (numpy broadcast rules from x.shape) |
+| Semantics | Repeat x to the target shape. No numeric change. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | register replication / free |
+| MLIR | tensor broadcast / linalg.broadcast; traits: Pure |
+| From Python | sf.full, sf.zeros, implicit broadcasting |
+
+### reshape
+
+`%r = reshape %x` · version 1.0
+
+| | |
+|---|---|
+| Operands | x |
+| Result | same type |
+| Shape | result shape (same element count) |
+| Semantics | Row-major reshape. No numeric change. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | free (layout only) |
+| MLIR | tensor.reshape; traits: Pure |
+| From Python | x.reshape(...) |
+
+### transpose
+
+`%r = transpose %x` · version 1.0
+
+| | |
+|---|---|
+| Operands | x: rank 2 |
+| Result | same type |
+| Shape | (n, m) from (m, n) |
+| Semantics | 2-D transpose. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | data movement |
+| MLIR | linalg.transpose; traits: Pure |
+| From Python | x.T |
+
+## Integer
+
+### iadd
+
+`%r:int = iadd %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: int, b: int |
+| Result | int |
+| Shape | broadcast(a, b) |
+| Semantics | a + b |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer ALU |
+| MLIR | arith.addi; traits: Pure, Commutative |
+| From Python | int + int |
+
+**Rewrites:**
+
+- ordinary integer algebra is legal (no saturation)
+
+### isub
+
+`%r:int = isub %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: int, b: int |
+| Result | int |
+| Shape | broadcast(a, b) |
+| Semantics | a - b |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer ALU |
+| MLIR | arith.subi; traits: Pure |
+| From Python | int - int |
+
+**Rewrites:**
+
+- ordinary integer algebra is legal (no saturation)
+
+### imul
+
+`%r:int = imul %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: int, b: int |
+| Result | int |
+| Shape | broadcast(a, b) |
+| Semantics | a * b |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer ALU |
+| MLIR | arith.muli; traits: Pure, Commutative |
+| From Python | int * int |
+
+**Rewrites:**
+
+- ordinary integer algebra is legal (no saturation)
+
+### idiv
+
+`%r:int = idiv %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: int, b: int |
+| Result | int |
+| Shape | broadcast(a, b) |
+| Semantics | FLOOR division (Python //), not truncation: -7 // 2 = -4. |
+| Events | none |
+| Memory | none |
+| Faults | any lane with b == 0 faults the whole launch (SFDeviceError) |
+| Predication | pure |
+| v1 hardware | integer ALU |
+| MLIR | arith.floordivsi; traits: none |
+| From Python | int // int, sf.cdiv |
+
+**Notes:**
+
+- use arith.floordivsi, not arith.divsi
+- the zero check covers every lane of the broadcast, live or not
+
+### imod
+
+`%r:int = imod %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: int, b: int |
+| Result | int |
+| Shape | broadcast(a, b) |
+| Semantics | Python modulo: result has the sign of b. -7 % 2 = 1. |
+| Events | none |
+| Memory | none |
+| Faults | b == 0 in any lane faults the launch |
+| Predication | pure |
+| v1 hardware | integer ALU |
+| MLIR | arith.remsi + sign fix (floor semantics); traits: none |
+| From Python | int % int |
+
+### ineg
+
+`%r:int = ineg %a` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: int |
+| Result | int |
+| Shape | a |
+| Semantics | -a |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer ALU |
+| MLIR | arith.subi 0, a; traits: Pure |
+| From Python | -int |
+
+### iabs
+
+`%r:int = iabs %a` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: int |
+| Result | int |
+| Shape | a |
+| Semantics | \|a\| |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer ALU |
+| MLIR | math.absi; traits: Pure |
+| From Python | abs(int) |
+
+### icmp
+
+`%r:bool = icmp %a, %b {op}` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: int, b: int |
+| Attributes | op: lt \| le \| gt \| ge \| eq \| ne |
+| Result | bool |
+| Shape | broadcast(a, b) |
+| Semantics | Integer compare. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | integer compare |
+| MLIR | arith.cmpi; traits: Pure |
+| From Python | offs &lt; n etc. |
+
+### bool_to_int
+
+`%r:int = bool_to_int %a` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: bool |
+| Result | int |
+| Shape | a |
+| Semantics | false -> 0, true -> 1 |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | select |
+| MLIR | arith.extui; traits: Pure |
+| From Python | using a mask in int math |
+
+## Boolean
+
+### and
+
+`%r:bool = and %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: bool, b: bool |
+| Result | bool |
+| Shape | broadcast(a, b) |
+| Semantics | a AND b. Also emitted to combine nested predicates. |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | predicate logic |
+| MLIR | arith.andi; traits: Pure, Commutative |
+| From Python | m1 & m2, nested `with sf.predicate` |
+
+### or
+
+`%r:bool = or %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: bool, b: bool |
+| Result | bool |
+| Shape | broadcast(a, b) |
+| Semantics | a OR b |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | predicate logic |
+| MLIR | arith.ori; traits: Pure, Commutative |
+| From Python | m1 \| m2 |
+
+### xor
+
+`%r:bool = xor %a, %b` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: bool, b: bool |
+| Result | bool |
+| Shape | broadcast(a, b) |
+| Semantics | a XOR b |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | predicate logic |
+| MLIR | arith.xori; traits: Pure, Commutative |
+| From Python | m1 ^ m2 |
+
+### not
+
+`%r:bool = not %a` · version 1.0
+
+| | |
+|---|---|
+| Operands | a: bool |
+| Result | bool |
+| Shape | a |
+| Semantics | NOT a |
+| Events | none |
+| Memory | none |
+| Predication | pure |
+| v1 hardware | predicate logic |
+| MLIR | arith.xori a, true; traits: Pure |
+| From Python | ~m |

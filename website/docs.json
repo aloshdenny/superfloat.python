@@ -67,6 +67,15 @@
             "pages": [
               "testing/how-sf-is-tested"
             ]
+          },
+          {
+            "group": "Compiler",
+            "pages": [
+              "compiler/overview",
+              "compiler/ops",
+              "compiler/python-api",
+              "compiler/versioning"
+            ]
           }
         ]
       },
