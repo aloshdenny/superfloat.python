@@ -1,0 +1,20 @@
+---
+title: "Versioning"
+description: "How the spec version changes, and what changed in each version."
+---
+
+Current version: **1.0.0** (MAJOR.MINOR.PATCH).
+
+| Change | Bump | Example |
+|---|---|---|
+| Add an op or a function, or change what one does (its contract: bits, events, shape, memory) | minor | 1.1 to 1.2 |
+| Edit an existing entry without changing the contract (clearer text, a new edge case written down, a fix in the docs) | patch | 1.1.1 to 1.1.2 |
+| Change the whole numeric model (for example the v4.8.1 wide accumulator) | major | 1.x to 2.0 |
+
+Each op carries the version in which its contract last changed. If your lowering was written against an op at version 1.1 and the op now says 1.2, look at it again. A patch bump never needs a compiler change.
+
+## Changelog
+
+| Version | Date | Change |
+|---|---|---|
+| 1.0.0 | 2026-10-30 | First release: every SF IR op of Stage 3 and every public Python function. |

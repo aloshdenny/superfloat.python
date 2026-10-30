@@ -1,0 +1,34 @@
+---
+title: "Python API map"
+description: "Which IR op each public Python function becomes, and where it runs."
+---
+
+`device`: a heavy op, runs on the target when an operand is on a device and returns a status. `host`: always runs on the host. `trace`: only inside `@sf.jit` / `@sf.kernel`, becomes IR.
+
+| Python | Runs | Lowers to | Notes |
+|---|---|---|---|
+| `sf.sf4 .. sf.sf16 (scalar constructors)` | host | const | quantize with round half to even, through the policy |
+| `sf.array / sf.asarray / sf.full / sf.zeros / sf.ones` | host (+ upload) | const / broadcast in kernels | device= uploads codes |
+| `sf.from_code / sf.from_codes / sf.from_bits` | host | - | build from raw codes, no rounding |
+| `+ - * /` | device if an operand is on a device | add / sub / mul / div | scalar and array |
+| `sf.fma` | device | fma |  |
+| `sf.div(where=)` | device | div under predicate |  |
+| `sf.sqrt` | device | sqrt |  |
+| `sf.sum` | device | sum | sequential |
+| `sf.dot / @ / sf.matmul` | device | dot | batched matmul = one dot per batch element |
+| `sf.addmm(c, a, b)` | device | dot with acc initialised to c |  |
+| `sf.max / sf.min / sf.argmax / sf.argmin` | host | max / min | argmax/argmin: first index of the extreme |
+| `sf.maximum / sf.minimum / sf.clip / sf.where` | host | maximum / minimum / where | exact, no events |
+| `sf.cast / astype` | host | widen / narrow |  |
+| `-x, abs(x)` | host or device | neg / abs | exact |
+| `comparisons` | host | cmp / cmp_lit | return numpy bool |
+| `indexing, reshape, .T` | host | reshape / transpose |  |
+| `sf.errstate / seterr / geterr / config / getconfig` | host | - | policy only, never changes bits |
+| `sf.info / sf.dtype / sf.dtypes` | host | - | format metadata |
+| `sf.device / devices / get_device / register_device / synchronize` | host | - | runtime |
+| `@sf.jit / @sf.kernel / sf.autotune / sf.constexpr` | trace | builds a KernelIR |  |
+| `sf.program_id / block_idx / thread_idx / block_dim / arange / cdiv` | trace | program_id / thread_idx / arange / idiv | block_dim is a trace-time int |
+| `sf.load / sf.store` | trace | load / store |  |
+| `sf.shared / sf.barrier` | trace | shared_load / shared_store / barrier |  |
+| `sf.predicate (with block)` | trace | and (predicate combine), then every op inside carries pred |  |
+| `sf.torch.convert / backend='superfloat'` | host + device | dot (Linear/Conv2d as matmul) + add | per-layer scale chosen on host |
