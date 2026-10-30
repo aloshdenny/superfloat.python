@@ -18,7 +18,7 @@ h = sf.asarray(A, dtype=sf.sf16, device="atreides")
 w = sf.asarray(B, dtype=sf.sf16, device="atreides")
 y = h @ w                 # heavy: runs on atreides
 y.device                  # 'atreides'
-y.status                  # SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+y.status                  # SFStatus(saturated=0, underflow=0, div0=0, invalid=0, exact=True)
 y.to("host")              # bring it back; y.numpy() does the same and converts to floats
 ```
 
@@ -67,7 +67,7 @@ big = sf.asarray(np.full((4, 4), 0.9), dtype=sf.sf16, device="atreides")
 with sf.errstate(over="ignore"), sf.config(preflight="ignore"):
     r = big @ big
 r.status
-# SFStatus(saturated=unknown (outputs_at_max=16), div0=0, invalid=0, exact=False)
+# SFStatus(saturated=unknown (outputs_at_max=16), underflow=0, div0=0, invalid=0, exact=False)
 ```
 
 ## The targets

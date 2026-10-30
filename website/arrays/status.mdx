@@ -7,7 +7,7 @@ Every array produced by a heavy operation carries an `SFStatus`:
 
 ```python
 y.status
-# SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+# SFStatus(saturated=0, underflow=0, div0=0, invalid=0, exact=True)
 ```
 
 ## The fields
@@ -15,11 +15,12 @@ y.status
 | Field | Meaning |
 |---|---|
 | `saturated` | how many outputs saturated: an int, or `None` when the runtime cannot know |
+| `underflow` | how many outputs had a nonzero product truncate to 0: exact with flags or replay, or when the host proves no product can reach 0; `0` for ops that cannot underflow (add, sub, sum, neg, abs); otherwise `None` |
 | `div0` | how many divisions by zero; always exact, found on the host before launch |
 | `invalid` | how many invalid inputs (NaN, sqrt of a negative); always exact, found before launch |
 | `exact` | `True` when `saturated` is a fact, `False` when it is a bound or unknown |
 | `outputs_at_max` | how many outputs sit at ±max, the raw scan |
-| `ok` | `True` if no event, `False` if any, `None` if `saturated` is unknown and nothing else fired |
+| `ok` | `True` if no event, `False` if any, `None` if `saturated` or `underflow` is unknown and nothing else fired |
 | `known` | `True` when nothing in the status is unknown |
 
 ## Three kinds of saturation count
@@ -31,14 +32,14 @@ Atreides v1 has no saturation flag the host can read back, so the library distin
     The pre-flight range bound showed no element could saturate. The launch was marked safe and no scan ran.
 
     ```python
-    SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+    SFStatus(saturated=0, underflow=0, div0=0, invalid=0, exact=True)
     ```
   </Tab>
   <Tab title="Upper bound: elementwise op">
     The output was scanned for ±max. An element at max may have arrived there legitimately, so the count is a ceiling, shown as `<=`.
 
     ```python
-    SFStatus(saturated<=1, div0=0, invalid=0, exact=False)
+    SFStatus(saturated<=1, underflow=0, div0=0, invalid=0, exact=False)
     ```
 
     The policy only warns on a bound (`SFDeviceOverflowWarning`), never raises.
@@ -47,7 +48,7 @@ Atreides v1 has no saturation flag the host can read back, so the library distin
     A partial sum in `sum`, `dot` or `@` can saturate and come back into range, so a scan cannot see it. The count is `None`.
 
     ```python
-    SFStatus(saturated=unknown (outputs_at_max=16), div0=0, invalid=0, exact=False)
+    SFStatus(saturated=unknown (outputs_at_max=16), underflow=0, div0=0, invalid=0, exact=False)
     ```
 
     `ok` is `None` here: the library will not claim the result is fine.
@@ -62,7 +63,7 @@ Two options when you need a real count:
 
 ```python
 with sf.config(status="replay"):
-    (h @ w).status      # SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+    (h @ w).status      # SFStatus(saturated=0, underflow=0, div0=0, invalid=0, exact=True)
 ```
 
 **A target with flags.** A device whose `run` returns per-element event flags (`sticky_flags=True`) gives exact counts for free. `atreides-flags` is the mock that does this; with it, `over="raise"` applies to heavy ops like any other.
@@ -70,8 +71,16 @@ with sf.config(status="replay"):
 ```python
 hf = sf.asarray(A, device="atreides-flags")
 wf = sf.asarray(B, device="atreides-flags")
-(hf @ wf).status        # SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+(hf @ wf).status        # SFStatus(saturated=0, underflow=0, div0=0, invalid=0, exact=True)
 ```
+
+## Underflow
+
+A product that truncates to 0 leaves no trace in the output, so without flags the runtime can only report it when the host can rule it out: if the two smallest nonzero magnitudes multiply to at least the scale, no product of the operation can underflow and `underflow` is an exact `0`. Otherwise it is `None` on a target without flags. With flags or `status="replay"` it is an exact count, and the policy applies to it like on the host (`under="warn"` by default).
+
+## Kernels on hardware
+
+A kernel launch on a hardware target reports what the driver could read back. A driver for silicon without a flag register returns its counts as `None`, and the status says `unknown` rather than claiming `0, exact`. `status="replay"` recomputes the events on the host reference and also checks the target's output bits against it, raising `SFDeviceError` on any difference. [Plugging in hardware →](/reference/hardware)
 
 ## Host arrays
 

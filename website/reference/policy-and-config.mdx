@@ -49,10 +49,11 @@ The current options as a dict.
 ## `sf.SFStatus`
 
 ```python
-SFStatus(saturated=0, div0=0, invalid=0, exact=False, outputs_at_max=0)
+SFStatus(saturated=0, div0=0, invalid=0, exact=False, outputs_at_max=0, underflow=0)
 ```
 
 <ResponseField name="saturated" type="int | None">Outputs that saturated; `None` when unknown.</ResponseField>
+<ResponseField name="underflow" type="int | None">Outputs where a nonzero product truncated to 0; `0` for ops that cannot underflow; `None` when unknown.</ResponseField>
 <ResponseField name="div0" type="int">Divisions by zero (exact, decided before launch).</ResponseField>
 <ResponseField name="invalid" type="int">Invalid inputs (exact, decided before launch).</ResponseField>
 <ResponseField name="exact" type="bool">Whether `saturated` is a fact rather than a bound or unknown.</ResponseField>

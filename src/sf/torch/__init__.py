@@ -31,8 +31,10 @@ from ._status import SFLayerStatus, capture_status, last_status, reset_status
 
 
 def _bits(dtype) -> int:
+    # only the width: sf.info() would build float constants from Fractions, which
+    # Dynamo cannot trace (torch 2.11 broke a compiled model into one graph per call)
     import sf
-    return sf.info(sf.dtype(dtype)).bits
+    return sf.dtype(dtype)._fmt.bits
 
 
 def quantize(t: torch.Tensor, dtype="sf16", scale=None) -> torch.Tensor:

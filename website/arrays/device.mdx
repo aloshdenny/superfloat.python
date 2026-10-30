@@ -17,9 +17,11 @@ w = sf.asarray(weights, dtype=sf.sf16, device="atreides")
 
 y = h @ w                    # runs on the device
 y.device                     # 'atreides'
-y.status                     # SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+y.status                     # SFStatus(saturated=0, underflow=unknown, div0=0, invalid=0, exact=True)
 out = y.numpy()              # floats on the host
 ```
+
+`saturated=0, exact=True` is a proof from the host's range bound. `underflow=unknown` is honest too: some inputs are small enough that a product could truncate to 0, and the v1 chip cannot report it. A target with flags, or `sf.config(status="replay")`, gives the exact count. [Reading status →](/arrays/status)
 
 `sf.asarray(..., device=...)` quantizes on the host and uploads; `.to("host")` downloads; `.numpy()` downloads and converts. Only sf16 is accepted on Atreides.
 
@@ -62,7 +64,7 @@ r = a + a
 r
 # sfarray([0.99996948, 0.20001221, 0.99996948, 0.40002441], dtype=sf16, device='atreides')
 r.status
-# SFStatus(saturated<=2, div0=0, invalid=0, exact=False)
+# SFStatus(saturated<=2, underflow=0, div0=0, invalid=0, exact=False)
 ```
 
 Here the bound could not decide (two elements fit, two do not), so the operation ran and the output was scanned: two outputs sit at max, which is an upper bound, hence `<=2` and a warning rather than an exception.

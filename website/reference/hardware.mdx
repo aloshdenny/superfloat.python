@@ -30,6 +30,19 @@ From then on `k[grid, block](...)` on arrays placed on `"atreides-hw"` goes
 through the driver, and `LaunchResult.status` is built from the `Counters`
 it returns. Raise `sf.SFDeviceError` from `launch` for a device fault.
 
+A count the hardware cannot read back must be `None`, not 0: v1 silicon has
+no flag register, so a v1 driver returns
+`Counters(saturated=None, underflow=None, div0=None, invalid=None)`. The status
+then says `unknown` instead of a false "0, exact". If the counts are only an
+upper bound, set `exact=False` and the runtime warns with the bound. Under
+`sf.config(status="replay")` the runtime reruns the kernel on the host
+reference, takes the exact counts from there, and raises `SFDeviceError` if the
+target's output bits differ.
+
+To declare which built-in ops a target can run (v1 has no divide or square
+root), set `supported_ops` on the `Device`; other ops are refused on the host
+before launch.
+
 To get the generated C for the compiler (sf16 only):
 
 ```python

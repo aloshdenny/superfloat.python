@@ -89,7 +89,7 @@ This walk-through takes about five minutes. Every output shown is what the code 
     y
     # sfarray([[0.3125, 0.125], [0.09997559, 0.1000061]], dtype=sf16, device='atreides')
     y.status
-    # SFStatus(saturated=0, div0=0, invalid=0, exact=True)
+    # SFStatus(saturated=0, underflow=0, div0=0, invalid=0, exact=True)
     y.numpy()           # back to floats on the host
     ```
 

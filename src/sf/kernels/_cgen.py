@@ -393,15 +393,28 @@ def build(ir: KernelIR) -> ctypes.CDLL:
         if lib is not None:
             return lib
         os.makedirs(_CACHE_DIR, exist_ok=True)
-        c_path = os.path.join(_CACHE_DIR, f"{key}.c")
         so_path = os.path.join(_CACHE_DIR, f"{key}.so")
         if not os.path.exists(so_path):
-            with open(c_path, "w") as f:
-                f.write(src)
-            cmd = [cc, *_FLAGS, f"-I{_HERE}", c_path, "-o", so_path, "-lm"]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            if proc.returncode != 0:
-                raise SFCompileError(f"C backend: {cc} failed\n{proc.stderr}\n--- IR ---\n{ir.dump()}")
+            # several processes (pytest -n, a serving pool) may build the same kernel at once:
+            # each compiles into its own temp files and publishes with an atomic rename, so no
+            # process ever loads a half-written library
+            fd, tmp_so = tempfile.mkstemp(suffix=".so", prefix=f".{key}-", dir=_CACHE_DIR)
+            os.close(fd)
+            c_path = tmp_so[:-3] + ".c"
+            try:
+                with open(c_path, "w") as f:
+                    f.write(src)
+                cmd = [cc, *_FLAGS, f"-I{_HERE}", c_path, "-o", tmp_so, "-lm"]
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                if proc.returncode != 0:
+                    raise SFCompileError(f"C backend: {cc} failed\n{proc.stderr}\n--- IR ---\n{ir.dump()}")
+                os.replace(tmp_so, so_path)
+            finally:
+                for p in (tmp_so, c_path):
+                    try:
+                        os.remove(p)
+                    except FileNotFoundError:
+                        pass
         lib = ctypes.CDLL(so_path)
         _loaded[key] = lib
         return lib

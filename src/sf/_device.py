@@ -42,6 +42,7 @@ class Device:
     accumulator_bits: int | None = None      # None: same width as the data (v1)
     sticky_flags: bool = False               # per-tile SAT / DIV0 / INVALID flags
     max_elements: int | None = None          # launch limit, None = unbounded
+    supported_ops: frozenset[str] | None = None  # heavy ops the target has instructions for; None = all
 
     def check(self, fmt: SFFormat, n_elements: int) -> None:
         if fmt.bits not in self.supported_bits:
@@ -57,8 +58,13 @@ class Device:
 
         Returns ``(codes, flags)``.  ``flags`` is ``None`` for a target with
         no event reporting (Atreides v1), or a dict of boolean masks over the
-        output (``"overflow"`` at least) for a target with sticky flags.  The
-        runtime trusts ``flags`` only when ``sticky_flags`` is True.
+        output (``"overflow"`` at least, ``"underflow"`` where the op can
+        underflow) for a target with sticky flags.  The runtime trusts
+        ``flags`` only when ``sticky_flags`` is True.
+
+        An op not in ``supported_ops`` (when that is set) is refused on the
+        host with ``SFUnsupportedError`` before ``run`` is called: Atreides
+        v1, for example, has no divide or square-root instruction.
         """
         raise NotImplementedError
 
