@@ -1,6 +1,6 @@
 ---
 title: "IR ops"
-description: "Every SF IR op, one section each. Spec version 1.0.1."
+description: "Every SF IR op, one section each. Spec version 1.0.2."
 ---
 
 Each op lists its operands, attributes, result, shape rule, exact semantics on integer codes, events, memory effects, faults, predication, the v1 hardware unit, a suggested MLIR op with traits, and the rewrites that are and are not legal. Ops with golden vectors say so.
@@ -156,7 +156,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer negate on the signed code (on a sign-magnitude register it would be: flip the sign bit) |
+| v1 hardware | flip the sign bit (registers are sign-magnitude; 0 stays 0, never write 0x8000 as a result) |
 | MLIR | sf.neg; traits: Pure, Elementwise, Involution |
 | From Python | -a |
 | Golden vectors | `spec/golden/neg.json` |
@@ -178,7 +178,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer abs on the signed code (on a sign-magnitude register it would be: clear the sign bit) |
+| v1 hardware | clear the sign bit |
 | MLIR | sf.abs; traits: Pure, Elementwise, Idempotent |
 | From Python | abs(a) |
 | Golden vectors | `spec/golden/abs.json` |
@@ -215,8 +215,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer compare |
-| MLIR | arith.cmpi on codes; traits: Pure |
+| v1 hardware | sign-magnitude compare instruction (+0 and 0x8000 are equal) |
+| MLIR | sf.cmp (lowers to the chip's sign-magnitude compare, not arith.cmpi); traits: Pure |
 | From Python | a &lt; b, a == b, ... |
 
 ### cmp_lit
@@ -233,8 +233,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer compare with immediate |
-| MLIR | arith.cmpi with constant; traits: Pure |
+| v1 hardware | sign-magnitude compare with an immediate; encode the threshold code in sign-magnitude |
+| MLIR | sf.cmp with a constant (not arith.cmpi); traits: Pure |
 | From Python | x &lt; 0.3, x > 1 |
 
 ## Casts
@@ -253,7 +253,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | shift |
+| v1 hardware | shift the magnitude left by M - N; the sign bit moves from bit N-1 to bit M-1 |
 | MLIR | sf.cast (widening); traits: Pure, Elementwise |
 | From Python | sf.cast(x, wider), x.astype(wider) |
 | Golden vectors | `spec/golden/widen.json` |
@@ -280,6 +280,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 **Notes:**
 
 - this is the ONLY op that rounds to nearest. All arithmetic truncates toward zero.
+- on sign-magnitude registers: round the magnitude half to even, then keep the sign. This gives the same result as rounding k, because round half to even is symmetric. A result of 0 must be +0.
 
 ## Reductions
 
@@ -321,7 +322,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer max tree |
+| v1 hardware | tree of sign-magnitude max |
 | MLIR | sf.reduce_max; traits: Pure |
 | From Python | sf.max |
 
@@ -343,7 +344,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer min tree |
+| v1 hardware | tree of sign-magnitude min |
 | MLIR | sf.reduce_min; traits: Pure |
 | From Python | sf.min |
 
@@ -412,8 +413,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer max |
-| MLIR | arith.maxsi; traits: Pure, Commutative |
+| v1 hardware | sign-magnitude max (+0 and 0x8000 are equal) |
+| MLIR | sf.maximum (lowers to the chip's sign-magnitude max, not arith.maxsi); traits: Pure, Commutative |
 | From Python | sf.maximum, ReLU = maximum(x, 0) |
 
 **Rewrites:**
@@ -433,8 +434,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer min |
-| MLIR | arith.minsi; traits: Pure, Commutative |
+| v1 hardware | sign-magnitude min (+0 and 0x8000 are equal) |
+| MLIR | sf.minimum (lowers to the chip's sign-magnitude min, not arith.minsi); traits: Pure, Commutative |
 | From Python | sf.minimum, sf.clip |
 
 **Rewrites:**

@@ -3,7 +3,7 @@ title: "Versioning"
 description: "How the spec version changes, and what changed in each version."
 ---
 
-Current version: **1.0.1** (MAJOR.MINOR.PATCH).
+Current version: **1.0.2** (MAJOR.MINOR.PATCH).
 
 | Change | Bump | Example |
 |---|---|---|
@@ -17,5 +17,6 @@ Each op carries the version in which its contract last changed. If your lowering
 
 | Version | Date | Change |
 |---|---|---|
+| 1.0.2 | 2026-11-06 | Chip team confirmed registers hold sign-magnitude and compare / max / min work on it, so there is no conversion on load and store. Lowering notes for neg, abs, cmp, cmp_lit, maximum, minimum, max, min, widen, narrow and the width rule updated to sign-magnitude. Op semantics unchanged. |
 | 1.0.1 | 2026-11-06 | Fixes from Kartik's review. No op changes behaviour; the text was wrong. addmm is the dot chain then one saturating add of d (the accumulator does not start at d). Faults have a defined contract (the faulting op writes nothing, earlier writes stay), not undefined buffers. IR values are signed codes; sign-magnitude is only the memory format, and the rule for converting is stated. Ops that can raise an event are no longer suggested as Pure. |
 | 1.0.0 | 2026-10-30 | First release: every SF IR op of Stage 3 and every public Python function. |

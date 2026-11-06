@@ -1,6 +1,11 @@
 {
- "spec_version": "1.0.1",
+ "spec_version": "1.0.2",
  "changelog": [
+  [
+   "1.0.2",
+   "2026-11-06",
+   "Chip team confirmed registers hold sign-magnitude and compare / max / min work on it, so there is no conversion on load and store. Lowering notes for neg, abs, cmp, cmp_lit, maximum, minimum, max, min, widen, narrow and the width rule updated to sign-magnitude. Op semantics unchanged."
+  ],
   [
    "1.0.1",
    "2026-11-06",
@@ -20,13 +25,13 @@
   "Arithmetic truncates toward zero; only narrow rounds (half to even). Add/sub/sum saturate; mul underflows; div overflows when |a| >= |b|.",
   "No reassociation of add, sum, or the k loop of dot. No distributivity. No float math anywhere: lower on integer codes.",
   "Faults (out of bounds, integer division by zero) abort the launch with SFDeviceError. Within a program: the faulting op writes nothing, writes by earlier ops stay, and no later op runs. Across programs: the simulator runs programs in order, so programs before the faulting one have finished and later ones never start; on hardware, which other programs have finished is not specified. Both reference backends are tested to leave the same buffer state.",
-  "Memory format: the IR works on signed codes k. In memory the chip stores sign-magnitude in a 16-bit word: bit N-1 is the sign, the low N-1 bits are |k|. Negative k is stored as (1 << (N-1)) | -k (sf16: -3 = 0x8003, -32767 = 0xFFFF); 0x8000 (negative zero) reads as 0. Reference: to_bits / from_bits in src/sf/_vectorized.py. Today the driver hook receives buffers as int64 signed codes, so the conversion is outside the IR. A lowering that keeps sign-magnitude in registers must use sign-magnitude compare / max / min / negate / abs and treat 0x8000 as 0; one that converts on load and store can use ordinary signed integer ops. Which the chip supports is an open question for the chip team.",
+  "Memory format: the IR works on signed codes k. In memory the chip stores sign-magnitude in a 16-bit word: bit N-1 is the sign, the low N-1 bits are |k|. Negative k is stored as (1 << (N-1)) | -k (sf16: -3 = 0x8003, -32767 = 0xFFFF); 0x8000 (negative zero) reads as 0. Reference: to_bits / from_bits in src/sf/_vectorized.py. Today the driver hook receives buffers as int64 signed codes, so the conversion is outside the IR. The chip team confirmed (2026-11-06) that registers also hold sign-magnitude and the compare / max / min units work on it, so loads and stores do NOT convert. Lower neg as flip the sign bit, abs as clear the sign bit, and cmp / max / min with the chip's sign-magnitude instructions, which treat 0x8000 as equal to 0. Do not lower them to arith.cmpi / maxsi / minsi / subi / absi: those assume two's complement and give wrong answers on sign-magnitude bits (for example -2 = 0x8002 compares greater than -1 = 0x8001, whether the bits are read as signed or unsigned).",
   "Events are side effects. An op that can raise an event (add, sub, mul, div, fma, sqrt, narrow, sum, dot) is NOT Pure: removing a dead one would also remove its event count. Model the events as an effect or an extra result, so such an op is only removed when its events are not needed. On v1 (no flag register) nothing is lost today.",
   "Host pre-flight: before a launch the host decides everything it can (a zero divisor, an op that must saturate everywhere, an op that cannot saturate). The compiler never needs to handle those cases specially, but must still produce correct bits for them.",
-  "Width: sfN for N < 16 runs on the sf16 datapath shifted left by 16-N and must be re-truncated (low bits masked) after every op so the result equals true sfN."
+  "Width: sfN for N < 16 runs on the sf16 datapath. In sign-magnitude the MAGNITUDE is shifted left by 16-N and the sign moves to bit 15; after every op the low 16-N magnitude bits must be re-truncated (masked) so the result equals true sfN."
  ],
  "types": {
-  "sfN": "Superfloat code, N in 4..16. Stored as a signed integer k in [-M, M], M = 2^(N-1) - 1. Value = k / 2^(N-1). In the IR, k is a plain signed (two's complement) integer, int64 in both reference backends, so integer compare / max / min / negate / abs on k are correct. There is no code -2^(N-1), no NaN, no infinity. In memory the chip stores sign-magnitude instead: see the memory format rule.",
+  "sfN": "Superfloat code, N in 4..16. Stored as a signed integer k in [-M, M], M = 2^(N-1) - 1. Value = k / 2^(N-1). In the IR, k is a plain signed (two's complement) integer, int64 in both reference backends; the semantics in this spec are written on k. There is no code -2^(N-1), no NaN, no infinity. On the chip, registers and memory both hold sign-magnitude: see the memory format rule.",
   "int": "64-bit signed integer (indices, offsets, loop math). Never overflows in practice; the reference uses int64 and does not wrap-check.",
   "bool": "1-bit predicate / mask.",
   "ptr<sfN>": "Base address of a global buffer of sfN codes. Only appears as a kernel parameter; address arithmetic is `ptr + int offsets` and is folded into load/store."
@@ -934,7 +939,7 @@
    "shape": "a",
    "semantics": "-a. Exact (range is symmetric), no events.",
    "predication": "pure",
-   "hw_v1": "integer negate on the signed code (on a sign-magnitude register it would be: flip the sign bit)",
+   "hw_v1": "flip the sign bit (registers are sign-magnitude; 0 stays 0, never write 0x8000 as a result)",
    "mlir": {
     "name": "sf.neg",
     "traits": [
@@ -967,7 +972,7 @@
    "shape": "a",
    "semantics": "|a|. Exact, no events.",
    "predication": "pure",
-   "hw_v1": "integer abs on the signed code (on a sign-magnitude register it would be: clear the sign bit)",
+   "hw_v1": "clear the sign bit",
    "mlir": {
     "name": "sf.abs",
     "traits": [
@@ -1034,7 +1039,7 @@
    "shape": "a",
    "semantics": "result = a << (M - N). Exact, no events.",
    "predication": "pure",
-   "hw_v1": "shift",
+   "hw_v1": "shift the magnitude left by M - N; the sign bit moves from bit N-1 to bit M-1",
    "mlir": {
     "name": "sf.cast (widening)",
     "traits": [
@@ -1084,7 +1089,8 @@
     "x.astype(narrower)"
    ],
    "notes": [
-    "this is the ONLY op that rounds to nearest. All arithmetic truncates toward zero."
+    "this is the ONLY op that rounds to nearest. All arithmetic truncates toward zero.",
+    "on sign-magnitude registers: round the magnitude half to even, then keep the sign. This gives the same result as rounding k, because round half to even is symmetric. A result of 0 must be +0."
    ],
    "version": "1.0",
    "memory": "none",
@@ -1106,9 +1112,9 @@
    "shape": "broadcast(a, b)",
    "semantics": "Integer compare of the codes (exact).",
    "predication": "pure",
-   "hw_v1": "integer compare",
+   "hw_v1": "sign-magnitude compare instruction (+0 and 0x8000 are equal)",
    "mlir": {
-    "name": "arith.cmpi on codes",
+    "name": "sf.cmp (lowers to the chip's sign-magnitude compare, not arith.cmpi)",
     "traits": [
      "Pure"
     ]
@@ -1140,9 +1146,9 @@
    "shape": "a",
    "semantics": "Compare against a Python literal that may not be representable (e.g. x < 1). The tracer turns the exact literal into an equivalent integer threshold, so the op is a plain integer compare.",
    "predication": "pure",
-   "hw_v1": "integer compare with immediate",
+   "hw_v1": "sign-magnitude compare with an immediate; encode the threshold code in sign-magnitude",
    "mlir": {
-    "name": "arith.cmpi with constant",
+    "name": "sf.cmp with a constant (not arith.cmpi)",
     "traits": [
      "Pure"
     ]
@@ -1170,9 +1176,9 @@
    "shape": "broadcast(a, b)",
    "semantics": "max of codes. Exact.",
    "predication": "pure",
-   "hw_v1": "integer max",
+   "hw_v1": "sign-magnitude max (+0 and 0x8000 are equal)",
    "mlir": {
-    "name": "arith.maxsi",
+    "name": "sf.maximum (lowers to the chip's sign-magnitude max, not arith.maxsi)",
     "traits": [
      "Pure",
      "Commutative"
@@ -1204,9 +1210,9 @@
    "shape": "broadcast(a, b)",
    "semantics": "min of codes. Exact.",
    "predication": "pure",
-   "hw_v1": "integer min",
+   "hw_v1": "sign-magnitude min (+0 and 0x8000 are equal)",
    "mlir": {
-    "name": "arith.minsi",
+    "name": "sf.minimum (lowers to the chip's sign-magnitude min, not arith.minsi)",
     "traits": [
      "Pure",
      "Commutative"
@@ -1277,7 +1283,7 @@
    "shape": "axis removed",
    "semantics": "max along axis. Exact.",
    "predication": "pure",
-   "hw_v1": "integer max tree",
+   "hw_v1": "tree of sign-magnitude max",
    "mlir": {
     "name": "sf.reduce_max",
     "traits": [
@@ -1310,7 +1316,7 @@
    "shape": "axis removed",
    "semantics": "min along axis. Exact.",
    "predication": "pure",
-   "hw_v1": "integer min tree",
+   "hw_v1": "tree of sign-magnitude min",
    "mlir": {
     "name": "sf.reduce_min",
     "traits": [

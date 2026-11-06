@@ -20,9 +20,10 @@ Versioning (see website/compiler/versioning.mdx):
     example a move to the v4.8.1 wide accumulator).
 """
 
-SPEC_VERSION = "1.0.1"
+SPEC_VERSION = "1.0.2"
 
 CHANGELOG = [
+    ("1.0.2", "2026-11-06", "Chip team confirmed registers hold sign-magnitude and compare / max / min work on it, so there is no conversion on load and store. Lowering notes for neg, abs, cmp, cmp_lit, maximum, minimum, max, min, widen, narrow and the width rule updated to sign-magnitude. Op semantics unchanged."),
     ("1.0.1", "2026-11-06", "Fixes from Kartik's review. No op changes behaviour; the text was wrong. addmm is the dot chain then one saturating add of d (the accumulator does not start at d). Faults have a defined contract (the faulting op writes nothing, earlier writes stay), not undefined buffers. IR values are signed codes; sign-magnitude is only the memory format, and the rule for converting is stated. Ops that can raise an event are no longer suggested as Pure."),
     ("1.0.0", "2026-10-30", "First release: every SF IR op of Stage 3 and every public Python function."),
 ]
@@ -32,8 +33,8 @@ CHANGELOG = [
 TYPES = {
     "sfN": "Superfloat code, N in 4..16. Stored as a signed integer k in [-M, M], M = 2^(N-1) - 1. "
            "Value = k / 2^(N-1). In the IR, k is a plain signed (two's complement) integer, int64 in both reference "
-           "backends, so integer compare / max / min / negate / abs on k are correct. There is no code -2^(N-1), no NaN, "
-           "no infinity. In memory the chip stores sign-magnitude instead: see the memory format rule.",
+           "backends; the semantics in this spec are written on k. There is no code -2^(N-1), no NaN, no infinity. "
+           "On the chip, registers and memory both hold sign-magnitude: see the memory format rule.",
     "int": "64-bit signed integer (indices, offsets, loop math). Never overflows in practice; the "
            "reference uses int64 and does not wrap-check.",
     "bool": "1-bit predicate / mask.",
@@ -213,11 +214,11 @@ OPS = [
        rewrites=["add(mul(a,b),c) <-> fma(a,b,c) is legal both ways (same bits)", "commutative in a and b"],
        notes=["on v4.8.1 hardware (wide accumulator, single rounding) this would change: major version bump"]),
     _e(name="neg", category="sf", signature="%r:sfN = neg %a", operands=["a: sfN"], result="sfN", shape="a",
-       semantics="-a. Exact (range is symmetric), no events.", predication="pure", hw_v1="integer negate on the signed code (on a sign-magnitude register it would be: flip the sign bit)",
+       semantics="-a. Exact (range is symmetric), no events.", predication="pure", hw_v1="flip the sign bit (registers are sign-magnitude; 0 stays 0, never write 0x8000 as a result)",
        mlir={"name": "sf.neg", "traits": ["Pure", "Elementwise", "Involution"]}, python=["-a"],
        rewrites=["neg(neg(x)) -> x"]),
     _e(name="abs", category="sf", signature="%r:sfN = abs %a", operands=["a: sfN"], result="sfN", shape="a",
-       semantics="|a|. Exact, no events.", predication="pure", hw_v1="integer abs on the signed code (on a sign-magnitude register it would be: clear the sign bit)",
+       semantics="|a|. Exact, no events.", predication="pure", hw_v1="clear the sign bit",
        mlir={"name": "sf.abs", "traits": ["Pure", "Elementwise", "Idempotent"]}, python=["abs(a)"]),
     _e(name="sqrt", category="sf", signature="%r:sfN = sqrt %a", operands=["a: sfN"], result="sfN", shape="a",
        semantics="a < 0: invalid, result 0. Else result = isqrt(a * 2^(N-1)) (floor of the exact root). Never overflows.",
@@ -226,7 +227,7 @@ OPS = [
        mlir={"name": "sf.sqrt", "traits": ["EventEffect (not Pure)", "Elementwise", "SameOperandsAndResultType"]}, python=["sf.sqrt(a)"]),
     _e(name="widen", category="cast", signature="%r:sfM = widen %a {bits}", operands=["a: sfN, N < M"],
        attrs={"bits": "target width M"}, result="sfM", shape="a",
-       semantics="result = a << (M - N). Exact, no events.", predication="pure", hw_v1="shift",
+       semantics="result = a << (M - N). Exact, no events.", predication="pure", hw_v1="shift the magnitude left by M - N; the sign bit moves from bit N-1 to bit M-1",
        mlir={"name": "sf.cast (widening)", "traits": ["Pure", "Elementwise"]}, python=["sf.cast(x, wider)", "x.astype(wider)"]),
     _e(name="narrow", category="cast", signature="%r:sfM = narrow %a {bits}", operands=["a: sfN, N > M"],
        attrs={"bits": "target width M"}, result="sfM", shape="a",
@@ -234,25 +235,27 @@ OPS = [
                  "If |q| > M_max: overflow, clip to +-M_max. underflow if a != 0 and result == 0.",
        events=["overflow", "underflow"], predication="events", hw_v1="shift + round (ACT)",
        mlir={"name": "sf.cast (narrowing)", "traits": ["EventEffect (not Pure)", "Elementwise"]}, python=["sf.cast(x, narrower)", "x.astype(narrower)"],
-       notes=["this is the ONLY op that rounds to nearest. All arithmetic truncates toward zero."]),
+       notes=["this is the ONLY op that rounds to nearest. All arithmetic truncates toward zero.",
+              "on sign-magnitude registers: round the magnitude half to even, then keep the sign. This gives the same "
+              "result as rounding k, because round half to even is symmetric. A result of 0 must be +0."]),
     _e(name="cmp", category="sf", signature="%r:bool = cmp %a, %b {op}", operands=["a: sfN", "b: sfN"],
        attrs={"op": "lt | le | gt | ge | eq | ne"}, result="bool", shape="broadcast(a, b)",
-       semantics="Integer compare of the codes (exact).", predication="pure", hw_v1="integer compare",
-       mlir={"name": "arith.cmpi on codes", "traits": ["Pure"]}, python=["a < b", "a == b", "..."]),
+       semantics="Integer compare of the codes (exact).", predication="pure", hw_v1="sign-magnitude compare instruction (+0 and 0x8000 are equal)",
+       mlir={"name": "sf.cmp (lowers to the chip's sign-magnitude compare, not arith.cmpi)", "traits": ["Pure"]}, python=["a < b", "a == b", "..."]),
     _e(name="cmp_lit", category="sf", signature="%r:bool = cmp_lit %a {op, value}", operands=["a: sfN"],
        attrs={"op": "lt | le | gt | ge | eq | ne", "value": "int code threshold, decided at trace time"},
        result="bool", shape="a",
        semantics="Compare against a Python literal that may not be representable (e.g. x < 1). The tracer turns the "
                  "exact literal into an equivalent integer threshold, so the op is a plain integer compare.",
-       predication="pure", hw_v1="integer compare with immediate", mlir={"name": "arith.cmpi with constant", "traits": ["Pure"]},
+       predication="pure", hw_v1="sign-magnitude compare with an immediate; encode the threshold code in sign-magnitude", mlir={"name": "sf.cmp with a constant (not arith.cmpi)", "traits": ["Pure"]},
        python=["x < 0.3", "x > 1"]),
     _e(name="maximum", category="select", signature="%r = maximum %a, %b", operands=["a: sfN", "b: sfN"], result="sfN",
-       shape="broadcast(a, b)", semantics="max of codes. Exact.", predication="pure", hw_v1="integer max",
-       mlir={"name": "arith.maxsi", "traits": ["Pure", "Commutative"]}, python=["sf.maximum", "ReLU = maximum(x, 0)"],
+       shape="broadcast(a, b)", semantics="max of codes. Exact.", predication="pure", hw_v1="sign-magnitude max (+0 and 0x8000 are equal)",
+       mlir={"name": "sf.maximum (lowers to the chip's sign-magnitude max, not arith.maxsi)", "traits": ["Pure", "Commutative"]}, python=["sf.maximum", "ReLU = maximum(x, 0)"],
        rewrites=["associative and commutative (legal to reorder)"]),
     _e(name="minimum", category="select", signature="%r = minimum %a, %b", operands=["a: sfN", "b: sfN"], result="sfN",
-       shape="broadcast(a, b)", semantics="min of codes. Exact.", predication="pure", hw_v1="integer min",
-       mlir={"name": "arith.minsi", "traits": ["Pure", "Commutative"]}, python=["sf.minimum", "sf.clip"],
+       shape="broadcast(a, b)", semantics="min of codes. Exact.", predication="pure", hw_v1="sign-magnitude min (+0 and 0x8000 are equal)",
+       mlir={"name": "sf.minimum (lowers to the chip's sign-magnitude min, not arith.minsi)", "traits": ["Pure", "Commutative"]}, python=["sf.minimum", "sf.clip"],
        rewrites=["associative and commutative"]),
 
     # ---- reductions and contraction -----------------------------------------------------------
@@ -264,10 +267,10 @@ OPS = [
        mlir={"name": "sf.reduce_sum", "traits": ["EventEffect (not Pure)"]}, python=["sf.sum(x, axis)", "x.sum()"],
        rewrites=[NO_REASSOC, "result DEPENDS on order: [M, 1, -1] gives M-1, [1, -1, M] gives M"]),
     _e(name="max", category="reduction", signature="%r = max %x {axis}", operands=["x: sfN"], attrs={"axis": "int or None"},
-       result="sfN", shape="axis removed", semantics="max along axis. Exact.", predication="pure", hw_v1="integer max tree",
+       result="sfN", shape="axis removed", semantics="max along axis. Exact.", predication="pure", hw_v1="tree of sign-magnitude max",
        mlir={"name": "sf.reduce_max", "traits": ["Pure"]}, python=["sf.max"], rewrites=["any order / tree is legal"]),
     _e(name="min", category="reduction", signature="%r = min %x {axis}", operands=["x: sfN"], attrs={"axis": "int or None"},
-       result="sfN", shape="axis removed", semantics="min along axis. Exact.", predication="pure", hw_v1="integer min tree",
+       result="sfN", shape="axis removed", semantics="min along axis. Exact.", predication="pure", hw_v1="tree of sign-magnitude min",
        mlir={"name": "sf.reduce_min", "traits": ["Pure"]}, python=["sf.min"], rewrites=["any order / tree is legal"]),
     _e(name="dot", category="contraction", signature="%r:sfN[m,n] = dot %a, %b", operands=["a: sfN[m, k]", "b: sfN[k, n]"],
        result="sfN", shape="(m, n)",
@@ -368,12 +371,14 @@ GLOBAL_RULES = [
     "Memory format: the IR works on signed codes k. In memory the chip stores sign-magnitude in a 16-bit word: bit N-1 is "
     "the sign, the low N-1 bits are |k|. Negative k is stored as (1 << (N-1)) | -k (sf16: -3 = 0x8003, -32767 = 0xFFFF); "
     "0x8000 (negative zero) reads as 0. Reference: to_bits / from_bits in src/sf/_vectorized.py. Today the driver hook "
-    "receives buffers as int64 signed codes, so the conversion is outside the IR. A lowering that keeps sign-magnitude in "
-    "registers must use sign-magnitude compare / max / min / negate / abs and treat 0x8000 as 0; one that converts on "
-    "load and store can use ordinary signed integer ops. Which the chip supports is an open question for the chip team.",
+    "receives buffers as int64 signed codes, so the conversion is outside the IR. The chip team confirmed (2026-11-06) "
+    "that registers also hold sign-magnitude and the compare / max / min units work on it, so loads and stores do NOT "
+    "convert. Lower neg as flip the sign bit, abs as clear the sign bit, and cmp / max / min with the chip's sign-magnitude "
+    "instructions, which treat 0x8000 as equal to 0. Do not lower them to arith.cmpi / maxsi / minsi / subi / absi: those "
+    "assume two's complement and give wrong answers on sign-magnitude bits (for example -2 = 0x8002 compares greater than -1 = 0x8001, whether the bits are read as signed or unsigned).",
     "Events are side effects. An op that can raise an event (add, sub, mul, div, fma, sqrt, narrow, sum, dot) is NOT "
     "Pure: removing a dead one would also remove its event count. Model the events as an effect or an extra result, "
     "so such an op is only removed when its events are not needed. On v1 (no flag register) nothing is lost today.",
     "Host pre-flight: before a launch the host decides everything it can (a zero divisor, an op that must saturate everywhere, an op that cannot saturate). The compiler never needs to handle those cases specially, but must still produce correct bits for them.",
-    "Width: sfN for N < 16 runs on the sf16 datapath shifted left by 16-N and must be re-truncated (low bits masked) after every op so the result equals true sfN.",
+    "Width: sfN for N < 16 runs on the sf16 datapath. In sign-magnitude the MAGNITUDE is shifted left by 16-N and the sign moves to bit 15; after every op the low 16-N magnitude bits must be re-truncated (masked) so the result equals true sfN.",
 ]
