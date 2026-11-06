@@ -1,6 +1,6 @@
 ---
 title: "IR ops"
-description: "Every SF IR op, one section each. Spec version 1.0.2."
+description: "Every SF IR op, one section each. Spec version 1.0.3."
 ---
 
 Each op lists its operands, attributes, result, shape rule, exact semantics on integer codes, events, memory effects, faults, predication, the v1 hardware unit, a suggested MLIR op with traits, and the rewrites that are and are not legal. Ops with golden vectors say so.
@@ -156,7 +156,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | flip the sign bit (registers are sign-magnitude; 0 stays 0, never write 0x8000 as a result) |
+| v1 hardware | v4.8.1 (ISA section 5): integer ADD x, 0x8000 to flip bit 15, then ACT f=00 with +0 so a 0 input never leaves 0x8000 |
 | MLIR | sf.neg; traits: Pure, Elementwise, Involution |
 | From Python | -a |
 | Golden vectors | `spec/golden/neg.json` |
@@ -178,7 +178,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | clear the sign bit |
+| v1 hardware | v4.8.1 (ISA section 5): abs(x) = ReLU(x) + ReLU(-x), using ACT f=01 for ReLU, neg for -x and ACT f=00 for the add |
 | MLIR | sf.abs; traits: Pure, Elementwise, Idempotent |
 | From Python | abs(a) |
 | Golden vectors | `spec/golden/abs.json` |
@@ -215,8 +215,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | sign-magnitude compare instruction (+0 and 0x8000 are equal) |
-| MLIR | sf.cmp (lowers to the chip's sign-magnitude compare, not arith.cmpi); traits: Pure |
+| v1 hardware | v4.8.1 (ISA section 5): R = ACT f=00 (a, -b), then CMP R, zero. Saturation keeps the sign, so this is exact over the whole range. Only thread 0's NZP steers a branch |
+| MLIR | sf.cmp (expands to ACT + CMP, not arith.cmpi); traits: Pure |
 | From Python | a &lt; b, a == b, ... |
 
 ### cmp_lit
@@ -233,8 +233,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | sign-magnitude compare with an immediate; encode the threshold code in sign-magnitude |
-| MLIR | sf.cmp with a constant (not arith.cmpi); traits: Pure |
+| v1 hardware | v4.8.1: as cmp, with -threshold as a sign-magnitude constant: R = ACT f=00 (a, -t), then CMP R, zero |
+| MLIR | sf.cmp with a constant (expands to ACT + CMP, not arith.cmpi); traits: Pure |
 | From Python | x &lt; 0.3, x > 1 |
 
 ## Casts
@@ -253,7 +253,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | shift the magnitude left by M - N; the sign bit moves from bit N-1 to bit M-1 |
+| v1 hardware | v4.8.1: no conversion instruction (ISA section 5). In sign-magnitude it means: magnitude shifted left by M - N, sign bit moved from bit N-1 to bit M-1. Expand or do it on the host |
 | MLIR | sf.cast (widening); traits: Pure, Elementwise |
 | From Python | sf.cast(x, wider), x.astype(wider) |
 | Golden vectors | `spec/golden/widen.json` |
@@ -272,7 +272,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | overflow, underflow |
 | Memory | none |
 | Predication | events |
-| v1 hardware | shift + round (ACT) |
+| v1 hardware | v4.8.1: no conversion instruction; the only hardware rounding is POP on MX results (ISA section 5). Expand or do it on the host |
 | MLIR | sf.cast (narrowing); traits: EventEffect (not Pure), Elementwise |
 | From Python | sf.cast(x, narrower), x.astype(narrower) |
 | Golden vectors | `spec/golden/narrow.json` |
@@ -322,7 +322,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | tree of sign-magnitude max |
+| v1 hardware | v4.8.1: tree of the ISA section 5 max sequence |
 | MLIR | sf.reduce_max; traits: Pure |
 | From Python | sf.max |
 
@@ -344,7 +344,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | tree of sign-magnitude min |
+| v1 hardware | v4.8.1: tree of the ISA section 5 min sequence |
 | MLIR | sf.reduce_min; traits: Pure |
 | From Python | sf.min |
 
@@ -413,8 +413,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | sign-magnitude max (+0 and 0x8000 are equal) |
-| MLIR | sf.maximum (lowers to the chip's sign-magnitude max, not arith.maxsi); traits: Pure, Commutative |
+| v1 hardware | v4.8.1: no instruction. Use the exact 16-instruction ReLU sequence in ISA section 5: max(a, b) = max(a+, b+) - min(a-, b-). Do not use b + ReLU(a - b): the difference can saturate |
+| MLIR | sf.maximum (expands to the ISA ReLU sequence, not arith.maxsi); traits: Pure, Commutative |
 | From Python | sf.maximum, ReLU = maximum(x, 0) |
 
 **Rewrites:**
@@ -434,8 +434,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | sign-magnitude min (+0 and 0x8000 are equal) |
-| MLIR | sf.minimum (lowers to the chip's sign-magnitude min, not arith.minsi); traits: Pure, Commutative |
+| v1 hardware | v4.8.1: no instruction. min(a, b) = -max(-a, -b) with the ISA section 5 sequence, finished as M - P so the result is never -0 |
+| MLIR | sf.minimum (expands to the ISA ReLU sequence, not arith.minsi); traits: Pure, Commutative |
 | From Python | sf.minimum, sf.clip |
 
 **Rewrites:**

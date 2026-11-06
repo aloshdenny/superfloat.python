@@ -1,6 +1,11 @@
 {
- "spec_version": "1.0.2",
+ "spec_version": "1.0.3",
  "changelog": [
+  [
+   "1.0.3",
+   "2026-11-06",
+   "Corrects 1.0.2 against the v4.8.1 ISA doc (compiler_v4.8.1.md): the chip has no sign-magnitude compare, max or min instructions. CMP is a signed 16-bit integer compare; compare, max, min, neg and abs are now given as the ISA section 5 sequences built from ACT, ADD and CMP. widen and narrow have no instruction. Op semantics unchanged."
+  ],
   [
    "1.0.2",
    "2026-11-06",
@@ -25,7 +30,7 @@
   "Arithmetic truncates toward zero; only narrow rounds (half to even). Add/sub/sum saturate; mul underflows; div overflows when |a| >= |b|.",
   "No reassociation of add, sum, or the k loop of dot. No distributivity. No float math anywhere: lower on integer codes.",
   "Faults (out of bounds, integer division by zero) abort the launch with SFDeviceError. Within a program: the faulting op writes nothing, writes by earlier ops stay, and no later op runs. Across programs: the simulator runs programs in order, so programs before the faulting one have finished and later ones never start; on hardware, which other programs have finished is not specified. Both reference backends are tested to leave the same buffer state.",
-  "Memory format: the IR works on signed codes k. In memory the chip stores sign-magnitude in a 16-bit word: bit N-1 is the sign, the low N-1 bits are |k|. Negative k is stored as (1 << (N-1)) | -k (sf16: -3 = 0x8003, -32767 = 0xFFFF); 0x8000 (negative zero) reads as 0. Reference: to_bits / from_bits in src/sf/_vectorized.py. Today the driver hook receives buffers as int64 signed codes, so the conversion is outside the IR. The chip team confirmed (2026-11-06) that registers also hold sign-magnitude and the compare / max / min units work on it, so loads and stores do NOT convert. Lower neg as flip the sign bit, abs as clear the sign bit, and cmp / max / min with the chip's sign-magnitude instructions, which treat 0x8000 as equal to 0. Do not lower them to arith.cmpi / maxsi / minsi / subi / absi: those assume two's complement and give wrong answers on sign-magnitude bits (for example -2 = 0x8002 compares greater than -1 = 0x8001, whether the bits are read as signed or unsigned).",
+  "Memory format: the IR works on signed codes k. In memory the chip stores sign-magnitude in a 16-bit word: bit N-1 is the sign, the low N-1 bits are |k|. Negative k is stored as (1 << (N-1)) | -k (sf16: -3 = 0x8003, -32767 = 0xFFFF); 0x8000 (negative zero) reads as 0. Reference: to_bits / from_bits in src/sf/_vectorized.py. Today the driver hook receives buffers as int64 signed codes, so the conversion is outside the IR. On v4.8.1 registers and memory both hold sign-magnitude and loads and stores do NOT convert (ISA section 3.2). The chip has no sign-magnitude compare, max or min instruction: CMP is a signed 16-bit integer compare, which orders negative sign-magnitude values the wrong way (-2 = 0x8002 compares greater than -1 = 0x8001) and does not treat 0x8000 as equal to 0. So never lower cmp / max / min / neg / abs to a plain integer op; use the ISA section 5 sequences given on each op. Integer ADD and SUB are not SF add and sub either: SF add is ACT f=00.",
   "Events are side effects. An op that can raise an event (add, sub, mul, div, fma, sqrt, narrow, sum, dot) is NOT Pure: removing a dead one would also remove its event count. Model the events as an effect or an extra result, so such an op is only removed when its events are not needed. On v1 (no flag register) nothing is lost today.",
   "Host pre-flight: before a launch the host decides everything it can (a zero divisor, an op that must saturate everywhere, an op that cannot saturate). The compiler never needs to handle those cases specially, but must still produce correct bits for them.",
   "Width: sfN for N < 16 runs on the sf16 datapath. In sign-magnitude the MAGNITUDE is shifted left by 16-N and the sign moves to bit 15; after every op the low 16-N magnitude bits must be re-truncated (masked) so the result equals true sfN."
@@ -939,7 +944,7 @@
    "shape": "a",
    "semantics": "-a. Exact (range is symmetric), no events.",
    "predication": "pure",
-   "hw_v1": "flip the sign bit (registers are sign-magnitude; 0 stays 0, never write 0x8000 as a result)",
+   "hw_v1": "v4.8.1 (ISA section 5): integer ADD x, 0x8000 to flip bit 15, then ACT f=00 with +0 so a 0 input never leaves 0x8000",
    "mlir": {
     "name": "sf.neg",
     "traits": [
@@ -972,7 +977,7 @@
    "shape": "a",
    "semantics": "|a|. Exact, no events.",
    "predication": "pure",
-   "hw_v1": "clear the sign bit",
+   "hw_v1": "v4.8.1 (ISA section 5): abs(x) = ReLU(x) + ReLU(-x), using ACT f=01 for ReLU, neg for -x and ACT f=00 for the add",
    "mlir": {
     "name": "sf.abs",
     "traits": [
@@ -1039,7 +1044,7 @@
    "shape": "a",
    "semantics": "result = a << (M - N). Exact, no events.",
    "predication": "pure",
-   "hw_v1": "shift the magnitude left by M - N; the sign bit moves from bit N-1 to bit M-1",
+   "hw_v1": "v4.8.1: no conversion instruction (ISA section 5). In sign-magnitude it means: magnitude shifted left by M - N, sign bit moved from bit N-1 to bit M-1. Expand or do it on the host",
    "mlir": {
     "name": "sf.cast (widening)",
     "traits": [
@@ -1076,7 +1081,7 @@
     "underflow"
    ],
    "predication": "events",
-   "hw_v1": "shift + round (ACT)",
+   "hw_v1": "v4.8.1: no conversion instruction; the only hardware rounding is POP on MX results (ISA section 5). Expand or do it on the host",
    "mlir": {
     "name": "sf.cast (narrowing)",
     "traits": [
@@ -1112,9 +1117,9 @@
    "shape": "broadcast(a, b)",
    "semantics": "Integer compare of the codes (exact).",
    "predication": "pure",
-   "hw_v1": "sign-magnitude compare instruction (+0 and 0x8000 are equal)",
+   "hw_v1": "v4.8.1 (ISA section 5): R = ACT f=00 (a, -b), then CMP R, zero. Saturation keeps the sign, so this is exact over the whole range. Only thread 0's NZP steers a branch",
    "mlir": {
-    "name": "sf.cmp (lowers to the chip's sign-magnitude compare, not arith.cmpi)",
+    "name": "sf.cmp (expands to ACT + CMP, not arith.cmpi)",
     "traits": [
      "Pure"
     ]
@@ -1146,9 +1151,9 @@
    "shape": "a",
    "semantics": "Compare against a Python literal that may not be representable (e.g. x < 1). The tracer turns the exact literal into an equivalent integer threshold, so the op is a plain integer compare.",
    "predication": "pure",
-   "hw_v1": "sign-magnitude compare with an immediate; encode the threshold code in sign-magnitude",
+   "hw_v1": "v4.8.1: as cmp, with -threshold as a sign-magnitude constant: R = ACT f=00 (a, -t), then CMP R, zero",
    "mlir": {
-    "name": "sf.cmp with a constant (not arith.cmpi)",
+    "name": "sf.cmp with a constant (expands to ACT + CMP, not arith.cmpi)",
     "traits": [
      "Pure"
     ]
@@ -1176,9 +1181,9 @@
    "shape": "broadcast(a, b)",
    "semantics": "max of codes. Exact.",
    "predication": "pure",
-   "hw_v1": "sign-magnitude max (+0 and 0x8000 are equal)",
+   "hw_v1": "v4.8.1: no instruction. Use the exact 16-instruction ReLU sequence in ISA section 5: max(a, b) = max(a+, b+) - min(a-, b-). Do not use b + ReLU(a - b): the difference can saturate",
    "mlir": {
-    "name": "sf.maximum (lowers to the chip's sign-magnitude max, not arith.maxsi)",
+    "name": "sf.maximum (expands to the ISA ReLU sequence, not arith.maxsi)",
     "traits": [
      "Pure",
      "Commutative"
@@ -1210,9 +1215,9 @@
    "shape": "broadcast(a, b)",
    "semantics": "min of codes. Exact.",
    "predication": "pure",
-   "hw_v1": "sign-magnitude min (+0 and 0x8000 are equal)",
+   "hw_v1": "v4.8.1: no instruction. min(a, b) = -max(-a, -b) with the ISA section 5 sequence, finished as M - P so the result is never -0",
    "mlir": {
-    "name": "sf.minimum (lowers to the chip's sign-magnitude min, not arith.minsi)",
+    "name": "sf.minimum (expands to the ISA ReLU sequence, not arith.minsi)",
     "traits": [
      "Pure",
      "Commutative"
@@ -1283,7 +1288,7 @@
    "shape": "axis removed",
    "semantics": "max along axis. Exact.",
    "predication": "pure",
-   "hw_v1": "tree of sign-magnitude max",
+   "hw_v1": "v4.8.1: tree of the ISA section 5 max sequence",
    "mlir": {
     "name": "sf.reduce_max",
     "traits": [
@@ -1316,7 +1321,7 @@
    "shape": "axis removed",
    "semantics": "min along axis. Exact.",
    "predication": "pure",
-   "hw_v1": "tree of sign-magnitude min",
+   "hw_v1": "v4.8.1: tree of the ISA section 5 min sequence",
    "mlir": {
     "name": "sf.reduce_min",
     "traits": [
