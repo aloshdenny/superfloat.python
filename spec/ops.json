@@ -1,6 +1,11 @@
 {
- "spec_version": "1.0.0",
+ "spec_version": "1.0.1",
  "changelog": [
+  [
+   "1.0.1",
+   "2026-11-06",
+   "Fixes from Kartik's review. No op changes behaviour; the text was wrong. addmm is the dot chain then one saturating add of d (the accumulator does not start at d). Faults have a defined contract (the faulting op writes nothing, earlier writes stay), not undefined buffers. IR values are signed codes; sign-magnitude is only the memory format, and the rule for converting is stated. Ops that can raise an event are no longer suggested as Pure."
+  ],
   [
    "1.0.0",
    "2026-10-30",
@@ -14,12 +19,14 @@
   "Events never change the bits. The policy (raise / warn / ignore) is applied by the host after the launch from the event counts.",
   "Arithmetic truncates toward zero; only narrow rounds (half to even). Add/sub/sum saturate; mul underflows; div overflows when |a| >= |b|.",
   "No reassociation of add, sum, or the k loop of dot. No distributivity. No float math anywhere: lower on integer codes.",
-  "Faults (out of bounds, integer division by zero) abort the launch with SFDeviceError and leave buffers undefined.",
+  "Faults (out of bounds, integer division by zero) abort the launch with SFDeviceError. Within a program: the faulting op writes nothing, writes by earlier ops stay, and no later op runs. Across programs: the simulator runs programs in order, so programs before the faulting one have finished and later ones never start; on hardware, which other programs have finished is not specified. Both reference backends are tested to leave the same buffer state.",
+  "Memory format: the IR works on signed codes k. In memory the chip stores sign-magnitude in a 16-bit word: bit N-1 is the sign, the low N-1 bits are |k|. Negative k is stored as (1 << (N-1)) | -k (sf16: -3 = 0x8003, -32767 = 0xFFFF); 0x8000 (negative zero) reads as 0. Reference: to_bits / from_bits in src/sf/_vectorized.py. Today the driver hook receives buffers as int64 signed codes, so the conversion is outside the IR. A lowering that keeps sign-magnitude in registers must use sign-magnitude compare / max / min / negate / abs and treat 0x8000 as 0; one that converts on load and store can use ordinary signed integer ops. Which the chip supports is an open question for the chip team.",
+  "Events are side effects. An op that can raise an event (add, sub, mul, div, fma, sqrt, narrow, sum, dot) is NOT Pure: removing a dead one would also remove its event count. Model the events as an effect or an extra result, so such an op is only removed when its events are not needed. On v1 (no flag register) nothing is lost today.",
   "Host pre-flight: before a launch the host decides everything it can (a zero divisor, an op that must saturate everywhere, an op that cannot saturate). The compiler never needs to handle those cases specially, but must still produce correct bits for them.",
   "Width: sfN for N < 16 runs on the sf16 datapath shifted left by 16-N and must be re-truncated (low bits masked) after every op so the result equals true sfN."
  ],
  "types": {
-  "sfN": "Superfloat code, N in 4..16. Stored as a signed integer k in [-M, M], M = 2^(N-1) - 1. Value = k / 2^(N-1). Sign-magnitude on the chip; the IR carries k as a plain signed integer. There is no code -2^(N-1), no NaN, no infinity.",
+  "sfN": "Superfloat code, N in 4..16. Stored as a signed integer k in [-M, M], M = 2^(N-1) - 1. Value = k / 2^(N-1). In the IR, k is a plain signed (two's complement) integer, int64 in both reference backends, so integer compare / max / min / negate / abs on k are correct. There is no code -2^(N-1), no NaN, no infinity. In memory the chip stores sign-magnitude instead: see the memory format rule.",
   "int": "64-bit signed integer (indices, offsets, loop math). Never overflows in practice; the reference uses int64 and does not wrap-check.",
   "bool": "1-bit predicate / mask.",
   "ptr<sfN>": "Base address of a global buffer of sfN codes. Only appears as a kernel parameter; address arithmetic is `ptr + int offsets` and is folded into load/store."
@@ -730,7 +737,7 @@
    "mlir": {
     "name": "sf.add",
     "traits": [
-     "Pure",
+     "EventEffect (not Pure)",
      "Commutative",
      "Elementwise",
      "SameOperandsAndResultType"
@@ -772,7 +779,7 @@
    "mlir": {
     "name": "sf.sub",
     "traits": [
-     "Pure",
+     "EventEffect (not Pure)",
      "Elementwise",
      "SameOperandsAndResultType"
     ]
@@ -809,7 +816,7 @@
    "mlir": {
     "name": "sf.mul",
     "traits": [
-     "Pure",
+     "EventEffect (not Pure)",
      "Commutative",
      "Elementwise",
      "SameOperandsAndResultType"
@@ -853,6 +860,7 @@
    "mlir": {
     "name": "sf.div",
     "traits": [
+     "EventEffect (not Pure)",
      "Elementwise",
      "SameOperandsAndResultType"
     ]
@@ -894,7 +902,7 @@
    "mlir": {
     "name": "sf.fma",
     "traits": [
-     "Pure",
+     "EventEffect (not Pure)",
      "Elementwise",
      "SameOperandsAndResultType"
     ]
@@ -926,7 +934,7 @@
    "shape": "a",
    "semantics": "-a. Exact (range is symmetric), no events.",
    "predication": "pure",
-   "hw_v1": "integer op (sign flip)",
+   "hw_v1": "integer negate on the signed code (on a sign-magnitude register it would be: flip the sign bit)",
    "mlir": {
     "name": "sf.neg",
     "traits": [
@@ -959,7 +967,7 @@
    "shape": "a",
    "semantics": "|a|. Exact, no events.",
    "predication": "pure",
-   "hw_v1": "integer op (clear sign)",
+   "hw_v1": "integer abs on the signed code (on a sign-magnitude register it would be: clear the sign bit)",
    "mlir": {
     "name": "sf.abs",
     "traits": [
@@ -997,6 +1005,7 @@
    "mlir": {
     "name": "sf.sqrt",
     "traits": [
+     "EventEffect (not Pure)",
      "Elementwise",
      "SameOperandsAndResultType"
     ]
@@ -1066,7 +1075,7 @@
    "mlir": {
     "name": "sf.cast (narrowing)",
     "traits": [
-     "Pure",
+     "EventEffect (not Pure)",
      "Elementwise"
     ]
    },
@@ -1238,7 +1247,7 @@
    "mlir": {
     "name": "sf.reduce_sum",
     "traits": [
-     "Pure"
+     "EventEffect (not Pure)"
     ]
    },
    "python": [
@@ -1340,7 +1349,7 @@
    "mlir": {
     "name": "sf.matmul (linalg.matmul with sf semantics)",
     "traits": [
-     "Pure"
+     "EventEffect (not Pure)"
     ]
    },
    "python": [
@@ -1354,7 +1363,7 @@
     "split-k, tree reduction, and wider accumulators are NOT legal"
    ],
    "notes": [
-    "addmm(c, a, b) = acc starts at c, not 0, then the same chain"
+    "sf.addmm(a, b, d) is NOT dot with the accumulator starting at d. It is the dot chain from 0, then ONE saturating add of d: add(dot(a, b), d). The two differ when a partial sum saturates."
    ],
    "version": "1.0",
    "attrs": {},
@@ -1411,7 +1420,7 @@
    "memory": "WRITE global buffer ptr at offs on live lanes only",
    "predication": "memory",
    "faults": [
-    "a live lane out of bounds faults the launch. Earlier writes are NOT rolled back: after a fault the buffers are undefined."
+    "a live lane out of bounds faults the launch. The faulting store writes nothing (no lane, in or out of bounds). Writes by earlier ops stay. See the fault rule."
    ],
    "hw_v1": "global store",
    "mlir": {
@@ -1587,10 +1596,10 @@
    "notes": "batched matmul = one dot per batch element"
   },
   {
-   "python": "sf.addmm(c, a, b)",
+   "python": "sf.addmm(a, b, d)",
    "runs": "device",
-   "lowers_to": "dot with acc initialised to c",
-   "notes": ""
+   "lowers_to": "dot, then add of d",
+   "notes": "the accumulator starts at 0, not at d"
   },
   {
    "python": "sf.max / sf.min / sf.argmax / sf.argmin",

@@ -3,7 +3,7 @@ title: "Lowering spec"
 description: "Everything the compiler needs to lower every Superfloat op: types, events, global rules, and where the machine-readable spec lives."
 ---
 
-**Spec version 1.0.0.** Generated from `spec/ops.py` by `tools/gen_spec.py`; do not edit by hand.
+**Spec version 1.0.1.** Generated from `spec/ops.py` by `tools/gen_spec.py`; do not edit by hand.
 
 This section is written for the compiler (MLIR) side. The Python reference is the ground truth: if the compiled code gives different bits from the reference on any input, the compiler is wrong (or the spec is, and we fix it).
 
@@ -25,15 +25,17 @@ This section is written for the compiler (MLIR) side. The Python reference is th
 4. Events never change the bits. The policy (raise / warn / ignore) is applied by the host after the launch from the event counts.
 5. Arithmetic truncates toward zero; only narrow rounds (half to even). Add/sub/sum saturate; mul underflows; div overflows when \|a\| >= \|b\|.
 6. No reassociation of add, sum, or the k loop of dot. No distributivity. No float math anywhere: lower on integer codes.
-7. Faults (out of bounds, integer division by zero) abort the launch with SFDeviceError and leave buffers undefined.
-8. Host pre-flight: before a launch the host decides everything it can (a zero divisor, an op that must saturate everywhere, an op that cannot saturate). The compiler never needs to handle those cases specially, but must still produce correct bits for them.
-9. Width: sfN for N &lt; 16 runs on the sf16 datapath shifted left by 16-N and must be re-truncated (low bits masked) after every op so the result equals true sfN.
+7. Faults (out of bounds, integer division by zero) abort the launch with SFDeviceError. Within a program: the faulting op writes nothing, writes by earlier ops stay, and no later op runs. Across programs: the simulator runs programs in order, so programs before the faulting one have finished and later ones never start; on hardware, which other programs have finished is not specified. Both reference backends are tested to leave the same buffer state.
+8. Memory format: the IR works on signed codes k. In memory the chip stores sign-magnitude in a 16-bit word: bit N-1 is the sign, the low N-1 bits are \|k\|. Negative k is stored as (1 &lt;&lt; (N-1)) \| -k (sf16: -3 = 0x8003, -32767 = 0xFFFF); 0x8000 (negative zero) reads as 0. Reference: to_bits / from_bits in src/sf/_vectorized.py. Today the driver hook receives buffers as int64 signed codes, so the conversion is outside the IR. A lowering that keeps sign-magnitude in registers must use sign-magnitude compare / max / min / negate / abs and treat 0x8000 as 0; one that converts on load and store can use ordinary signed integer ops. Which the chip supports is an open question for the chip team.
+9. Events are side effects. An op that can raise an event (add, sub, mul, div, fma, sqrt, narrow, sum, dot) is NOT Pure: removing a dead one would also remove its event count. Model the events as an effect or an extra result, so such an op is only removed when its events are not needed. On v1 (no flag register) nothing is lost today.
+10. Host pre-flight: before a launch the host decides everything it can (a zero divisor, an op that must saturate everywhere, an op that cannot saturate). The compiler never needs to handle those cases specially, but must still produce correct bits for them.
+11. Width: sfN for N &lt; 16 runs on the sf16 datapath shifted left by 16-N and must be re-truncated (low bits masked) after every op so the result equals true sfN.
 
 ## Types
 
 | Type | Meaning |
 |---|---|
-| `sfN` | Superfloat code, N in 4..16. Stored as a signed integer k in [-M, M], M = 2^(N-1) - 1. Value = k / 2^(N-1). Sign-magnitude on the chip; the IR carries k as a plain signed integer. There is no code -2^(N-1), no NaN, no infinity. |
+| `sfN` | Superfloat code, N in 4..16. Stored as a signed integer k in [-M, M], M = 2^(N-1) - 1. Value = k / 2^(N-1). In the IR, k is a plain signed (two's complement) integer, int64 in both reference backends, so integer compare / max / min / negate / abs on k are correct. There is no code -2^(N-1), no NaN, no infinity. In memory the chip stores sign-magnitude instead: see the memory format rule. |
 | `int` | 64-bit signed integer (indices, offsets, loop math). Never overflows in practice; the reference uses int64 and does not wrap-check. |
 | `bool` | 1-bit predicate / mask. |
 | `ptr<sfN>` | Base address of a global buffer of sfN codes. Only appears as a kernel parameter; address arithmetic is `ptr + int offsets` and is folded into load/store. |
