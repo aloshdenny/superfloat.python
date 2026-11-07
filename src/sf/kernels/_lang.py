@@ -242,9 +242,17 @@ def minimum(a, b) -> Sym:
     return _select("minimum", a, b)
 
 
-def dot(a, b) -> Sym:
-    """Block matmul on the systolic array: the Stage 1.1 chain (per-product
-    truncation, per-step saturation, sequential over K)."""
+def dot(a, b, *, accumulate=None, shift=None) -> Sym:
+    """Block matmul.  ``accumulate="chain"`` (default): the Stage 1.1 chain
+    (per-product truncation, per-step saturation, sequential over K), op
+    ``dot``.  ``accumulate="wide"``: the v4.8.1 MX engine (one rounding at
+    ``2^shift``), op ``dot_wide``.  ``None`` uses the ``sf.accumulate``
+    setting in force when the kernel is traced."""
+    from .. import _accumulate, _linalg
+    mode = _accumulate.resolve(accumulate)
+    if mode == "chain" and shift is not None:
+        raise ValueError("sf.dot: shift= only applies to accumulate=\"wide\"")
+    sh = _linalg.check_shift(shift) if mode == "wide" else 0
     bb = builder()
     bits = _sf_bits(a, b)
     if bits is None:
@@ -254,6 +262,9 @@ def dot(a, b) -> Sym:
         raise SFCompileError(f"sf.dot expects 2-D blocks, got {x.shape} and {y.shape}")
     if x.shape[1] != y.shape[0]:
         raise SFCompileError(f"sf.dot: shapes {x.shape} and {y.shape} are not aligned")
+    if mode == "wide":
+        return Sym(bb.emit("dot_wide", [x.v, y.v], {"shift": sh}, SFType(bits),
+                           (x.shape[0], y.shape[1])))
     return Sym(bb.emit("dot", [x.v, y.v], {}, SFType(bits), (x.shape[0], y.shape[1])))
 
 

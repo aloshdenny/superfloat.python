@@ -215,6 +215,11 @@ class Interpreter:
             return np.max(a[0], axis=op.attrs["axis"])
         if n == "min":
             return np.min(a[0], axis=op.attrs["axis"])
+        if n == "dot_wide":
+            r, ev = _linalg.matmul_wide_codes(fmt, a[0], a[1], op.attrs["shift"])
+            self._events(ev, pred, shape)
+            self.counters.macs += int(a[0].shape[0] * a[0].shape[1] * a[1].shape[1])
+            return r
         if n == "dot":
             r, ev = _linalg.matmul_codes(fmt, a[0], a[1])
             self._events(ev, pred, shape)

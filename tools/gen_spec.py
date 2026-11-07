@@ -100,8 +100,19 @@ def golden_for(name: str) -> dict | None:
                         events.add(e)
                 cases.append({"bits": bits, "in": [a, b], "out": acc, "events": sorted(events),
                               "note": "one (row, column) of dot: k in increasing order"})
+        elif name == "dot_wide":
+            continue                                  # filled below from the chip's own model
         else:
             return None
+    if name == "dot_wide":
+        mx = json.loads((ROOT / "tests" / "data" / "mx_golden.json").read_text())
+        for c in mx["cases"]:
+            cases.append({"bits": c["bits"], "shift": c["shift"], "in": [c["a"], c["b"]], "out": c["out"]})
+        return {"op": name, "spec_version": SPEC_VERSION,
+                "source": mx["source"], "mxref_sha256": mx["mxref_sha256"],
+                "format": "in: [a (m x k codes), b (k x 8 codes)], out: m x 8 codes after POP at shift. Computed "
+                          "by the chip repo's mxref.Engine, not by sf.",
+                "cases": cases}
     return {"op": name, "spec_version": SPEC_VERSION,
             "format": "codes are signed ints k, value k / 2^(bits-1); event is the single event of the scalar op "
                       "(null if none); events lists every event of a chain",

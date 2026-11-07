@@ -1,6 +1,11 @@
 {
- "spec_version": "1.0.3",
+ "spec_version": "1.1.0",
  "changelog": [
+  [
+   "1.1.0",
+   "2026-11-07",
+   "Adds dot_wide: matmul on the v4.8.1 MX engine (wide accumulator, one rounding at POP with a power-of-two shift), from sf.dot(..., accumulate=\"wide\") and a @ b under sf.accumulate(\"wide\"). DSL 0.5.0. Golden vectors for dot_wide come from the chip repo's mxref.py. The dot entry now says v4.8.1 runs the chain as FMA instructions (MX replaced v1's systolic array)."
+  ],
   [
    "1.0.3",
    "2026-11-06",
@@ -1356,7 +1361,7 @@
     "underflow"
    ],
    "predication": "events",
-   "hw_v1": "8x8 systolic array per tile (4 tiles)",
+   "hw_v1": "v4.8.1: a chain of FMA instructions (Rd = accumulator in and out), k in increasing order. Not MX: MX gives different bits (see dot_wide)",
    "mlir": {
     "name": "sf.matmul (linalg.matmul with sf semantics)",
     "traits": [
@@ -1367,7 +1372,7 @@
     "sf.dot(a, b) in a kernel",
     "a @ b",
     "sf.matmul",
-    "sf.addmm"
+    "sf.addmm (accumulate=\"chain\", the default)"
    ],
    "rewrites": [
     "k must be accumulated in increasing order. Tiling over m and n is free; tiling over k is legal ONLY if the partial sum of tile 1 is fed as the initial acc of tile 2 (no separate partials added later)",
@@ -1378,6 +1383,54 @@
    ],
    "version": "1.0",
    "attrs": {},
+   "memory": "none",
+   "faults": []
+  },
+  {
+   "name": "dot_wide",
+   "version": "1.1",
+   "category": "contraction",
+   "signature": "%r:sfN[m,n] = dot_wide %a, %b {shift}",
+   "operands": [
+    "a: sfN[m, k]",
+    "b: sfN[k, n]"
+   ],
+   "attrs": {
+    "shift": "int from -32 to 31: the result is the total times 2^shift (POP's s)"
+   },
+   "result": "sfN",
+   "shape": "(m, n)",
+   "semantics": "The v4.8.1 MX engine. Block: sf9..sf16 use the SF16 block (accumulator W = 25 bits, F = 19 fraction bits); sf4..sf8 use the SF8 block (W = 20, F = 14). Operands are sign-magnitude, left-aligned in 16 bits; am, bm are the magnitudes the block reads (15 bits, or the 7 bits of the top byte on SF8). Product magnitude: SF16 t = (1024 + sum over set bits i of am of ((bm << i) & ~511)) >> 11, so NOT exact; SF8 t = am * bm, exact. Sign = sign(a) xor sign(b). For each (i, j): acc = 0; for k0 = 0, 8, 16, ...: acc = saturate_W(acc + sum of the signed t for k in k0 .. k0+7) (two's complement, about +-32). Result (POP): q = round_half_to_even(|acc| * 2^(shift - F + N - 1)), clamped to M, with the sign of acc; never -0.",
+   "events": [
+    "overflow",
+    "underflow"
+   ],
+   "predication": "events",
+   "hw_v1": "v4.8.1 MX engine, one per tile (ISA section 3.4): CFG (block, N) from thread 0, CLR; per chunk of 8 k: WL rows 7..0 then SWAP; MAC per token into slot t (up to 8 tokens per weight tile); then POP with Rs(c) = t << 8 | (shift & 63). 8 output columns per weight tile, 64 MACs per instruction. The engine has no flags.",
+   "mlir": {
+    "name": "sf.matmul_wide {shift}",
+    "traits": [
+     "EventEffect (not Pure)"
+    ]
+   },
+   "python": [
+    "sf.dot(a, b, accumulate=\"wide\", shift=s) in a kernel",
+    "a @ b in a kernel traced under sf.accumulate(\"wide\")",
+    "sf.matmul / sf.dot / sf.addmm (accumulate=\"wide\") on host and device arrays"
+   ],
+   "rewrites": [
+    "dot_wide never equals dot: never rewrite one into the other, and never fuse an FMA chain into MX",
+    "tiling over m and n is free",
+    "tiling over k is legal only by MACing every chunk into the SAME accumulator slot and doing ONE POP at the end; separate POPs added together round twice and are NOT equivalent",
+    "chunk boundaries are at k = 0, 8, 16, ... (saturation happens once per chunk); pad a short last chunk with zeros, which add nothing",
+    "inside a chunk the order of k does not matter (the 8 products are summed exactly)"
+   ],
+   "notes": [
+    "overflow means the accumulator clipped at +-32 or the POP result clamped at +-M; underflow means a nonzero acc rounded to 0",
+    "on the SF16 block a product below the engine's resolution (e.g. 2^-15 x 2^-15) adds 0, so a total of exactly 0 raises nothing",
+    "golden vectors: spec/golden/dot_wide.json, computed by the chip repo's mxref.Engine (sha256 in the file)",
+    "the kernel trace picks dot or dot_wide from sf.accumulate at trace time; the kernel cache keys on it"
+   ],
    "memory": "none",
    "faults": []
   },
@@ -1603,13 +1656,13 @@
   {
    "python": "sf.dot / @ / sf.matmul",
    "runs": "device",
-   "lowers_to": "dot",
+   "lowers_to": "dot (default) or dot_wide (accumulate=\"wide\")",
    "notes": "batched matmul = one dot per batch element"
   },
   {
    "python": "sf.addmm(a, b, d)",
    "runs": "device",
-   "lowers_to": "dot, then add of d",
+   "lowers_to": "dot (or dot_wide), then add of d",
    "notes": "the accumulator starts at 0, not at d"
   },
   {
@@ -1653,6 +1706,12 @@
    "runs": "host",
    "lowers_to": "-",
    "notes": "policy only, never changes bits"
+  },
+  {
+   "python": "sf.accumulate / setaccumulate / getaccumulate",
+   "runs": "host",
+   "lowers_to": "picks dot or dot_wide",
+   "notes": "changes bits; read at trace time inside kernels"
   },
   {
    "python": "sf.info / sf.dtype / sf.dtypes",

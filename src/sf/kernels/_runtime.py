@@ -246,8 +246,10 @@ class Kernel:
         return b.ir
 
     def compiled(self, args, constexpr, block) -> KernelIR:
+        from .. import _accumulate
         key = (tuple(sorted(constexpr.items())), tuple(block),
-               tuple((n, _arg_kind(a)) for n, a in args))
+               tuple((n, _arg_kind(a)) for n, a in args),
+               _accumulate.getaccumulate())          # sf.dot traces to dot or dot_wide
         with _cache_lock:
             ir = self.cache.get(key)
         if ir is None:

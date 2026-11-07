@@ -74,6 +74,45 @@ static inline int64_t __sf16_sqrt(int64_t a, sf16_events *ev) {
 
 /* A reduction (sum, dot) reports each event at most once per output, as the
    Stage 1.1 built-ins do: fold a per-output block into the program's block. */
+/* Wide accumulation on the v4.8.1 MX engine, SF16 block (see
+   _linalg.matmul_wide_codes, written from the chip repo's test/v4/mxref.py).
+   x[k * xs] and y[k * ys] for k < K.  Products: the 15-bit magnitudes with
+   partial-product bits below column 9 dropped, plus 1024, cut to 19 fraction
+   bits.  Chunks of 8 summed exactly, then a Q6.19 (25-bit) accumulator that
+   saturates once per chunk.  POP: total * 2^shift rounded half to even to
+   sf16 and saturated; never -0. */
+static inline int64_t __sf16_dot_wide(const int64_t *x, int64_t xs, const int64_t *y, int64_t ys,
+                                      int64_t K, int64_t shift, sf16_events *ev) {
+    const int64_t hi = (1LL << 24) - 1, lo = -(1LL << 24);
+    int64_t acc = 0; int clipped = 0;
+    for (int64_t k0 = 0; k0 < K; k0 += 8) {
+        int64_t s = 0;
+        for (int64_t k = k0; k < k0 + 8 && k < K; k++) {
+            int64_t a = x[k * xs], b = y[k * ys];
+            int64_t am = a < 0 ? -a : a, bm = b < 0 ? -b : b;
+            int64_t rs = 1024;
+            for (int t = 0; t < 15; t++)
+                if ((am >> t) & 1) rs += (bm << t) & ~(int64_t)511;
+            rs &= (1LL << 30) - 1;
+            int64_t p = rs >> 11;
+            s += ((a < 0) != (b < 0)) ? -p : p;
+        }
+        acc += s;
+        if (acc > hi) { acc = hi; clipped = 1; }
+        if (acc < lo) { acc = lo; clipped = 1; }
+    }
+    int64_t e = shift - 19 + 15, mag = acc < 0 ? -acc : acc, q;
+    if (e >= 0) q = mag << e;
+    else {
+        int64_t d = -e, fl = mag >> d, rem = mag - (fl << d), half = 1LL << (d - 1);
+        q = fl + ((rem > half) || (rem == half && (fl & 1)));
+    }
+    int over = q > SF16_MAX;
+    if (over) q = SF16_MAX;
+    if (ev) { if (clipped || over) ev->sat++; if (acc != 0 && q == 0) ev->under++; }
+    return acc < 0 ? -q : q;
+}
+
 static inline void sf16_fold(sf16_events *ev, const sf16_events *local) {
     if (!ev) return;
     if (local->sat) ev->sat++;

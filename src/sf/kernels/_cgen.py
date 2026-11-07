@@ -275,6 +275,18 @@ class Emitter:
         if n in ("max", "min"):
             self.reduce(op, n)
             return
+        if n == "dot_wide":
+            x, y = op.args
+            M, K = x.shape
+            N = y.shape[1]
+            pe = ('&E' if op.pred is None else
+                  f'(v{op.pred.id}[{_index(op.pred.shape, r.shape)}] ? &E : (sf16_events*)0)'
+                  .replace('[e]', '[i * ' + str(N) + ' + j]'))
+            w(f"    for (int64_t i = 0; i < {M}; i++) for (int64_t j = 0; j < {N}; j++) {{"
+              f" sf16_events *pe = {pe}; sf16_events le = {{0, 0, 0, 0}};"
+              f" v{r.id}[i * {N} + j] = __sf16_dot_wide(&v{x.id}[i * {K}], 1, &v{y.id}[j], {N}, {K},"
+              f" {op.attrs['shift']}, &le); sf16_fold(pe, &le); }} C->macs += {M * K * N};")
+            return
         if n == "dot":
             x, y = op.args
             M, K = x.shape

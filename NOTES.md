@@ -121,8 +121,16 @@ them. Each one is a single place to change if the team decides differently.
   so every Atreides target (`atreides`, `-flags`, `-sim`, `-hw`) has
   `Device.mx = True`.  A custom target without MX refuses wide mode before
   launch and never falls back.  The DSL version goes to 0.5.0.
-* Follow-ups: kernels (`dot_wide` IR op), `sf.torch` (each layer's shift;
-  Alosh is resharing the design) and the spec entry.
+* Kernels (DSL 0.6.0, spec 1.1.0): `sf.dot(..., accumulate="wide", shift=)`
+  and `a @ b` traced under `sf.accumulate("wide")` emit the `dot_wide` IR op.
+  Both back ends run it: the interpreter through `matmul_wide_codes`, the C
+  back end through `__sf16_dot_wide` in `sf16_builtins.h`; they agree bit for
+  bit, events included.  The kernel cache keys on the accumulate mode, so a
+  kernel traced in chain mode is never reused inside a wide block.  Spec
+  golden vectors for `dot_wide` are the mxref-computed cases.
+* Follow-up: `sf.torch` (shifts per token and per column, chosen
+  automatically with an override, reported in `SFLayerStatus`; Alosh is
+  computing golden values chip-side).
 
 ## Immutability
 

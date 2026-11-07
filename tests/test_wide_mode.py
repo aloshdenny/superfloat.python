@@ -287,3 +287,98 @@ def test_products_below_the_engine_resolution_vanish_without_an_event():
     t = sf.array([2 ** -15] * 4, dtype=sf.sf16)
     with sf.errstate(under="raise"):
         assert float(sf.dot(t, t, accumulate="wide")) == 0.0
+
+
+# --- kernels: sf.dot(..., accumulate="wide") traces to dot_wide ------------------------------
+
+from sf.kernels import _cgen  # noqa: E402
+
+BACKENDS = ["interp"] + (["c"] if _cgen.compiler() else [])
+
+
+@pytest.fixture(params=BACKENDS)
+def backend(request):
+    with sf.config(kernel_backend=request.param):
+        yield request.param
+
+
+@sf.jit
+def mm_wide(a_ptr, b_ptr, c_ptr, M, N, K: sf.constexpr, BM: sf.constexpr, BN: sf.constexpr,
+            SHIFT: sf.constexpr):
+    rm = sf.program_id(0) * BM + sf.arange(0, BM)
+    rn = sf.program_id(1) * BN + sf.arange(0, BN)
+    rk = sf.arange(0, K)
+    a = sf.load(a_ptr + rm[:, None] * K + rk[None, :], mask=rm[:, None] < M)
+    b = sf.load(b_ptr + rk[:, None] * N + rn[None, :], mask=rn[None, :] < N)
+    c = sf.dot(a, b, accumulate="wide", shift=SHIFT)
+    sf.store(c_ptr + rm[:, None] * N + rn[None, :], c, mask=(rm[:, None] < M) & (rn[None, :] < N))
+
+
+@sf.jit
+def mm_setting(a_ptr, b_ptr, c_ptr, M: sf.constexpr, N: sf.constexpr, K: sf.constexpr):
+    rm, rn, rk = sf.arange(0, M), sf.arange(0, N), sf.arange(0, K)
+    a = sf.load(a_ptr + rm[:, None] * K + rk[None, :])
+    b = sf.load(b_ptr + rk[:, None] * N + rn[None, :])
+    sf.store(c_ptr + rm[:, None] * N + rn[None, :], a @ b)
+
+
+def _host_and_dev(shape, seed, lo=-0.4, hi=0.4):
+    M, N, K = shape
+    rng = np.random.default_rng(seed)
+    A = sf.asarray(rng.uniform(lo, hi, (M, K)), dtype=sf.sf16)
+    B = sf.asarray(rng.uniform(lo, hi, (K, N)), dtype=sf.sf16)
+    dev = sf.device("atreides-sim")
+    return A, B, dev.upload(A), dev.upload(B), dev
+
+
+@pytest.mark.parametrize("shape,shift", [((1, 1, 1), 0), ((4, 4, 8), 0), ((5, 7, 13), -1),
+                                         ((9, 6, 40), -3), ((3, 8, 64), 2)])
+def test_kernel_dot_wide_matches_host(backend, shape, shift):
+    M, N, K = shape
+    A, B, dA, dB, dev = _host_and_dev(shape, M * 100 + K)
+    with sf.errstate(all="ignore"):
+        ref = sf.matmul(A, B, accumulate="wide", shift=shift)
+        C = dev.alloc((M, N))
+        r = mm_wide[(sf.cdiv(M, 4), sf.cdiv(N, 4))](dA, dB, C, M, N, K=K, BM=4, BN=4, SHIFT=shift)
+    assert np.array_equal(C.codes, ref.codes)
+    assert r.backend == backend and r.counters.macs > 0
+    assert any("dot_wide" in ir.dump() for ir in mm_wide.cache.values())
+
+
+def test_kernel_dot_wide_events_agree_across_backends():
+    # totals near 70: the accumulator clips at 32 for every output
+    shape = (4, 4, 80)
+    A, B, dA, dB, dev = _host_and_dev(shape, 7, 0.85, 0.95)
+    results = {}
+    for be in BACKENDS:
+        with sf.config(kernel_backend=be), sf.errstate(all="ignore"):
+            C = dev.alloc((4, 4))
+            r = mm_wide[(1, 1)](dA, dB, C, 4, 4, K=80, BM=4, BN=4, SHIFT=-6)
+        results[be] = (C.codes.copy(), r.status.saturated, r.status.underflow)
+    with sf.errstate(all="ignore"):
+        ref = sf.matmul(A, B, accumulate="wide", shift=-6)
+    for codes, sat, under in results.values():
+        assert np.array_equal(codes, ref.codes)
+        assert sat == 16 and under == 0                     # exact counts on the simulator
+    assert len({(s, u) for _, s, u in results.values()}) == 1
+
+
+def test_kernel_trace_follows_setting_and_cache_keeps_them_apart(backend):
+    shape = (4, 4, 16)
+    A, B, dA, dB, dev = _host_and_dev(shape, 11)
+    with sf.errstate(all="ignore"):
+        C1, C2 = dev.alloc((4, 4)), dev.alloc((4, 4))
+        mm_setting[(1,)](dA, dB, C1, M=4, N=4, K=16)              # traced as chain
+        with sf.accumulate("wide"):
+            mm_setting[(1,)](dA, dB, C2, M=4, N=4, K=16)          # must re-trace as wide
+        chain = A @ B
+        wide = sf.matmul(A, B, accumulate="wide")
+    assert np.array_equal(C1.codes, chain.codes)
+    assert np.array_equal(C2.codes, wide.codes)
+    assert not np.array_equal(chain.codes, wide.codes)
+
+
+def test_kernel_shift_validation():
+    A, B, dA, dB, dev = _host_and_dev((4, 4, 8), 3)
+    with pytest.raises(ValueError):
+        mm_wide[(1, 1)](dA, dB, dev.alloc((4, 4)), 4, 4, K=8, BM=4, BN=4, SHIFT=40)

@@ -1,6 +1,6 @@
 ---
 title: "IR ops"
-description: "Every SF IR op, one section each. Spec version 1.0.3."
+description: "Every SF IR op, one section each. Spec version 1.1.0."
 ---
 
 Each op lists its operands, attributes, result, shape rule, exact semantics on integer codes, events, memory effects, faults, predication, the v1 hardware unit, a suggested MLIR op with traits, and the rewrites that are and are not legal. Ops with golden vectors say so.
@@ -367,9 +367,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | overflow, underflow |
 | Memory | none |
 | Predication | events |
-| v1 hardware | 8x8 systolic array per tile (4 tiles) |
+| v1 hardware | v4.8.1: a chain of FMA instructions (Rd = accumulator in and out), k in increasing order. Not MX: MX gives different bits (see dot_wide) |
 | MLIR | sf.matmul (linalg.matmul with sf semantics); traits: EventEffect (not Pure) |
-| From Python | sf.dot(a, b) in a kernel, a @ b, sf.matmul, sf.addmm |
+| From Python | sf.dot(a, b) in a kernel, a @ b, sf.matmul, sf.addmm (accumulate="chain", the default) |
 | Golden vectors | `spec/golden/dot.json` |
 
 **Rewrites:**
@@ -380,6 +380,40 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 **Notes:**
 
 - sf.addmm(a, b, d) is NOT dot with the accumulator starting at d. It is the dot chain from 0, then ONE saturating add of d: add(dot(a, b), d). The two differ when a partial sum saturates.
+
+### dot_wide
+
+`%r:sfN[m,n] = dot_wide %a, %b {shift}` · version 1.1
+
+| | |
+|---|---|
+| Operands | a: sfN[m, k], b: sfN[k, n] |
+| Attributes | shift: int from -32 to 31: the result is the total times 2^shift (POP's s) |
+| Result | sfN |
+| Shape | (m, n) |
+| Semantics | The v4.8.1 MX engine. Block: sf9..sf16 use the SF16 block (accumulator W = 25 bits, F = 19 fraction bits); sf4..sf8 use the SF8 block (W = 20, F = 14). Operands are sign-magnitude, left-aligned in 16 bits; am, bm are the magnitudes the block reads (15 bits, or the 7 bits of the top byte on SF8). Product magnitude: SF16 t = (1024 + sum over set bits i of am of ((bm &lt;&lt; i) & ~511)) >> 11, so NOT exact; SF8 t = am * bm, exact. Sign = sign(a) xor sign(b). For each (i, j): acc = 0; for k0 = 0, 8, 16, ...: acc = saturate_W(acc + sum of the signed t for k in k0 .. k0+7) (two's complement, about +-32). Result (POP): q = round_half_to_even(\|acc\| * 2^(shift - F + N - 1)), clamped to M, with the sign of acc; never -0. |
+| Events | overflow, underflow |
+| Memory | none |
+| Predication | events |
+| v1 hardware | v4.8.1 MX engine, one per tile (ISA section 3.4): CFG (block, N) from thread 0, CLR; per chunk of 8 k: WL rows 7..0 then SWAP; MAC per token into slot t (up to 8 tokens per weight tile); then POP with Rs(c) = t &lt;&lt; 8 \| (shift & 63). 8 output columns per weight tile, 64 MACs per instruction. The engine has no flags. |
+| MLIR | sf.matmul_wide &#123;shift&#125;; traits: EventEffect (not Pure) |
+| From Python | sf.dot(a, b, accumulate="wide", shift=s) in a kernel, a @ b in a kernel traced under sf.accumulate("wide"), sf.matmul / sf.dot / sf.addmm (accumulate="wide") on host and device arrays |
+| Golden vectors | `spec/golden/dot_wide.json` |
+
+**Rewrites:**
+
+- dot_wide never equals dot: never rewrite one into the other, and never fuse an FMA chain into MX
+- tiling over m and n is free
+- tiling over k is legal only by MACing every chunk into the SAME accumulator slot and doing ONE POP at the end; separate POPs added together round twice and are NOT equivalent
+- chunk boundaries are at k = 0, 8, 16, ... (saturation happens once per chunk); pad a short last chunk with zeros, which add nothing
+- inside a chunk the order of k does not matter (the 8 products are summed exactly)
+
+**Notes:**
+
+- overflow means the accumulator clipped at +-32 or the POP result clamped at +-M; underflow means a nonzero acc rounded to 0
+- on the SF16 block a product below the engine's resolution (e.g. 2^-15 x 2^-15) adds 0, so a total of exactly 0 raises nothing
+- golden vectors: spec/golden/dot_wide.json, computed by the chip repo's mxref.Engine (sha256 in the file)
+- the kernel trace picks dot or dot_wide from sf.accumulate at trace time; the kernel cache keys on it
 
 ## Selection
 
