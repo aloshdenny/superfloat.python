@@ -1,6 +1,6 @@
 ---
 title: "IR ops"
-description: "Every SF IR op, one section each. Spec version 1.0.0."
+description: "Every SF IR op, one section each. Spec version 1.0.3."
 ---
 
 Each op lists its operands, attributes, result, shape rule, exact semantics on integer codes, events, memory effects, faults, predication, the v1 hardware unit, a suggested MLIR op with traits, and the rewrites that are and are not legal. Ops with golden vectors say so.
@@ -21,7 +21,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | none |
 | Predication | events |
 | v1 hardware | ACT unit (add) |
-| MLIR | sf.add; traits: Pure, Commutative, Elementwise, SameOperandsAndResultType |
+| MLIR | sf.add; traits: EventEffect (not Pure), Commutative, Elementwise, SameOperandsAndResultType |
 | From Python | a + b |
 | Golden vectors | `spec/golden/add.json` |
 
@@ -50,7 +50,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | none |
 | Predication | events |
 | v1 hardware | ACT unit (sub) |
-| MLIR | sf.sub; traits: Pure, Elementwise, SameOperandsAndResultType |
+| MLIR | sf.sub; traits: EventEffect (not Pure), Elementwise, SameOperandsAndResultType |
 | From Python | a - b |
 | Golden vectors | `spec/golden/sub.json` |
 
@@ -73,7 +73,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | none |
 | Predication | events |
 | v1 hardware | FMA unit (c = 0) |
-| MLIR | sf.mul; traits: Pure, Commutative, Elementwise, SameOperandsAndResultType |
+| MLIR | sf.mul; traits: EventEffect (not Pure), Commutative, Elementwise, SameOperandsAndResultType |
 | From Python | a * b |
 | Golden vectors | `spec/golden/mul.json` |
 
@@ -103,7 +103,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | none |
 | Predication | events |
 | v1 hardware | NOT SUPPORTED on v1 (no divider). Device.supported_ops excludes it; the runtime raises SFUnsupportedError. Host pre-flight decides every b == 0 lane before launch. |
-| MLIR | sf.div; traits: Elementwise, SameOperandsAndResultType |
+| MLIR | sf.div; traits: EventEffect (not Pure), Elementwise, SameOperandsAndResultType |
 | From Python | a / b, sf.div(a, b, where=mask) |
 | Golden vectors | `spec/golden/div.json` |
 
@@ -130,7 +130,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | none |
 | Predication | events |
 | v1 hardware | FMA unit |
-| MLIR | sf.fma; traits: Pure, Elementwise, SameOperandsAndResultType |
+| MLIR | sf.fma; traits: EventEffect (not Pure), Elementwise, SameOperandsAndResultType |
 | From Python | sf.fma(a, b, c), a * b + c |
 | Golden vectors | `spec/golden/fma.json` |
 
@@ -156,7 +156,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer op (sign flip) |
+| v1 hardware | v4.8.1 (ISA section 5): integer ADD x, 0x8000 to flip bit 15, then ACT f=00 with +0 so a 0 input never leaves 0x8000 |
 | MLIR | sf.neg; traits: Pure, Elementwise, Involution |
 | From Python | -a |
 | Golden vectors | `spec/golden/neg.json` |
@@ -178,7 +178,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer op (clear sign) |
+| v1 hardware | v4.8.1 (ISA section 5): abs(x) = ReLU(x) + ReLU(-x), using ACT f=01 for ReLU, neg for -x and ACT f=00 for the add |
 | MLIR | sf.abs; traits: Pure, Elementwise, Idempotent |
 | From Python | abs(a) |
 | Golden vectors | `spec/golden/abs.json` |
@@ -197,7 +197,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | none |
 | Predication | events |
 | v1 hardware | NOT SUPPORTED on v1 (no sqrt unit); runtime raises SFUnsupportedError |
-| MLIR | sf.sqrt; traits: Elementwise, SameOperandsAndResultType |
+| MLIR | sf.sqrt; traits: EventEffect (not Pure), Elementwise, SameOperandsAndResultType |
 | From Python | sf.sqrt(a) |
 | Golden vectors | `spec/golden/sqrt.json` |
 
@@ -215,8 +215,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer compare |
-| MLIR | arith.cmpi on codes; traits: Pure |
+| v1 hardware | v4.8.1 (ISA section 5): R = ACT f=00 (a, -b), then CMP R, zero. Saturation keeps the sign, so this is exact over the whole range. Only thread 0's NZP steers a branch |
+| MLIR | sf.cmp (expands to ACT + CMP, not arith.cmpi); traits: Pure |
 | From Python | a &lt; b, a == b, ... |
 
 ### cmp_lit
@@ -233,8 +233,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer compare with immediate |
-| MLIR | arith.cmpi with constant; traits: Pure |
+| v1 hardware | v4.8.1: as cmp, with -threshold as a sign-magnitude constant: R = ACT f=00 (a, -t), then CMP R, zero |
+| MLIR | sf.cmp with a constant (expands to ACT + CMP, not arith.cmpi); traits: Pure |
 | From Python | x &lt; 0.3, x > 1 |
 
 ## Casts
@@ -253,7 +253,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | shift |
+| v1 hardware | v4.8.1: no conversion instruction (ISA section 5). In sign-magnitude it means: magnitude shifted left by M - N, sign bit moved from bit N-1 to bit M-1. Expand or do it on the host |
 | MLIR | sf.cast (widening); traits: Pure, Elementwise |
 | From Python | sf.cast(x, wider), x.astype(wider) |
 | Golden vectors | `spec/golden/widen.json` |
@@ -272,14 +272,15 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | overflow, underflow |
 | Memory | none |
 | Predication | events |
-| v1 hardware | shift + round (ACT) |
-| MLIR | sf.cast (narrowing); traits: Pure, Elementwise |
+| v1 hardware | v4.8.1: no conversion instruction; the only hardware rounding is POP on MX results (ISA section 5). Expand or do it on the host |
+| MLIR | sf.cast (narrowing); traits: EventEffect (not Pure), Elementwise |
 | From Python | sf.cast(x, narrower), x.astype(narrower) |
 | Golden vectors | `spec/golden/narrow.json` |
 
 **Notes:**
 
 - this is the ONLY op that rounds to nearest. All arithmetic truncates toward zero.
+- on sign-magnitude registers: round the magnitude half to even, then keep the sign. This gives the same result as rounding k, because round half to even is symmetric. A result of 0 must be +0.
 
 ## Reductions
 
@@ -298,7 +299,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | none |
 | Predication | events |
 | v1 hardware | ACT chain, sequential |
-| MLIR | sf.reduce_sum; traits: Pure |
+| MLIR | sf.reduce_sum; traits: EventEffect (not Pure) |
 | From Python | sf.sum(x, axis), x.sum() |
 | Golden vectors | `spec/golden/sum.json` |
 
@@ -321,7 +322,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer max tree |
+| v1 hardware | v4.8.1: tree of the ISA section 5 max sequence |
 | MLIR | sf.reduce_max; traits: Pure |
 | From Python | sf.max |
 
@@ -343,7 +344,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer min tree |
+| v1 hardware | v4.8.1: tree of the ISA section 5 min sequence |
 | MLIR | sf.reduce_min; traits: Pure |
 | From Python | sf.min |
 
@@ -367,7 +368,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | none |
 | Predication | events |
 | v1 hardware | 8x8 systolic array per tile (4 tiles) |
-| MLIR | sf.matmul (linalg.matmul with sf semantics); traits: Pure |
+| MLIR | sf.matmul (linalg.matmul with sf semantics); traits: EventEffect (not Pure) |
 | From Python | sf.dot(a, b) in a kernel, a @ b, sf.matmul, sf.addmm |
 | Golden vectors | `spec/golden/dot.json` |
 
@@ -378,7 +379,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 
 **Notes:**
 
-- addmm(c, a, b) = acc starts at c, not 0, then the same chain
+- sf.addmm(a, b, d) is NOT dot with the accumulator starting at d. It is the dot chain from 0, then ONE saturating add of d: add(dot(a, b), d). The two differ when a partial sum saturates.
 
 ## Selection
 
@@ -412,8 +413,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer max |
-| MLIR | arith.maxsi; traits: Pure, Commutative |
+| v1 hardware | v4.8.1: no instruction. Use the exact 16-instruction ReLU sequence in ISA section 5: max(a, b) = max(a+, b+) - min(a-, b-). Do not use b + ReLU(a - b): the difference can saturate |
+| MLIR | sf.maximum (expands to the ISA ReLU sequence, not arith.maxsi); traits: Pure, Commutative |
 | From Python | sf.maximum, ReLU = maximum(x, 0) |
 
 **Rewrites:**
@@ -433,8 +434,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer min |
-| MLIR | arith.minsi; traits: Pure, Commutative |
+| v1 hardware | v4.8.1: no instruction. min(a, b) = -max(-a, -b) with the ISA section 5 sequence, finished as M - P so the result is never -0 |
+| MLIR | sf.minimum (expands to the ISA ReLU sequence, not arith.minsi); traits: Pure, Commutative |
 | From Python | sf.minimum, sf.clip |
 
 **Rewrites:**
@@ -473,7 +474,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Semantics | live = mask AND predicate. ptr[offs] = val on live lanes. If two live lanes hit the same offset, the reference keeps the last lane in row-major order; kernels should not rely on this. |
 | Events | none |
 | Memory | WRITE global buffer ptr at offs on live lanes only |
-| Faults | a live lane out of bounds faults the launch. Earlier writes are NOT rolled back: after a fault the buffers are undefined. |
+| Faults | a live lane out of bounds faults the launch. The faulting store writes nothing (no lane, in or out of bounds). Writes by earlier ops stay. See the fault rule. |
 | Predication | memory |
 | v1 hardware | global store |
 | MLIR | sf.store; traits: MemWrite |

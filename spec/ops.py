@@ -20,9 +20,12 @@ Versioning (see website/compiler/versioning.mdx):
     example a move to the v4.8.1 wide accumulator).
 """
 
-SPEC_VERSION = "1.0.0"
+SPEC_VERSION = "1.0.3"
 
 CHANGELOG = [
+    ("1.0.3", "2026-11-06", "Corrects 1.0.2 against the v4.8.1 ISA doc (compiler_v4.8.1.md): the chip has no sign-magnitude compare, max or min instructions. CMP is a signed 16-bit integer compare; compare, max, min, neg and abs are now given as the ISA section 5 sequences built from ACT, ADD and CMP. widen and narrow have no instruction. Op semantics unchanged."),
+    ("1.0.2", "2026-11-06", "Chip team confirmed registers hold sign-magnitude and compare / max / min work on it, so there is no conversion on load and store. Lowering notes for neg, abs, cmp, cmp_lit, maximum, minimum, max, min, widen, narrow and the width rule updated to sign-magnitude. Op semantics unchanged."),
+    ("1.0.1", "2026-11-06", "Fixes from Kartik's review. No op changes behaviour; the text was wrong. addmm is the dot chain then one saturating add of d (the accumulator does not start at d). Faults have a defined contract (the faulting op writes nothing, earlier writes stay), not undefined buffers. IR values are signed codes; sign-magnitude is only the memory format, and the rule for converting is stated. Ops that can raise an event are no longer suggested as Pure."),
     ("1.0.0", "2026-10-30", "First release: every SF IR op of Stage 3 and every public Python function."),
 ]
 
@@ -30,8 +33,9 @@ CHANGELOG = [
 
 TYPES = {
     "sfN": "Superfloat code, N in 4..16. Stored as a signed integer k in [-M, M], M = 2^(N-1) - 1. "
-           "Value = k / 2^(N-1). Sign-magnitude on the chip; the IR carries k as a plain signed integer. "
-           "There is no code -2^(N-1), no NaN, no infinity.",
+           "Value = k / 2^(N-1). In the IR, k is a plain signed (two's complement) integer, int64 in both reference "
+           "backends; the semantics in this spec are written on k. There is no code -2^(N-1), no NaN, no infinity. "
+           "On the chip, registers and memory both hold sign-magnitude: see the memory format rule.",
     "int": "64-bit signed integer (indices, offsets, loop math). Never overflows in practice; the "
            "reference uses int64 and does not wrap-check.",
     "bool": "1-bit predicate / mask.",
@@ -168,21 +172,21 @@ OPS = [
        shape=SF_ELEMENTWISE_SHAPE,
        semantics="s = a + b (exact integer). If |s| > M: result = sign(s)*M, overflow. Else result = s.",
        events=["overflow"], predication="events", hw_v1="ACT unit (add)",
-       mlir={"name": "sf.add", "traits": ["Pure", "Commutative", "Elementwise", "SameOperandsAndResultType"]},
+       mlir={"name": "sf.add", "traits": ["EventEffect (not Pure)", "Commutative", "Elementwise", "SameOperandsAndResultType"]},
        python=["a + b"],
        rewrites=["commutative: a+b = b+a (legal)", NO_REASSOC, "x + 0 -> x (legal)", "never turn a+a into 2*a via mul (mul cannot represent 2)"],
        notes=["sfN < 16 on the sf16 datapath: shift left by 16-N, add, saturate at the sfN max shifted, shift back. "
               "The saturation threshold must be sfN's M, not sf16's."]),
     _e(name="sub", category="sf", signature="%r:sfN = sub %a, %b", operands=["a: sfN", "b: sfN"], result="sfN",
        shape=SF_ELEMENTWISE_SHAPE, semantics="s = a - b; saturate like add.", events=["overflow"], predication="events",
-       hw_v1="ACT unit (sub)", mlir={"name": "sf.sub", "traits": ["Pure", "Elementwise", "SameOperandsAndResultType"]},
+       hw_v1="ACT unit (sub)", mlir={"name": "sf.sub", "traits": ["EventEffect (not Pure)", "Elementwise", "SameOperandsAndResultType"]},
        python=["a - b"], rewrites=["a - b -> a + neg(b) is legal (neg is exact since the range is symmetric)", NO_REASSOC]),
     _e(name="mul", category="sf", signature="%r:sfN = mul %a, %b", operands=["a: sfN", "b: sfN"], result="sfN",
        shape=SF_ELEMENTWISE_SHAPE,
        semantics="p = a * b (exact, up to 2(N-1)+1 bits). result = trunc_toward_zero(p / 2^(N-1)). "
                  "underflow if p != 0 and result == 0. |result| < M always, so mul never overflows.",
        events=["underflow"], predication="events", hw_v1="FMA unit (c = 0)",
-       mlir={"name": "sf.mul", "traits": ["Pure", "Commutative", "Elementwise", "SameOperandsAndResultType"]},
+       mlir={"name": "sf.mul", "traits": ["EventEffect (not Pure)", "Commutative", "Elementwise", "SameOperandsAndResultType"]},
        python=["a * b"],
        rewrites=["commutative (legal)", "NOT associative: truncation after each product", "NOT distributive over add",
                  "x * 0 -> 0 (legal, no event)", "there is no 1.0, so there is no multiplicative identity to fold"],
@@ -196,7 +200,7 @@ OPS = [
        events=["divide", "overflow"], predication="events",
        hw_v1="NOT SUPPORTED on v1 (no divider). Device.supported_ops excludes it; the runtime raises SFUnsupportedError. "
              "Host pre-flight decides every b == 0 lane before launch.",
-       mlir={"name": "sf.div", "traits": ["Elementwise", "SameOperandsAndResultType"]},
+       mlir={"name": "sf.div", "traits": ["EventEffect (not Pure)", "Elementwise", "SameOperandsAndResultType"]},
        python=["a / b", "sf.div(a, b, where=mask)"],
        rewrites=["no rewrites; in particular a/b is not a * (1/b) (1/b always overflows)"],
        notes=["the event check order is divide first, then overflow; a lane with b == 0 reports divide only",
@@ -206,51 +210,53 @@ OPS = [
        semantics="t = mul(a, b) (truncated, may underflow); result = add(t, c) (may saturate). "
                  "Bit-identical to add(mul(a, b), c). This is NOT a fused single-rounding fma.",
        events=["overflow", "underflow"], predication="events", hw_v1="FMA unit",
-       mlir={"name": "sf.fma", "traits": ["Pure", "Elementwise", "SameOperandsAndResultType"]},
+       mlir={"name": "sf.fma", "traits": ["EventEffect (not Pure)", "Elementwise", "SameOperandsAndResultType"]},
        python=["sf.fma(a, b, c)", "a * b + c"],
        rewrites=["add(mul(a,b),c) <-> fma(a,b,c) is legal both ways (same bits)", "commutative in a and b"],
        notes=["on v4.8.1 hardware (wide accumulator, single rounding) this would change: major version bump"]),
     _e(name="neg", category="sf", signature="%r:sfN = neg %a", operands=["a: sfN"], result="sfN", shape="a",
-       semantics="-a. Exact (range is symmetric), no events.", predication="pure", hw_v1="integer op (sign flip)",
+       semantics="-a. Exact (range is symmetric), no events.", predication="pure", hw_v1="v4.8.1 (ISA section 5): integer ADD x, 0x8000 to flip bit 15, then ACT f=00 with +0 so a 0 input never leaves 0x8000",
        mlir={"name": "sf.neg", "traits": ["Pure", "Elementwise", "Involution"]}, python=["-a"],
        rewrites=["neg(neg(x)) -> x"]),
     _e(name="abs", category="sf", signature="%r:sfN = abs %a", operands=["a: sfN"], result="sfN", shape="a",
-       semantics="|a|. Exact, no events.", predication="pure", hw_v1="integer op (clear sign)",
+       semantics="|a|. Exact, no events.", predication="pure", hw_v1="v4.8.1 (ISA section 5): abs(x) = ReLU(x) + ReLU(-x), using ACT f=01 for ReLU, neg for -x and ACT f=00 for the add",
        mlir={"name": "sf.abs", "traits": ["Pure", "Elementwise", "Idempotent"]}, python=["abs(a)"]),
     _e(name="sqrt", category="sf", signature="%r:sfN = sqrt %a", operands=["a: sfN"], result="sfN", shape="a",
        semantics="a < 0: invalid, result 0. Else result = isqrt(a * 2^(N-1)) (floor of the exact root). Never overflows.",
        events=["invalid"], predication="events",
        hw_v1="NOT SUPPORTED on v1 (no sqrt unit); runtime raises SFUnsupportedError",
-       mlir={"name": "sf.sqrt", "traits": ["Elementwise", "SameOperandsAndResultType"]}, python=["sf.sqrt(a)"]),
+       mlir={"name": "sf.sqrt", "traits": ["EventEffect (not Pure)", "Elementwise", "SameOperandsAndResultType"]}, python=["sf.sqrt(a)"]),
     _e(name="widen", category="cast", signature="%r:sfM = widen %a {bits}", operands=["a: sfN, N < M"],
        attrs={"bits": "target width M"}, result="sfM", shape="a",
-       semantics="result = a << (M - N). Exact, no events.", predication="pure", hw_v1="shift",
+       semantics="result = a << (M - N). Exact, no events.", predication="pure", hw_v1="v4.8.1: no conversion instruction (ISA section 5). In sign-magnitude it means: magnitude shifted left by M - N, sign bit moved from bit N-1 to bit M-1. Expand or do it on the host",
        mlir={"name": "sf.cast (widening)", "traits": ["Pure", "Elementwise"]}, python=["sf.cast(x, wider)", "x.astype(wider)"]),
     _e(name="narrow", category="cast", signature="%r:sfM = narrow %a {bits}", operands=["a: sfN, N > M"],
        attrs={"bits": "target width M"}, result="sfM", shape="a",
        semantics="q = round_half_to_even(a / 2^(N-M)) (floor divmod, then round up if remainder > half, or == half and q odd). "
                  "If |q| > M_max: overflow, clip to +-M_max. underflow if a != 0 and result == 0.",
-       events=["overflow", "underflow"], predication="events", hw_v1="shift + round (ACT)",
-       mlir={"name": "sf.cast (narrowing)", "traits": ["Pure", "Elementwise"]}, python=["sf.cast(x, narrower)", "x.astype(narrower)"],
-       notes=["this is the ONLY op that rounds to nearest. All arithmetic truncates toward zero."]),
+       events=["overflow", "underflow"], predication="events", hw_v1="v4.8.1: no conversion instruction; the only hardware rounding is POP on MX results (ISA section 5). Expand or do it on the host",
+       mlir={"name": "sf.cast (narrowing)", "traits": ["EventEffect (not Pure)", "Elementwise"]}, python=["sf.cast(x, narrower)", "x.astype(narrower)"],
+       notes=["this is the ONLY op that rounds to nearest. All arithmetic truncates toward zero.",
+              "on sign-magnitude registers: round the magnitude half to even, then keep the sign. This gives the same "
+              "result as rounding k, because round half to even is symmetric. A result of 0 must be +0."]),
     _e(name="cmp", category="sf", signature="%r:bool = cmp %a, %b {op}", operands=["a: sfN", "b: sfN"],
        attrs={"op": "lt | le | gt | ge | eq | ne"}, result="bool", shape="broadcast(a, b)",
-       semantics="Integer compare of the codes (exact).", predication="pure", hw_v1="integer compare",
-       mlir={"name": "arith.cmpi on codes", "traits": ["Pure"]}, python=["a < b", "a == b", "..."]),
+       semantics="Integer compare of the codes (exact).", predication="pure", hw_v1="v4.8.1 (ISA section 5): R = ACT f=00 (a, -b), then CMP R, zero. Saturation keeps the sign, so this is exact over the whole range. Only thread 0's NZP steers a branch",
+       mlir={"name": "sf.cmp (expands to ACT + CMP, not arith.cmpi)", "traits": ["Pure"]}, python=["a < b", "a == b", "..."]),
     _e(name="cmp_lit", category="sf", signature="%r:bool = cmp_lit %a {op, value}", operands=["a: sfN"],
        attrs={"op": "lt | le | gt | ge | eq | ne", "value": "int code threshold, decided at trace time"},
        result="bool", shape="a",
        semantics="Compare against a Python literal that may not be representable (e.g. x < 1). The tracer turns the "
                  "exact literal into an equivalent integer threshold, so the op is a plain integer compare.",
-       predication="pure", hw_v1="integer compare with immediate", mlir={"name": "arith.cmpi with constant", "traits": ["Pure"]},
+       predication="pure", hw_v1="v4.8.1: as cmp, with -threshold as a sign-magnitude constant: R = ACT f=00 (a, -t), then CMP R, zero", mlir={"name": "sf.cmp with a constant (expands to ACT + CMP, not arith.cmpi)", "traits": ["Pure"]},
        python=["x < 0.3", "x > 1"]),
     _e(name="maximum", category="select", signature="%r = maximum %a, %b", operands=["a: sfN", "b: sfN"], result="sfN",
-       shape="broadcast(a, b)", semantics="max of codes. Exact.", predication="pure", hw_v1="integer max",
-       mlir={"name": "arith.maxsi", "traits": ["Pure", "Commutative"]}, python=["sf.maximum", "ReLU = maximum(x, 0)"],
+       shape="broadcast(a, b)", semantics="max of codes. Exact.", predication="pure", hw_v1="v4.8.1: no instruction. Use the exact 16-instruction ReLU sequence in ISA section 5: max(a, b) = max(a+, b+) - min(a-, b-). Do not use b + ReLU(a - b): the difference can saturate",
+       mlir={"name": "sf.maximum (expands to the ISA ReLU sequence, not arith.maxsi)", "traits": ["Pure", "Commutative"]}, python=["sf.maximum", "ReLU = maximum(x, 0)"],
        rewrites=["associative and commutative (legal to reorder)"]),
     _e(name="minimum", category="select", signature="%r = minimum %a, %b", operands=["a: sfN", "b: sfN"], result="sfN",
-       shape="broadcast(a, b)", semantics="min of codes. Exact.", predication="pure", hw_v1="integer min",
-       mlir={"name": "arith.minsi", "traits": ["Pure", "Commutative"]}, python=["sf.minimum", "sf.clip"],
+       shape="broadcast(a, b)", semantics="min of codes. Exact.", predication="pure", hw_v1="v4.8.1: no instruction. min(a, b) = -max(-a, -b) with the ISA section 5 sequence, finished as M - P so the result is never -0",
+       mlir={"name": "sf.minimum (expands to the ISA ReLU sequence, not arith.minsi)", "traits": ["Pure", "Commutative"]}, python=["sf.minimum", "sf.clip"],
        rewrites=["associative and commutative"]),
 
     # ---- reductions and contraction -----------------------------------------------------------
@@ -259,25 +265,26 @@ OPS = [
        semantics="acc = 0; for i = 0 .. n-1 in index order: acc = add(acc, x[i]) (saturating each step). "
                  "Overflow if any step saturated. Saturation is sticky in the sense that later steps continue from +-M.",
        events=["overflow"], predication="events", hw_v1="ACT chain, sequential",
-       mlir={"name": "sf.reduce_sum", "traits": ["Pure"]}, python=["sf.sum(x, axis)", "x.sum()"],
+       mlir={"name": "sf.reduce_sum", "traits": ["EventEffect (not Pure)"]}, python=["sf.sum(x, axis)", "x.sum()"],
        rewrites=[NO_REASSOC, "result DEPENDS on order: [M, 1, -1] gives M-1, [1, -1, M] gives M"]),
     _e(name="max", category="reduction", signature="%r = max %x {axis}", operands=["x: sfN"], attrs={"axis": "int or None"},
-       result="sfN", shape="axis removed", semantics="max along axis. Exact.", predication="pure", hw_v1="integer max tree",
+       result="sfN", shape="axis removed", semantics="max along axis. Exact.", predication="pure", hw_v1="v4.8.1: tree of the ISA section 5 max sequence",
        mlir={"name": "sf.reduce_max", "traits": ["Pure"]}, python=["sf.max"], rewrites=["any order / tree is legal"]),
     _e(name="min", category="reduction", signature="%r = min %x {axis}", operands=["x: sfN"], attrs={"axis": "int or None"},
-       result="sfN", shape="axis removed", semantics="min along axis. Exact.", predication="pure", hw_v1="integer min tree",
+       result="sfN", shape="axis removed", semantics="min along axis. Exact.", predication="pure", hw_v1="v4.8.1: tree of the ISA section 5 min sequence",
        mlir={"name": "sf.reduce_min", "traits": ["Pure"]}, python=["sf.min"], rewrites=["any order / tree is legal"]),
     _e(name="dot", category="contraction", signature="%r:sfN[m,n] = dot %a, %b", operands=["a: sfN[m, k]", "b: sfN[k, n]"],
        result="sfN", shape="(m, n)",
        semantics="For each (i, j): acc = 0; for t = 0 .. k-1: acc = fma(a[i,t], b[t,j], acc). "
                  "Every product truncated, every add saturated, at width N, in increasing t.",
        events=["overflow", "underflow"], predication="events", hw_v1="8x8 systolic array per tile (4 tiles)",
-       mlir={"name": "sf.matmul (linalg.matmul with sf semantics)", "traits": ["Pure"]},
+       mlir={"name": "sf.matmul (linalg.matmul with sf semantics)", "traits": ["EventEffect (not Pure)"]},
        python=["sf.dot(a, b) in a kernel", "a @ b", "sf.matmul", "sf.addmm"],
        rewrites=["k must be accumulated in increasing order. Tiling over m and n is free; tiling over k is legal ONLY "
                  "if the partial sum of tile 1 is fed as the initial acc of tile 2 (no separate partials added later)",
                  "split-k, tree reduction, and wider accumulators are NOT legal"],
-       notes=["addmm(c, a, b) = acc starts at c, not 0, then the same chain"]),
+       notes=["sf.addmm(a, b, d) is NOT dot with the accumulator starting at d. It is the dot chain from 0, then ONE "
+              "saturating add of d: add(dot(a, b), d). The two differ when a partial sum saturates."]),
 
     # ---- memory -------------------------------------------------------------------------------
     _e(name="load", category="memory", signature="%r:sfN = load %ptr, %offs, %mask, %other",
@@ -294,7 +301,8 @@ OPS = [
        semantics="live = mask AND predicate. ptr[offs] = val on live lanes. If two live lanes hit the same offset, "
                  "the reference keeps the last lane in row-major order; kernels should not rely on this.",
        memory="WRITE global buffer ptr at offs on live lanes only", predication="memory",
-       faults=["a live lane out of bounds faults the launch. Earlier writes are NOT rolled back: after a fault the buffers are undefined."],
+       faults=["a live lane out of bounds faults the launch. The faulting store writes nothing (no lane, in or out of "
+               "bounds). Writes by earlier ops stay. See the fault rule."],
        hw_v1="global store", mlir={"name": "sf.store", "traits": ["MemWrite"]}, python=["sf.store(ptr + offs, val, mask=)"],
        notes=["two programs writing the same address is a race; the result is undefined (the simulator runs programs in order)"]),
     _e(name="shared_load", category="memory", signature="%r:sfN = shared_load %idx, %mask {buf}",
@@ -332,7 +340,7 @@ PUBLIC = [
     ("sf.sqrt", "device", "sqrt", ""),
     ("sf.sum", "device", "sum", "sequential"),
     ("sf.dot / @ / sf.matmul", "device", "dot", "batched matmul = one dot per batch element"),
-    ("sf.addmm(c, a, b)", "device", "dot with acc initialised to c", ""),
+    ("sf.addmm(a, b, d)", "device", "dot, then add of d", "the accumulator starts at 0, not at d"),
     ("sf.max / sf.min / sf.argmax / sf.argmin", "host", "max / min", "argmax/argmin: first index of the extreme"),
     ("sf.maximum / sf.minimum / sf.clip / sf.where", "host", "maximum / minimum / where", "exact, no events"),
     ("sf.cast / astype", "host", "widen / narrow", ""),
@@ -357,7 +365,22 @@ GLOBAL_RULES = [
     "Events never change the bits. The policy (raise / warn / ignore) is applied by the host after the launch from the event counts.",
     "Arithmetic truncates toward zero; only narrow rounds (half to even). Add/sub/sum saturate; mul underflows; div overflows when |a| >= |b|.",
     "No reassociation of add, sum, or the k loop of dot. No distributivity. No float math anywhere: lower on integer codes.",
-    "Faults (out of bounds, integer division by zero) abort the launch with SFDeviceError and leave buffers undefined.",
+    "Faults (out of bounds, integer division by zero) abort the launch with SFDeviceError. Within a program: the faulting "
+    "op writes nothing, writes by earlier ops stay, and no later op runs. Across programs: the simulator runs programs in "
+    "order, so programs before the faulting one have finished and later ones never start; on hardware, which other programs "
+    "have finished is not specified. Both reference backends are tested to leave the same buffer state.",
+    "Memory format: the IR works on signed codes k. In memory the chip stores sign-magnitude in a 16-bit word: bit N-1 is "
+    "the sign, the low N-1 bits are |k|. Negative k is stored as (1 << (N-1)) | -k (sf16: -3 = 0x8003, -32767 = 0xFFFF); "
+    "0x8000 (negative zero) reads as 0. Reference: to_bits / from_bits in src/sf/_vectorized.py. Today the driver hook "
+    "receives buffers as int64 signed codes, so the conversion is outside the IR. On v4.8.1 registers and memory both "
+    "hold sign-magnitude and loads and stores do NOT convert (ISA section 3.2). The chip has no sign-magnitude compare, "
+    "max or min instruction: CMP is a signed 16-bit integer compare, which orders negative sign-magnitude values the "
+    "wrong way (-2 = 0x8002 compares greater than -1 = 0x8001) and does not treat 0x8000 as equal to 0. So never lower "
+    "cmp / max / min / neg / abs to a plain integer op; use the ISA section 5 sequences given on each op. Integer ADD and "
+    "SUB are not SF add and sub either: SF add is ACT f=00.",
+    "Events are side effects. An op that can raise an event (add, sub, mul, div, fma, sqrt, narrow, sum, dot) is NOT "
+    "Pure: removing a dead one would also remove its event count. Model the events as an effect or an extra result, "
+    "so such an op is only removed when its events are not needed. On v1 (no flag register) nothing is lost today.",
     "Host pre-flight: before a launch the host decides everything it can (a zero divisor, an op that must saturate everywhere, an op that cannot saturate). The compiler never needs to handle those cases specially, but must still produce correct bits for them.",
-    "Width: sfN for N < 16 runs on the sf16 datapath shifted left by 16-N and must be re-truncated (low bits masked) after every op so the result equals true sfN.",
+    "Width: sfN for N < 16 runs on the sf16 datapath. In sign-magnitude the MAGNITUDE is shifted left by 16-N and the sign moves to bit 15; after every op the low 16-N magnitude bits must be re-truncated (masked) so the result equals true sfN.",
 ]

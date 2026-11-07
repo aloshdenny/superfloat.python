@@ -16,7 +16,7 @@ description: "Which IR op each public Python function becomes, and where it runs
 | `sf.sqrt` | device | sqrt |  |
 | `sf.sum` | device | sum | sequential |
 | `sf.dot / @ / sf.matmul` | device | dot | batched matmul = one dot per batch element |
-| `sf.addmm(c, a, b)` | device | dot with acc initialised to c |  |
+| `sf.addmm(a, b, d)` | device | dot, then add of d | the accumulator starts at 0, not at d |
 | `sf.max / sf.min / sf.argmax / sf.argmin` | host | max / min | argmax/argmin: first index of the extreme |
 | `sf.maximum / sf.minimum / sf.clip / sf.where` | host | maximum / minimum / where | exact, no events |
 | `sf.cast / astype` | host | widen / narrow |  |
