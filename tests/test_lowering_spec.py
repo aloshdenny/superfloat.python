@@ -49,9 +49,21 @@ def test_generated_files_are_current():
     assert r.returncode == 0, r.stdout
 
 
+def test_every_op_has_a_v481_lowering():
+    from spec import target_v481 as T
+    assert set(T.OPS_V481) == {o["name"] for o in OPS}
+    for o in OPS:
+        v = o["v481"]
+        assert v["verdict"] in T.VERDICTS, o["name"]
+        assert v["lowering"].strip() and v["cost"].strip(), o["name"]
+    for row in T.LIMITS + T.MAPPING + T.COST:
+        assert all(str(x).strip() for x in row)
+        assert "\u2014" not in " ".join(map(str, row))
+
+
 def test_compiler_pages_are_in_the_nav():
     nav = (ROOT / "website" / "docs.json").read_text()
-    for p in ("overview", "ops", "python-api", "versioning"):
+    for p in ("overview", "ops", "python-api", "versioning", "target-v4-8-1"):
         assert f'"compiler/{p}"' in nav
 
 
