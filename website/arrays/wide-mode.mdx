@@ -89,12 +89,26 @@ with sf.accumulate("wide"), sf.errstate(under="ignore"):
 | `sf.matmul(a, b)` | Also `accumulate=` and `shift=`. Batched: one wide product per batch element |
 | `sf.dot(a, b)` | Also `accumulate=` and `shift=` |
 | `sf.addmm(a, b, d)` | Also `accumulate=` and `shift=`. The wide product, then one saturating add of `d` |
+| Kernels: `sf.dot(a, b)` and `a @ b` in `@sf.jit` / `@sf.kernel` | Also `accumulate=` and `shift=`, or the setting in force when the kernel is traced |
 
 Not affected: `+`, `-`, `*`, `/`, `sf.fma`, `sf.sqrt`, `sf.sum` (it stays a sequential chain), and the selection functions (`max`, `min`, `maximum`, `minimum`, `clip`, `where`, `cast`).
 
 <Note>
-Kernels (`sf.dot` inside `@sf.jit` and `@sf.kernel`) and the PyTorch integration (`sf.torch`) do not have wide mode yet. Asking for it inside a kernel raises `SFUnsupportedError`.
+The PyTorch integration (`sf.torch`) does not have wide mode yet.
 </Note>
+
+In a kernel, the whole K of one `sf.dot` goes into one wide total and is rounded once. Splitting K across several `sf.dot` calls and adding the results rounds each part, so it gives different bits from one wide product:
+
+```python
+@sf.jit
+def mm(a_ptr, b_ptr, c_ptr, K: sf.constexpr, SHIFT: sf.constexpr):
+    r, rk = sf.arange(0, 8), sf.arange(0, K)
+    a = sf.load(a_ptr + r[:, None] * K + rk[None, :])
+    b = sf.load(b_ptr + rk[:, None] * 8 + r[None, :])
+    sf.store(c_ptr + r[:, None] * 8 + r[None, :], sf.dot(a, b, accumulate="wide", shift=SHIFT))
+```
+
+A kernel traced inside `sf.accumulate("wide")` is cached separately from one traced in the default, so the setting always takes effect.
 
 ## Shift
 

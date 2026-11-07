@@ -151,7 +151,7 @@ class KernelIR:
 
 # ops whose result shape is set by the op itself, not by the lanes it runs on
 _FIXED_SHAPE = frozenset({"param", "program_id", "thread_idx", "arange", "broadcast", "reshape",
-                          "transpose", "sum", "max", "min", "dot"})
+                          "transpose", "sum", "max", "min", "dot", "dot_wide"})
 
 
 class Builder:

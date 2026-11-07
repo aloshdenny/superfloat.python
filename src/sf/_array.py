@@ -656,11 +656,8 @@ def dot(a, b, *, accumulate=None, shift=None):
     Higher ranks go to matmul."""
     mode, sh = _mode_and_shift(accumulate, shift, "dot")
     if _traced(a, b):
-        if mode == "wide":
-            raise SFUnsupportedError("sf.dot(accumulate=\"wide\") inside a kernel is not "
-                                     "supported yet")
         from .kernels import _lang
-        return _lang.dot(a, b)
+        return _lang.dot(a, b, accumulate=mode, shift=shift if mode == "wide" else None)
     a, b = _as_sfarray(a, "dot"), _as_sfarray(b, "dot")
     if a.ndim == 1 and b.ndim == 1:
         if a.shape != b.shape:
@@ -697,11 +694,8 @@ def matmul(a, b, *, accumulate=None, shift=None):
     any launch."""
     mode, sh = _mode_and_shift(accumulate, shift, "matmul")
     if _traced(a, b):
-        if mode == "wide":
-            raise SFUnsupportedError("matmul with accumulate=\"wide\" inside a kernel is not "
-                                     "supported yet")
         from .kernels import _lang
-        return _lang.dot(a, b)
+        return _lang.dot(a, b, accumulate=mode, shift=shift if mode == "wide" else None)
     a, b = _as_sfarray(a, "matmul"), _as_sfarray(b, "matmul")
     if a.ndim == 0 or b.ndim == 0:
         raise SFShapeError("matmul: operands must be at least 1-D (use * for scalars)")

@@ -20,9 +20,10 @@ Versioning (see website/compiler/versioning.mdx):
     example a move to the v4.8.1 wide accumulator).
 """
 
-SPEC_VERSION = "1.0.3"
+SPEC_VERSION = "1.1.0"
 
 CHANGELOG = [
+    ("1.1.0", "2026-11-07", "Adds dot_wide: matmul on the v4.8.1 MX engine (wide accumulator, one rounding at POP with a power-of-two shift), from sf.dot(..., accumulate=\"wide\") and a @ b under sf.accumulate(\"wide\"). DSL 0.5.0. Golden vectors for dot_wide come from the chip repo's mxref.py. The dot entry now says v4.8.1 runs the chain as FMA instructions (MX replaced v1's systolic array)."),
     ("1.0.3", "2026-11-06", "Corrects 1.0.2 against the v4.8.1 ISA doc (compiler_v4.8.1.md): the chip has no sign-magnitude compare, max or min instructions. CMP is a signed 16-bit integer compare; compare, max, min, neg and abs are now given as the ISA section 5 sequences built from ACT, ADD and CMP. widen and narrow have no instruction. Op semantics unchanged."),
     ("1.0.2", "2026-11-06", "Chip team confirmed registers hold sign-magnitude and compare / max / min work on it, so there is no conversion on load and store. Lowering notes for neg, abs, cmp, cmp_lit, maximum, minimum, max, min, widen, narrow and the width rule updated to sign-magnitude. Op semantics unchanged."),
     ("1.0.1", "2026-11-06", "Fixes from Kartik's review. No op changes behaviour; the text was wrong. addmm is the dot chain then one saturating add of d (the accumulator does not start at d). Faults have a defined contract (the faulting op writes nothing, earlier writes stay), not undefined buffers. IR values are signed codes; sign-magnitude is only the memory format, and the rule for converting is stated. Ops that can raise an event are no longer suggested as Pure."),
@@ -277,14 +278,45 @@ OPS = [
        result="sfN", shape="(m, n)",
        semantics="For each (i, j): acc = 0; for t = 0 .. k-1: acc = fma(a[i,t], b[t,j], acc). "
                  "Every product truncated, every add saturated, at width N, in increasing t.",
-       events=["overflow", "underflow"], predication="events", hw_v1="8x8 systolic array per tile (4 tiles)",
+       events=["overflow", "underflow"], predication="events", hw_v1="v4.8.1: a chain of FMA instructions (Rd = accumulator in and out), k in increasing order. Not MX: MX gives different bits (see dot_wide)",
        mlir={"name": "sf.matmul (linalg.matmul with sf semantics)", "traits": ["EventEffect (not Pure)"]},
-       python=["sf.dot(a, b) in a kernel", "a @ b", "sf.matmul", "sf.addmm"],
+       python=["sf.dot(a, b) in a kernel", "a @ b", "sf.matmul", "sf.addmm (accumulate=\"chain\", the default)"],
        rewrites=["k must be accumulated in increasing order. Tiling over m and n is free; tiling over k is legal ONLY "
                  "if the partial sum of tile 1 is fed as the initial acc of tile 2 (no separate partials added later)",
                  "split-k, tree reduction, and wider accumulators are NOT legal"],
        notes=["sf.addmm(a, b, d) is NOT dot with the accumulator starting at d. It is the dot chain from 0, then ONE "
               "saturating add of d: add(dot(a, b), d). The two differ when a partial sum saturates."]),
+
+    _e(name="dot_wide", version="1.1", category="contraction", signature="%r:sfN[m,n] = dot_wide %a, %b {shift}",
+       operands=["a: sfN[m, k]", "b: sfN[k, n]"], attrs={"shift": "int from -32 to 31: the result is the total times 2^shift (POP's s)"},
+       result="sfN", shape="(m, n)",
+       semantics="The v4.8.1 MX engine. Block: sf9..sf16 use the SF16 block (accumulator W = 25 bits, F = 19 fraction "
+                 "bits); sf4..sf8 use the SF8 block (W = 20, F = 14). Operands are sign-magnitude, left-aligned in 16 bits; "
+                 "am, bm are the magnitudes the block reads (15 bits, or the 7 bits of the top byte on SF8). Product "
+                 "magnitude: SF16 t = (1024 + sum over set bits i of am of ((bm << i) & ~511)) >> 11, so NOT exact; SF8 "
+                 "t = am * bm, exact. Sign = sign(a) xor sign(b). For each (i, j): acc = 0; for k0 = 0, 8, 16, ...: acc = "
+                 "saturate_W(acc + sum of the signed t for k in k0 .. k0+7) (two's complement, about +-32). Result (POP): "
+                 "q = round_half_to_even(|acc| * 2^(shift - F + N - 1)), clamped to M, with the sign of acc; never -0.",
+       events=["overflow", "underflow"], predication="events",
+       hw_v1="v4.8.1 MX engine, one per tile (ISA section 3.4): CFG (block, N) from thread 0, CLR; per chunk of 8 k: WL "
+             "rows 7..0 then SWAP; MAC per token into slot t (up to 8 tokens per weight tile); then POP with Rs(c) = "
+             "t << 8 | (shift & 63). 8 output columns per weight tile, 64 MACs per instruction. The engine has no flags.",
+       mlir={"name": "sf.matmul_wide {shift}", "traits": ["EventEffect (not Pure)"]},
+       python=["sf.dot(a, b, accumulate=\"wide\", shift=s) in a kernel", "a @ b in a kernel traced under sf.accumulate(\"wide\")",
+               "sf.matmul / sf.dot / sf.addmm (accumulate=\"wide\") on host and device arrays"],
+       rewrites=["dot_wide never equals dot: never rewrite one into the other, and never fuse an FMA chain into MX",
+                 "tiling over m and n is free",
+                 "tiling over k is legal only by MACing every chunk into the SAME accumulator slot and doing ONE POP at the "
+                 "end; separate POPs added together round twice and are NOT equivalent",
+                 "chunk boundaries are at k = 0, 8, 16, ... (saturation happens once per chunk); pad a short last chunk "
+                 "with zeros, which add nothing",
+                 "inside a chunk the order of k does not matter (the 8 products are summed exactly)"],
+       notes=["overflow means the accumulator clipped at +-32 or the POP result clamped at +-M; underflow means a "
+              "nonzero acc rounded to 0",
+              "on the SF16 block a product below the engine's resolution (e.g. 2^-15 x 2^-15) adds 0, so a total of "
+              "exactly 0 raises nothing",
+              "golden vectors: spec/golden/dot_wide.json, computed by the chip repo's mxref.Engine (sha256 in the file)",
+              "the kernel trace picks dot or dot_wide from sf.accumulate at trace time; the kernel cache keys on it"]),
 
     # ---- memory -------------------------------------------------------------------------------
     _e(name="load", category="memory", signature="%r:sfN = load %ptr, %offs, %mask, %other",
@@ -339,8 +371,8 @@ PUBLIC = [
     ("sf.div(where=)", "device", "div under predicate", ""),
     ("sf.sqrt", "device", "sqrt", ""),
     ("sf.sum", "device", "sum", "sequential"),
-    ("sf.dot / @ / sf.matmul", "device", "dot", "batched matmul = one dot per batch element"),
-    ("sf.addmm(a, b, d)", "device", "dot, then add of d", "the accumulator starts at 0, not at d"),
+    ("sf.dot / @ / sf.matmul", "device", "dot (default) or dot_wide (accumulate=\"wide\")", "batched matmul = one dot per batch element"),
+    ("sf.addmm(a, b, d)", "device", "dot (or dot_wide), then add of d", "the accumulator starts at 0, not at d"),
     ("sf.max / sf.min / sf.argmax / sf.argmin", "host", "max / min", "argmax/argmin: first index of the extreme"),
     ("sf.maximum / sf.minimum / sf.clip / sf.where", "host", "maximum / minimum / where", "exact, no events"),
     ("sf.cast / astype", "host", "widen / narrow", ""),
@@ -348,6 +380,7 @@ PUBLIC = [
     ("comparisons", "host", "cmp / cmp_lit", "return numpy bool"),
     ("indexing, reshape, .T", "host", "reshape / transpose", ""),
     ("sf.errstate / seterr / geterr / config / getconfig", "host", "-", "policy only, never changes bits"),
+    ("sf.accumulate / setaccumulate / getaccumulate", "host", "picks dot or dot_wide", "changes bits; read at trace time inside kernels"),
     ("sf.info / sf.dtype / sf.dtypes", "host", "-", "format metadata"),
     ("sf.device / devices / get_device / register_device / synchronize", "host", "-", "runtime"),
     ("@sf.jit / @sf.kernel / sf.autotune / sf.constexpr", "trace", "builds a KernelIR", ""),

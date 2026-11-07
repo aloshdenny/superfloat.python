@@ -45,7 +45,7 @@ kernel must not return a value.
 | `with sf.predicate(mask):` | Stores and event counts inside are masked by `mask` (and any enclosing predicate). Values are still computed on every lane. Nested predicates AND. |
 | `sf.where(cond, x, y)` | Select per lane. |
 | `sf.fma(a, b, c)`, `sf.sqrt(a)`, `sf.maximum(a, b)`, `sf.minimum(a, b)`, `sf.clip(x, lo, hi)`, `sf.cast(x, dtype)` | Same semantics as the host versions. |
-| `sf.dot(a, b)` | 2-D tile matmul on the systolic array (sequential fma chain per output). |
+| `sf.dot(a, b, accumulate=None, shift=None)` | 2-D tile matmul. Default: a sequential fma chain per output (op `dot`). `accumulate="wide"`: the MX engine, one rounding at `2^shift` (op `dot_wide`). `None` uses the `sf.accumulate` setting when the kernel is traced; `a @ b` does the same. [Wide mode →](/arrays/wide-mode) |
 | `sf.sum(x, axis=None)`, `sf.max(x, axis=None)`, `sf.min(x, axis=None)` | Tile reductions; `sum` is the sequential saturating chain. |
 | `sf.zeros(shape, dtype="sf16")`, `sf.full(shape, value, dtype="sf16")` | Tile constants. |
 | `v.reshape(...)`, `v[:, None]`, `v[None, :]` | Reshape and expand dims on tile values; NumPy broadcasting applies. |

@@ -15,8 +15,8 @@ description: "Which IR op each public Python function becomes, and where it runs
 | `sf.div(where=)` | device | div under predicate |  |
 | `sf.sqrt` | device | sqrt |  |
 | `sf.sum` | device | sum | sequential |
-| `sf.dot / @ / sf.matmul` | device | dot | batched matmul = one dot per batch element |
-| `sf.addmm(a, b, d)` | device | dot, then add of d | the accumulator starts at 0, not at d |
+| `sf.dot / @ / sf.matmul` | device | dot (default) or dot_wide (accumulate="wide") | batched matmul = one dot per batch element |
+| `sf.addmm(a, b, d)` | device | dot (or dot_wide), then add of d | the accumulator starts at 0, not at d |
 | `sf.max / sf.min / sf.argmax / sf.argmin` | host | max / min | argmax/argmin: first index of the extreme |
 | `sf.maximum / sf.minimum / sf.clip / sf.where` | host | maximum / minimum / where | exact, no events |
 | `sf.cast / astype` | host | widen / narrow |  |
@@ -24,6 +24,7 @@ description: "Which IR op each public Python function becomes, and where it runs
 | `comparisons` | host | cmp / cmp_lit | return numpy bool |
 | `indexing, reshape, .T` | host | reshape / transpose |  |
 | `sf.errstate / seterr / geterr / config / getconfig` | host | - | policy only, never changes bits |
+| `sf.accumulate / setaccumulate / getaccumulate` | host | picks dot or dot_wide | changes bits; read at trace time inside kernels |
 | `sf.info / sf.dtype / sf.dtypes` | host | - | format metadata |
 | `sf.device / devices / get_device / register_device / synchronize` | host | - | runtime |
 | `@sf.jit / @sf.kernel / sf.autotune / sf.constexpr` | trace | builds a KernelIR |  |

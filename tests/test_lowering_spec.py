@@ -92,5 +92,9 @@ def test_golden_vectors_match_the_kernels(path):
             r, ev = _linalg.matmul_codes(f, a[None, :], b[:, None])
             assert int(r[0, 0]) == c["out"], c
             assert {k for k, m in ev.items() if m.any()} == set(c["events"]), c
+        elif op == "dot_wide":
+            a, b = (np.array(x) for x in c["in"])
+            r, _ = _linalg.matmul_wide_codes(f, a, b, c["shift"])
+            assert r.tolist() == c["out"], c
         else:
             pytest.fail(f"no checker for {op}")
