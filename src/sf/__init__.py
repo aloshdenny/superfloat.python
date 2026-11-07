@@ -16,6 +16,7 @@ True
 """
 from __future__ import annotations
 
+from ._accumulate import accumulate, getaccumulate, setaccumulate
 from ._array import SFArray, addmm, dot, matmul, sum_ as sum  # noqa: A001
 from ._config import config, getconfig
 from ._device import Device, MockAtreides, devices, get_device, register_device
@@ -31,7 +32,7 @@ from .kernels import (HardwareAtreides, Kernel, LaunchResult, Limits, SimulatorA
                       arange, autotune, barrier, block_dim, block_idx, cdiv, constexpr, jit, kernel,
                       load, predicate, program_id, shared, store, synchronize, thread_idx)
 
-__version__ = "0.4.0"           # Stage 3
+__version__ = "0.5.0"           # wide mode (MX) on Atreides v4.8.1
 
 # sf.sf4 .. sf.sf16
 globals().update({cls.__name__: cls for cls in DTYPES.values()})
@@ -76,6 +77,7 @@ def argmin(x, axis=None):
 __all__ = (
     ["SFScalar", "SFArray", "SFFormat", "SFStatus", "FORMATS", "MIN_BITS", "MAX_BITS", "dtypes",
      "errstate", "geterr", "seterr", "config", "getconfig",
+     "accumulate", "getaccumulate", "setaccumulate",
      "Device", "MockAtreides", "devices", "get_device", "register_device", "device",
      "sum", "max", "min", "argmax", "argmin", "dot", "matmul", "addmm", "__version__",
      "kernel", "jit", "autotune", "constexpr", "program_id", "block_idx", "thread_idx", "block_dim",

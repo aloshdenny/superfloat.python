@@ -17,9 +17,9 @@ sf.sum(x)                 # sf16(0.350006103515625)
 A.sum(axis=0)             # one value per column
 ```
 
-## `sf.dot(a, b)`
+## `sf.dot(a, b, *, accumulate=None, shift=None)`
 
-1-D · 1-D as a chain of `fma`: `acc = fma(a[k], b[k], acc)`. Equals the scalar chain bit for bit. Higher ranks go to `matmul`.
+1-D · 1-D as a chain of `fma`: `acc = fma(a[k], b[k], acc)`. Equals the scalar chain bit for bit. Higher ranks go to `matmul`. With `accumulate="wide"` it runs on the MX engine instead: see [Wide mode](/arrays/wide-mode).
 
 **Events:** overflow (per output), underflow (any product).
 
@@ -27,9 +27,17 @@ A.sum(axis=0)             # one value per column
 sf.dot(x, x)              # sf16(0.322479248046875)
 ```
 
-## `sf.matmul(a, b)` and `a @ b`
+## `sf.matmul(a, b, *, accumulate=None, shift=None)` and `a @ b`
 
 NumPy's rules: 1-D operands are promoted and the extra axis dropped; leading dimensions broadcast as a batch. Each output is `dot` of a row and a column. Shape mismatches raise `SFShapeError` on the host before any launch.
+
+<ParamField path="accumulate" type="'chain' | 'wide' | None" default="None">
+  `None` uses the `sf.accumulate` setting (default `"chain"`). `"wide"` runs on the MX engine: a ±32 accumulator and one rounding at the end. `@` always uses the setting. [Wide mode →](/arrays/wide-mode)
+</ParamField>
+
+<ParamField path="shift" type="int | None" default="None">
+  Wide mode only: the result is the total × 2^shift, from -32 to 31 (default 0). With the chain it raises `ValueError`.
+</ParamField>
 
 **Events:** overflow (per output), underflow.
 
@@ -41,9 +49,9 @@ A @ B
 #          [0.09997559, 0.1000061 ]], dtype=sf16)
 ```
 
-## `sf.addmm(a, b, d)`
+## `sf.addmm(a, b, d, *, accumulate=None, shift=None)`
 
-`a @ b` followed by one saturating add of `d` (broadcast). The bias-add semantics the PyTorch layer uses.
+`a @ b` followed by one saturating add of `d` (broadcast). The bias-add semantics the PyTorch layer uses. `accumulate` and `shift` apply to the product, as in `matmul`; `d` is always one saturating add.
 
 ```python
 sf.addmm(A, B, sf.full((2, 2), 0.1, sf.sf16))

@@ -11,7 +11,9 @@ Targets available now:
   (light ops).
 * ``atreides``: ``MockAtreides``, which executes the same vectorised
   reference in host memory and reports nothing but the result, exactly as
-  Atreides v1 does (no saturation flag or status register).  It is the
+  the chip does (no saturation flag or status register).  It models
+  Atreides v4.8.1: the FMA / ACT units (unchanged from v1) and the MX engine
+  for wide accumulation.  It is the
   stand-in until the simulator and hardware are wired in: the bit-identical
   test is "target == host reference", and it does not change when the mock
   is swapped out.
@@ -43,6 +45,7 @@ class Device:
     sticky_flags: bool = False               # per-tile SAT / DIV0 / INVALID flags
     max_elements: int | None = None          # launch limit, None = unbounded
     supported_ops: frozenset[str] | None = None  # heavy ops the target has instructions for; None = all
+    mx: bool = False                         # has the v4.8.1 MX engine (wide accumulation)
 
     def check(self, fmt: SFFormat, n_elements: int) -> None:
         if fmt.bits not in self.supported_bits:
@@ -73,8 +76,9 @@ class Device:
 
 
 class MockAtreides(Device):
-    """Atreides v1 stand-in: runs the vectorised reference and returns codes
-    only, exactly like hardware with no status register."""
+    """Atreides v4.8.1 stand-in: runs the vectorised reference and returns
+    codes only, exactly like hardware with no status register.  Has the MX
+    engine, so it runs wide accumulation too."""
 
     name = "atreides"
     supported_bits = (16,)
@@ -82,6 +86,7 @@ class MockAtreides(Device):
     accumulator_bits = None
     sticky_flags = False
     max_elements = 1 << 28
+    mx = True                                # v4.8.1 has the MX engine
 
     def __init__(self) -> None:
         self.launches = 0                    # for tests: proves pre-flight skipped a launch
@@ -113,6 +118,11 @@ def _matmul_kernel(fmt: SFFormat, a: np.ndarray, b: np.ndarray):
     return matmul_codes(fmt, a, b, order="sequential")
 
 
+def _matmul_wide_kernel(fmt: SFFormat, a: np.ndarray, b: np.ndarray, shift: int = 0):
+    from ._linalg import matmul_wide_codes
+    return matmul_wide_codes(fmt, a, b, shift)
+
+
 def _sum_kernel(fmt: SFFormat, a: np.ndarray, axis: int):
     from ._linalg import sum_codes
     return sum_codes(fmt, a, axis, order="sequential")
@@ -121,7 +131,7 @@ def _sum_kernel(fmt: SFFormat, a: np.ndarray, axis: int):
 _KERNELS: dict[str, Callable] = {
     "add": vec.add, "sub": vec.sub, "mul": vec.mul, "div": vec.div, "fma": vec.fma,
     "neg": vec.neg, "abs": vec.abs_, "sqrt": vec.sqrt, "pow": vec.pow_int,
-    "matmul": _matmul_kernel, "sum": _sum_kernel,
+    "matmul": _matmul_kernel, "matmul_wide": _matmul_wide_kernel, "sum": _sum_kernel,
 }
 
 _registry: dict[str, Device] = {"atreides": MockAtreides(), "atreides-flags": MockAtreidesFlags()}

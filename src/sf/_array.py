@@ -17,14 +17,14 @@ from typing import Any
 
 import numpy as np
 
-from . import _config, _device, _errstate, _linalg, _preflight, _reference as ref, _vectorized as vec
+from . import _accumulate, _config, _device, _errstate, _linalg, _preflight, _reference as ref, _vectorized as vec
 from ._errors import SFDeviceOverflowWarning, SFInvalidError, SFShapeError, SFTypeError, SFUnsupportedError
 from ._format import FORMATS, SFFormat, widen_code
 from ._scalar import DTYPES, SFScalar, _as_index, _dtype_of, resolve_dtype
 from ._status import SFStatus
 
 _SYM = {"add": "+", "sub": "-", "mul": "*", "div": "/", "fma": "fma", "neg": "-", "abs": "abs",
-        "sqrt": "sqrt", "pow": "**", "matmul": "@", "sum": "sum"}
+        "sqrt": "sqrt", "pow": "**", "matmul": "@", "matmul_wide": "@ (wide)", "sum": "sum"}
 _EVENT_ORDER = ("invalid", "divide", "overflow", "underflow")
 
 
@@ -480,11 +480,11 @@ def _should_offload(total: int) -> bool:
     return t is not None and total > t
 
 
-_REDUCTIONS = ("sum", "matmul")
+_REDUCTIONS = ("sum", "matmul", "matmul_wide")
 
 
 # ops whose result can underflow (a nonzero product truncated to 0); the rest never do
-_CAN_UNDERFLOW = ("mul", "fma", "matmul", "pow")
+_CAN_UNDERFLOW = ("mul", "fma", "matmul", "matmul_wide", "pow")
 
 
 def _no_underflow_possible(op, fmt, codes) -> bool:
@@ -520,6 +520,10 @@ def _run_heavy(op, fmt, dtype, device, codes, out_shape, kw):
     if ops is not None and op not in ops:              # the target has no instruction for it
         raise SFUnsupportedError(f"{fmt.name} {opname} has no instruction on {dev.name} "
                                  f"(supported: {', '.join(sorted(ops))}); nothing was launched")
+    if op == "matmul_wide" and not getattr(dev, "mx", False):
+        raise SFUnsupportedError(f"{fmt.name} {opname}: wide accumulation needs the MX engine "
+                                 f"(Atreides v4.8.1) and {dev.name} has none; use "
+                                 f"accumulate=\"chain\" or a target with MX. Nothing was launched")
     kw = {k: v for k, v in kw.items() if k != "live"}        # the gate's mask never reaches a kernel
     result, flags = dev.run(op, fmt, *codes, **kw)
     result = np.asarray(result, dtype=np.int64)
@@ -542,6 +546,11 @@ def _run_heavy(op, fmt, dtype, device, codes, out_shape, kw):
     elif verdict.kind == "safe":
         saturated, exact = 0, True                         # proved on the host; no scan needed
         underflow = None if can_under else 0
+    elif op == "matmul_wide":
+        # the accumulator clips only at +-32: if the host proves it cannot, every
+        # saturation shows at the output as +-max, so the scan is an upper bound
+        saturated = at_max if _linalg.matmul_wide_acc_safe(fmt, codes[0], codes[1]) else None
+        exact, underflow = False, None                     # a nonzero total rounding to 0 is unseen
     elif op in _REDUCTIONS:
         saturated, exact = None, False                     # a partial sum can saturate and come back
         underflow = None if can_under else 0
@@ -630,9 +639,26 @@ def _minmax(x, axis, fn):
     return _result(r, x.dtype, x.device if np.ndim(r) else _device.HOST)
 
 
-def dot(a, b):
-    """1-D · 1-D as a chain of fma in target order; higher ranks go to matmul."""
+def _mode_and_shift(accumulate, shift, name):
+    """The accumulation mode for this call, and the POP shift for wide mode."""
+    mode = _accumulate.resolve(accumulate)
+    if mode == "chain":
+        if shift is not None:
+            raise ValueError(f"sf.{name}: shift= only applies to accumulate=\"wide\" "
+                             f"(this call accumulates as {mode!r})")
+        return mode, 0
+    return mode, _linalg.check_shift(shift)
+
+
+def dot(a, b, *, accumulate=None, shift=None):
+    """1-D · 1-D.  ``accumulate="chain"`` (default): a chain of fma in target
+    order.  ``accumulate="wide"``: the MX engine, rounded once at ``2^shift``.
+    Higher ranks go to matmul."""
+    mode, sh = _mode_and_shift(accumulate, shift, "dot")
     if _traced(a, b):
+        if mode == "wide":
+            raise SFUnsupportedError("sf.dot(accumulate=\"wide\") inside a kernel is not "
+                                     "supported yet")
         from .kernels import _lang
         return _lang.dot(a, b)
     a, b = _as_sfarray(a, "dot"), _as_sfarray(b, "dot")
@@ -643,6 +669,10 @@ def dot(a, b):
         ka, kb = _to_codes(a, fmt), _to_codes(b, fmt)
         device = _device_of([a, b])
         if device == _device.HOST and not _should_offload(ka.size):
+            if mode == "wide":
+                k, events = _linalg.matmul_wide_codes(fmt, ka[None, :], kb[:, None], sh)
+                _handle_events(events, fmt, "dot (wide)", 1)
+                return _dtype_of(fmt).from_code(int(k.reshape(())))
             k, events = _linalg.dot_codes(fmt, ka, kb)
             first = events.pop("first")
             if first:                                # same order as the scalar fma chain
@@ -651,15 +681,25 @@ def dot(a, b):
             _handle_events(events, fmt, "dot", 1)
             return _dtype_of(fmt).from_code(int(k))
         target = device if device != _device.HOST else _config.get("default_device")
-        r = _run_heavy("matmul", fmt, _dtype_of(fmt), target, [ka[None, :], kb[:, None]], (1, 1), {})
+        op, kw = ("matmul_wide", {"shift": sh}) if mode == "wide" else ("matmul", {})
+        r = _run_heavy(op, fmt, _dtype_of(fmt), target, [ka[None, :], kb[:, None]], (1, 1), kw)
         return SFArray._wrap(r._codes.reshape(()), r.dtype, r.device, r.status)
-    return matmul(a, b)
+    return matmul(a, b, accumulate=mode, shift=shift)
 
 
-def matmul(a, b):
+def matmul(a, b, *, accumulate=None, shift=None):
     """``a @ b`` with NumPy's rules for 1-D operands and batching.
-    Shape errors are raised on the host before any launch."""
+
+    ``accumulate="chain"`` (default): per output a chain of fma.
+    ``accumulate="wide"``: the MX engine (accumulator range +-32, one
+    rounding at ``2^shift``, ``shift`` from -32 to 31).  ``@`` uses the
+    ``sf.accumulate`` setting.  Shape errors are raised on the host before
+    any launch."""
+    mode, sh = _mode_and_shift(accumulate, shift, "matmul")
     if _traced(a, b):
+        if mode == "wide":
+            raise SFUnsupportedError("matmul with accumulate=\"wide\" inside a kernel is not "
+                                     "supported yet")
         from .kernels import _lang
         return _lang.dot(a, b)
     a, b = _as_sfarray(a, "matmul"), _as_sfarray(b, "matmul")
@@ -684,12 +724,17 @@ def matmul(a, b):
     out_shape = batch + (ka.shape[-2], kb.shape[-1])
     device = _device_of([a, b])
     if device == _device.HOST and not _should_offload(int(np.prod(out_shape)) * ka.shape[-1]):
-        result, events = _linalg.matmul_codes(fmt, ka, kb)
-        _handle_events(events, fmt, "@", int(np.prod(out_shape)))
+        if mode == "wide":
+            result, events = _linalg.matmul_wide_codes(fmt, ka, kb, sh)
+            _handle_events(events, fmt, "@ (wide)", int(np.prod(out_shape)))
+        else:
+            result, events = _linalg.matmul_codes(fmt, ka, kb)
+            _handle_events(events, fmt, "@", int(np.prod(out_shape)))
         out = SFArray._wrap(result, dtype)
     else:
         target = device if device != _device.HOST else _config.get("default_device")
-        out = _run_heavy("matmul", fmt, dtype, target, [ka, kb], out_shape, {})
+        op, kw = ("matmul_wide", {"shift": sh}) if mode == "wide" else ("matmul", {})
+        out = _run_heavy(op, fmt, dtype, target, [ka, kb], out_shape, kw)
     codes = out._codes
     if squeeze_row:
         codes = codes[..., 0, :]
@@ -705,9 +750,9 @@ def matmul(a, b):
     return res
 
 
-def addmm(a, b, d):
-    """``a @ b + d``: the matmul chain, then one saturating add of ``d``."""
-    return matmul(a, b) + d
+def addmm(a, b, d, *, accumulate=None, shift=None):
+    """``a @ b + d``: the matmul (chain or wide), then one saturating add of ``d``."""
+    return matmul(a, b, accumulate=accumulate, shift=shift) + d
 
 
 __all__ = ["SFArray", "sum_", "dot", "matmul", "addmm"]

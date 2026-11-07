@@ -50,6 +50,7 @@
               "arrays/elementwise",
               "arrays/reductions",
               "arrays/matmul",
+              "arrays/wide-mode",
               "arrays/device",
               "arrays/status",
               "arrays/configuration"
