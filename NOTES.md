@@ -94,6 +94,36 @@ them. Each one is a single place to change if the team decides differently.
 | Autotune | by simulated cycles, ties by wall time, one tuning run per distinct key; configs supply constexpr names the launch does not pass; the grid may be a function of the chosen config | `kernels/_runtime.autotune` |
 | `from __future__ import annotations` | `BLOCK: sf.constexpr` arrives as a string in such modules; the kernel accepts both the object and the string | `kernels/_runtime._is_constexpr_annotation` |
 
+## Wide mode (v4.8.1 MX engine)
+
+* `accumulate="wide"` on `matmul`, `dot`, `addmm`, and `sf.accumulate` /
+  `sf.setaccumulate` / `sf.getaccumulate` for `@`, follow Alosh's design
+  (`sf wide mode (MX).md`, 2026-11-07).  The default stays `"chain"`, so no
+  existing result changes.
+* The model (`_linalg.matmul_wide_codes`) is written from the chip repo's
+  `test/v4/mxref.py` (superfloat.gpu, branch v4.8.1-openframe) and was checked
+  against `mxref.Engine` on 3,000 random and edge matmuls (107,416 outputs,
+  sf4 to sf16, every shift): 0 mismatches.  `tests/data/mx_golden.json` keeps
+  240 of those cases, computed by mxref itself, so CI checks the model
+  without the chip repo.
+* The same run showed `q115.py` (the chip's FMA / ACT reference) equals our
+  sf16 add, sub, mul and fma on 2,266,050 pairs each: elementwise needs no
+  change for v4.8.1.
+* Width picks the block: sf9..sf16 on SF16, sf4..sf8 on SF8.
+* Underflow in wide mode means a nonzero total rounded to 0.  A product below
+  the SF16 block's resolution adds nothing inside the engine, so a total of
+  exactly 0 raises nothing.
+* Device status: the accumulator clip at +-32 is invisible, so the output scan
+  is an upper bound only when the host proves no total can reach +-32
+  (`matmul_wide_acc_safe`); otherwise unknown.  Underflow is always unknown
+  without replay.
+* The hardware version is v4.8.1 and it already has MX (Alosh, 2026-11-07),
+  so every Atreides target (`atreides`, `-flags`, `-sim`, `-hw`) has
+  `Device.mx = True`.  A custom target without MX refuses wide mode before
+  launch and never falls back.  The DSL version goes to 0.5.0.
+* Follow-ups: kernels (`dot_wide` IR op), `sf.torch` (each layer's shift;
+  Alosh is resharing the design) and the spec entry.
+
 ## Immutability
 
 `SFScalar.__setattr__` allows `_code` to be set once (construction) and

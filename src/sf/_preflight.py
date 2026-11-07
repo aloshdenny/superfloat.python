@@ -160,7 +160,7 @@ def gate(op: str, fmt: SFFormat, *operands, **kw) -> Verdict:
 
 def replay_all_saturate(op: str, fmt: SFFormat, *operands, **kw) -> bool:
     """Exact host replay: does every (live) output saturate?  Costs the whole op."""
-    if op not in ("matmul", "sum"):
+    if op not in ("matmul", "matmul_wide", "sum"):
         operands = _live(operands, kw)
     kw = {k: v for k, v in kw.items() if k != "live"}
     codes, events = host_events(op, fmt, *operands, **kw)
@@ -173,6 +173,8 @@ def host_events(op: str, fmt: SFFormat, *operands, **kw):
     kw = {k: v for k, v in kw.items() if k != "live"}
     if op == "matmul":
         return _linalg.matmul_codes(fmt, operands[0], operands[1])
+    if op == "matmul_wide":
+        return _linalg.matmul_wide_codes(fmt, operands[0], operands[1], kw.get("shift", 0))
     if op == "sum":
         return _linalg.sum_codes(fmt, operands[0], kw.get("axis", 0))
     fn = {"abs": vec.abs_, "pow": vec.pow_int}.get(op) or getattr(vec, op)

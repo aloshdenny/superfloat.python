@@ -1,0 +1,158 @@
+---
+title: "Wide mode (MX)"
+description: "Run matrix multiplies on the v4.8.1 MX engine: a wide accumulator, one rounding at the end, and a power-of-two shift."
+---
+
+## Two ways to accumulate
+
+**Wide mode runs a matrix multiply on the chip's MX engine, which adds products in a wide accumulator and rounds once at the end.** The default stays the fma chain, so existing code keeps the same bits.
+
+|  | Default: `"chain"` (FMA) | `"wide"` (MX) |
+| --- | --- | --- |
+| Running total | Same width as the data | Q6.19 for sf9 to sf16, Q6.14 for sf4 to sf8 |
+| Range of the total | ±1, saturates at every step | ±32, saturates once per 8 terms |
+| Rounding | Truncates every product | Rounds once at the end, half to even |
+| Best for | Reproducing today's bits, small kernels | LLM inference and other batched matmuls |
+
+Same inputs, different answers. The true dot product is 0.675:
+
+```python
+import sf
+
+a = sf.array([0.75, 0.75, -0.75], dtype=sf.sf16)
+b = sf.array([0.9, 0.9, 0.9], dtype=sf.sf16)
+
+sf.dot(a, b)
+# SFOverflowError: sf16 dot: overflow in the accumulation chain
+sf.dot(a, b, accumulate="wide")
+# sf16(0.67498779296875)
+```
+
+In the chain, 0.675 + 0.675 passes 1 and saturates, so the default policy raises; with `over="ignore"` it returns 0.32498169. In wide mode the total reaches 1.35 without clipping, and the answer comes back whole.
+
+Rounding once also shows on small values. In the [matrix multiply](/arrays/matmul) example, the bottom-left output is 0.09997559 in the chain, because two products are each truncated. Wide mode keeps them exactly and rounds the total once:
+
+```python
+A = sf.array([[0.5, 0.25], [0.1, 0.2]], dtype=sf.sf16)
+B = sf.array([[0.5, 0.0], [0.25, 0.5]], dtype=sf.sf16)
+sf.matmul(A, B, accumulate="wide")
+# sfarray([[0.3125   , 0.125    ],
+#          [0.1000061, 0.1000061]], dtype=sf16)
+```
+
+## Turning it on
+
+**Turn wide mode on for one call, for a block or function, or for the current thread.** It is scoped like `sf.errstate`, but it is a separate setting because it changes the bits.
+
+```python
+# 1. One call
+y = sf.matmul(a, b, accumulate="wide", shift=-2)
+
+# 2. A block, including the @ operator
+with sf.accumulate("wide"):
+    y = a @ b
+
+# 3. A function, plain or async
+@sf.accumulate("wide")
+def forward(x):
+    return x @ w
+
+# 4. The current thread or task, returning the previous setting
+old = sf.setaccumulate("wide")
+y = a @ b
+sf.setaccumulate(old)
+
+sf.getaccumulate()    # 'chain' by default
+```
+
+Which setting wins, strongest first:
+
+1. `accumulate=` on the call
+2. The innermost `sf.accumulate` block or decorator
+3. `sf.setaccumulate`
+4. The default, `"chain"`
+
+Each thread and asyncio task keeps its own setting, so one request cannot change another's numbers. `errstate` never selects wide mode; the two combine:
+
+```python
+with sf.accumulate("wide"), sf.errstate(under="ignore"):
+    y = x @ w
+```
+
+## Where it applies
+
+**Wide mode changes matrix multiplies and dot products only.** Everything else keeps its rules, even inside a `sf.accumulate("wide")` block.
+
+| Function | How to enable |
+| --- | --- |
+| `a @ b` | `sf.accumulate` block or decorator, or `sf.setaccumulate` (an operator cannot take keywords) |
+| `sf.matmul(a, b)` | Also `accumulate=` and `shift=`. Batched: one wide product per batch element |
+| `sf.dot(a, b)` | Also `accumulate=` and `shift=` |
+| `sf.addmm(a, b, d)` | Also `accumulate=` and `shift=`. The wide product, then one saturating add of `d` |
+
+Not affected: `+`, `-`, `*`, `/`, `sf.fma`, `sf.sqrt`, `sf.sum` (it stays a sequential chain), and the selection functions (`max`, `min`, `maximum`, `minimum`, `clip`, `where`, `cast`).
+
+<Note>
+Kernels (`sf.dot` inside `@sf.jit` and `@sf.kernel`) and the PyTorch integration (`sf.torch`) do not have wide mode yet. Asking for it inside a kernel raises `SFUnsupportedError`.
+</Note>
+
+## Shift
+
+**The total can reach ±32, but the result must fit below ±1, so you choose a power-of-two `shift`.** The result is the total × 2^shift, rounded half to even and saturated at the format's largest value.
+
+```python
+a = sf.array([0.5] * 4, dtype=sf.sf16)
+b = sf.array([0.75] * 4, dtype=sf.sf16)      # the true total is 1.5
+
+sf.dot(a, b, accumulate="wide")
+# SFOverflowError: sf16 dot (wide): overflow in 1 of 1 element(s)
+sf.dot(a, b, accumulate="wide", shift=-2)
+# sf16(0.375)                                 1.5 x 2^-2
+```
+
+- `shift` is an integer from -32 to 31, default 0. There are no float scales, because the hardware only shifts.
+- `sf` does not remember the shift. You keep each result's exponent, as you do for any scaled data.
+- `shift=` with the chain raises `ValueError`, because the chain has no shift.
+
+## Widths
+
+**The width of the data picks the MX block, so every result is reproducible.**
+
+| Data | Block | Accumulator | Products |
+| --- | --- | --- | --- |
+| sf9 to sf16 | SF16 | Q6.19, 25 bits | Partial-product bits below column 9 dropped, then cut to 19 fraction bits |
+| sf4 to sf8 | SF8 | Q6.14, 20 bits | Exact |
+
+- The result has the width of the widest input, and is never negative zero.
+- The total saturates at ±32 once per group of 8 terms. Up to 32 terms of values below 1 can never reach it.
+- The order of terms does not change the result unless the total reaches ±32.
+- On the SF16 block, a product smaller than the engine resolves (for example 2⁻¹⁵ × 2⁻¹⁵) adds nothing. If every product vanishes this way, the total is exactly 0 and no event is raised.
+
+## Errors and status
+
+**`sf.errstate` works the same in wide mode: it decides who is told, never the number.** What changes is what each event means.
+
+| Event | In wide mode |
+| --- | --- |
+| overflow | The total reached ±32, or the shifted result did not fit and saturated at ±max |
+| underflow | A nonzero total rounded to 0 |
+| divide, invalid | Never raised by a dot product |
+
+On the host the reference counts both events exactly, so `"raise"` works as usual.
+
+On a device, the chip has no flags, so the status says what the host can know:
+
+- **overflow:** when the host proves the total cannot reach ±32, the outputs at ±max are an upper bound (`saturated<=n`, and a warning). Otherwise the count is unknown.
+- **underflow:** always unknown, because a total that rounds to 0 leaves no trace.
+- `sf.config(status="replay")` recomputes both on the host, exactly.
+
+## Devices
+
+**Wide mode runs on every Atreides target, because v4.8.1 has the MX engine.** That covers `atreides`, `atreides-flags`, `atreides-sim` and `atreides-hw`. On a device it gives the same bits as the host reference, so you can test without hardware.
+
+A custom target without MX (`Device.mx` is `False`) refuses before launching. It never falls back to the chain silently:
+
+```python
+sf.matmul(a_on_old, b_on_old, accumulate="wide")
+# SFUnsupportedError: sf16 @ (wide): wide accumulation needs the MX engine (Atreides v4.8.1) and old-target has none; use accumulate="chain" or a target with MX. Nothing was launched
+```

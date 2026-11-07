@@ -84,4 +84,4 @@ with sf.config(offload_threshold=1_000_000):
 sf.devices()     # ('host', 'atreides', 'atreides-flags', 'atreides-sim', 'atreides-hw')
 ```
 
-`atreides` is the v1 mock (no flags). `atreides-flags` reports sticky flags, so statuses are exact and `over="raise"` works for heavy ops. `atreides-sim` is the kernel simulator, which also runs the built-ins. `atreides-hw` waits for the real driver. [Devices reference →](/reference/devices)
+`atreides` models the Atreides v4.8.1 chip (no flags), including the MX engine for [wide mode](/arrays/wide-mode). `atreides-flags` reports sticky flags, so statuses are exact and `over="raise"` works for heavy ops. `atreides-sim` is the kernel simulator, which also runs the built-ins. `atreides-hw` waits for the real driver. [Devices reference →](/reference/devices)

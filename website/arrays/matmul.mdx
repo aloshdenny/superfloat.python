@@ -19,6 +19,10 @@ A @ B
 
 Take the top-left output: 0.5 × 0.5 = 0.25 (exact), then fma(0.25, 0.25, 0.25) = 0.0625 + 0.25 = 0.3125. The bottom-left shows truncation at work: 0.1 is 3277 codes, 3277 × 16384 / 32768 = 1638.5 truncates to 1638, plus 0.2 × 0.25 (6554 × 8192 / 32768 = 1638.5, truncates to 1638) gives 3276 codes = 0.09997559, not 0.1.
 
+<Note>
+This is the default, `"chain"`. On Atreides v4.8.1 a matrix multiply can instead run on the MX engine, with a wide accumulator and one rounding at the end: see [Wide mode (MX)](/arrays/wide-mode).
+</Note>
+
 ## Shapes
 
 NumPy's rules: 1-D operands are promoted and the extra dimension dropped, leading dimensions broadcast as a batch. A mismatch raises `SFShapeError` on the host before anything runs:

@@ -25,6 +25,16 @@ with sf.errstate(over="ignore"):
 def f(): ...
 ```
 
+## `sf.accumulate(mode)`, `sf.setaccumulate(mode)`, `sf.getaccumulate()`
+
+How matrix multiplies and dot products accumulate: `"chain"` (default, the fma chain) or `"wide"` (the MX engine). `sf.accumulate` is a context manager and a decorator (plain and `async` functions), like `sf.errstate`; `sf.setaccumulate` sets it for the current context and returns the previous mode. Context-local per thread and asyncio task. It only changes `@`, `matmul`, `dot` and `addmm`. [Wide mode →](/arrays/wide-mode)
+
+```python
+with sf.accumulate("wide"):
+    y = a @ b
+sf.getaccumulate()        # 'chain'
+```
+
 ## `sf.config(**kw)`
 
 Runtime options for the device path. A plain call sets them for the thread; as a context manager or decorator they are scoped. Thread and task local.
