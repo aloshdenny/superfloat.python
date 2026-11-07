@@ -22,6 +22,7 @@ from sf import _reference as ref          # noqa: E402
 from sf._format import FORMATS            # noqa: E402
 from spec.ops import (CHANGELOG, EVENTS, GLOBAL_RULES, OPS, PREDICATION, PUBLIC,  # noqa: E402
                       SPEC_VERSION, TYPES)
+from spec import target_v481 as T                                                   # noqa: E402
 
 WIDTHS = (16, 8, 4)
 
@@ -141,6 +142,7 @@ def page_overview() -> str:
          "| `spec/golden/<op>.json` | Conformance vectors per op at sf16, sf8 and sf4 (edge codes and random), from the exact-fraction oracle. Run your lowered op on `in`, compare `out` and the events bit for bit. |",
          "| [IR ops](/compiler/ops) | The same content as readable pages. |",
          "| [Python API map](/compiler/python-api) | Which IR op each public Python function becomes, and where it runs. |",
+         "| [Atreides v4.8.1 target](/compiler/target-v4-8-1) | How every op lowers to the v4.8.1 chip: verdicts, instruction sequences, machine limits, kernel mapping, register rules, cost. |",
          "| [Versioning](/compiler/versioning) | How versions change and the changelog. |", "",
          "## Global rules", ""]
     L += [f"{i}. {_esc(r)}" for i, r in enumerate(GLOBAL_RULES, 1)]
@@ -187,7 +189,10 @@ def page_ops() -> str:
             if o["faults"]:
                 L.append(f"| Faults | {_esc(' '.join(o['faults']))} |")
             L.append(f"| Predication | {o['predication']} |")
-            L.append(f"| v1 hardware | {_esc(o['hw_v1'])} |")
+            L.append(f"| Hardware | {_esc(o['hw_v1'])} |")
+            v = o["v481"]
+            L.append(f"| v4.8.1 | **{v['verdict']}**: {_esc(v['lowering'])} |")
+            L.append(f"| v4.8.1 cost | {_esc(v['cost'])} |")
             L.append(f"| MLIR | {_esc(o['mlir']['name'])}; traits: {_esc(', '.join(o['mlir']['traits']) or 'none')} |")
             L.append(f"| From Python | {_esc(', '.join(o['python']))} |")
             if (ROOT / "spec" / "golden" / f"{o['name']}.json").exists() or golden_for(o["name"]) is not None:
@@ -206,6 +211,45 @@ def page_api() -> str:
          "on the host. `trace`: only inside `@sf.jit` / `@sf.kernel`, becomes IR.", "",
          "| Python | Runs | Lowers to | Notes |", "|---|---|---|---|"]
     L += [f"| {_code(n)} | {_esc(p)} | {_esc(t)} | {_esc(x)} |" for n, p, t, x in PUBLIC]
+    L.append("")
+    return "\n".join(L)
+
+
+def page_target() -> str:
+    L = ["---", 'title: "Atreides v4.8.1 target"',
+         'description: "How every SF IR op lowers to the v4.8.1 chip: verdicts, instruction sequences, machine limits, '
+         'how kernels map onto the chip, register rules and cost."', "---", "",
+         f"**Spec version {SPEC_VERSION}.** Generated from `spec/target_v481.py`, written from Alosh's compiler target "
+         "reference `compiler_v4.8.1.md` (checked against the RTL). Each line cites its ISA section. **(suggested)** marks "
+         "a lowering strategy we propose; **(derived)** follows from the encoding but is not stated in the ISA.", "",
+         "## Verdicts at a glance", "",
+         "| Verdict | Meaning |", "|---|---|",
+         "| native | one instruction (plus at most a constant it needs) |",
+         "| expand | a fixed sequence of instructions |",
+         "| limited | lowers only in some cases |",
+         "| host | not on the chip: run it on the host |",
+         "| none | no lowering on v4.8.1: reject it |", ""]
+    for verdict in T.VERDICTS:
+        names = [o["name"] for o in OPS if o["v481"]["verdict"] == verdict]
+        L.append(f"- **{verdict}** ({len(names)}): " + ", ".join(f"[`{n}`](/compiler/ops#{n})" for n in names))
+    L += ["", "Each op's full lowering is on the [IR ops](/compiler/ops) page, in its v4.8.1 row.", "",
+          "## Machine limits", "", "| | v4.8.1 | Source |", "|---|---|---|"]
+    L += [f"| {_esc(a)} | {_esc(b)} | {_esc(c)} |" for a, b, c in T.LIMITS]
+    L += ["", "## How kernels map onto the chip", "",
+          "The DSL's kernels are more general than the chip. This is how each concept lowers, or why it cannot.", "",
+          "| DSL | On v4.8.1 | Source |", "|---|---|---|"]
+    L += [f"| {_esc(a)} | {_esc(b)} | {_esc(c)} |" for a, b, c in T.MAPPING]
+    L += ["", "## Register rules", "", "| Instruction | Rule | Why |", "|---|---|---|"]
+    L += [f"| {_esc(a)} | {_esc(b)} | {_esc(c)} |" for a, b, c in T.REGISTERS]
+    L += ["", "## Cost", "", "Memory dominates: optimise for fewer external loads and stores, hot loops of 32 instructions "
+          "or fewer, and every tile running the same code (ISA s7).", "",
+          "| What | Cost | Basis |", "|---|---|---|"]
+    L += [f"| {_esc(a)} | {_esc(b)} | {_esc(c)} |" for a, b, c in T.COST]
+    L += ["", "## Where the DSL allows more than the chip", ""]
+    L += [f"- {_esc(g)}" for g in T.GAPS]
+    L += ["", "## All ops", "", "| Op | Verdict | Lowering | Cost |", "|---|---|---|---|"]
+    L += [f"| `{o['name']}` | {o['v481']['verdict']} | {_esc(o['v481']['lowering'])} | {_esc(o['v481']['cost'])} |"
+          for o in OPS]
     L.append("")
     return "\n".join(L)
 
@@ -229,6 +273,8 @@ def outputs() -> dict[Path, str]:
     out = {ROOT / "spec" / "ops.json": json.dumps(
         {"spec_version": SPEC_VERSION, "changelog": CHANGELOG, "global_rules": GLOBAL_RULES, "types": TYPES,
          "events": EVENTS, "predication": PREDICATION, "ops": OPS,
+         "target_v481": {"limits": T.LIMITS, "mapping": T.MAPPING, "registers": T.REGISTERS, "cost": T.COST,
+                         "gaps": T.GAPS, "verdicts": T.VERDICTS},
          "python_api": [dict(zip(("python", "runs", "lowers_to", "notes"), p)) for p in PUBLIC]}, indent=1) + "\n"}
     for o in OPS:
         g = golden_for(o["name"])
@@ -239,6 +285,7 @@ def outputs() -> dict[Path, str]:
     out[w / "ops.mdx"] = page_ops()
     out[w / "python-api.mdx"] = page_api()
     out[w / "versioning.mdx"] = page_versioning()
+    out[w / "target-v4-8-1.mdx"] = page_target()
     return out
 
 
