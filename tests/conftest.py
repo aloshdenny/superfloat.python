@@ -40,6 +40,22 @@ _RAISE_ALL = sf.errstate(all="raise")
 _IGNORE_ALL = sf.errstate(all="ignore")
 
 
+class AllOpsMock(sf.MockAtreides):
+    """A test-only target that has every heavy op, divide and square root included.
+
+    The Atreides targets refuse those two, because v4.8.1 has no instruction
+    for them.  The device-path rules for them (div0 and invalid are read off
+    the inputs, exact, before launch) still apply to any target that does have
+    them, so they stay under test here."""
+
+    name = "mock-all-ops"
+    supported_ops = None
+
+
+ALL_OPS = AllOpsMock.name
+sf.register_device(AllOpsMock())
+
+
 def run(fn, *args):
     """Call ``fn(*args)`` with every event set to raise.
 

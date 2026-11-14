@@ -29,10 +29,31 @@ out = y.numpy()              # floats on the host
 
 | Operation | With a device operand |
 |---|---|
-| `+ - * /`, `fma`, `sqrt`, `sum`, `dot`, `@`, `addmm` | heavy: on the device, result has `.status` |
+| `+ - *`, `**`, `fma`, `sum`, `dot`, `@`, `addmm` | heavy: on the device, result has `.status` |
+| `/`, `sqrt` | refused on Atreides, which has no instruction for them (see below) |
 | `maximum`, `minimum`, `clip`, `where`, `cast`, indexing, reshape, comparisons | on the host; no status (they cannot produce an event) |
 
 Two operands on different devices, or one on the host and one on a device, raise `SFTypeError`; move one side with `.to(...)`.
+
+## What Atreides cannot run
+
+**Atreides v4.8.1 has no divide and no square root, so every Atreides target refuses them on device arrays.** Nothing is launched, and the work never moves to the host silently. To divide or take a square root, move the operands to the host yourself:
+
+```python
+a = sf.asarray(np.array([0.25, 0.5]), dtype=sf.sf16, device="atreides")
+b = sf.asarray(np.array([0.5, 0.75]), dtype=sf.sf16, device="atreides")
+
+a / b
+# SFUnsupportedError: sf16 / has no instruction on atreides (supported: abs, add, fma, matmul, matmul_wide, mul, neg, pow, sub, sum); nothing was launched
+
+a.to("host") / b.to("host")
+# sfarray([0.5       , 0.66665649], dtype=sf16)
+```
+
+- This covers `atreides`, `atreides-flags`, `atreides-sim` and `atreides-hw`.
+- A divide by zero or a square root of a negative is still reported as that. Those are read off the inputs before the target is asked.
+- Host arrays are not affected. With `offload_threshold` set, a host `/` or `sqrt` stays on the host, because the default target cannot run it.
+- `**` with an integer exponent still runs on the device. It is a chain of multiplies.
 
 ## Before the launch
 

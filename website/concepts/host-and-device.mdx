@@ -8,7 +8,8 @@ description: "Which operations run where, the rule that nothing reaches the chip
 Every array has a placement: `"host"` or the name of a device. An operation is **light** when all its inputs are on the host, and **heavy** when any input is on a device.
 
 - Light operations run on the host, using the same bit-exact reference the simulator and the mock device use. They go through the error policy and carry no status.
-- Heavy operations (`+ - * /`, `fma`, `sqrt`, `sum`, `dot`, `@`, `addmm`) run on the device and return an array with a `.status`.
+- Heavy operations (`+ - *`, `**`, `fma`, `sum`, `dot`, `@`, `addmm`) run on the device and return an array with a `.status`.
+- `/` and `sqrt` are refused on Atreides, which has no instruction for them. Move the operands to the host with `.to("host")`. See [what Atreides cannot run](/arrays/device#what-atreides-cannot-run).
 - Selection and data movement (`maximum`, `minimum`, `clip`, `where`, `cast`, indexing, reshape) always run on the host, even on device arrays, because they cannot produce an event.
 
 ```python
