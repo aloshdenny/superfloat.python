@@ -465,7 +465,7 @@ def _elementwise(op: str, *xs, **kw):
                            f"{[c.shape for c in codes]}") from None
     total = int(np.prod(shape)) if shape else 1
     opname = _SYM[op]
-    if device == _device.HOST and not _should_offload(total):
+    if device == _device.HOST and not _should_offload(total, op):
         fn = {"abs": vec.abs_, "pow": vec.pow_int}.get(op) or getattr(vec, op)
         result, events = fn(fmt, *codes, **kw)
         _handle_events(events, fmt, opname, total)
@@ -475,9 +475,21 @@ def _elementwise(op: str, *xs, **kw):
                       codes, shape, kw)
 
 
-def _should_offload(total: int) -> bool:
+def _should_offload(total: int, op: str) -> bool:
+    """Whether a host op of this size moves to ``default_device``.
+
+    Offloading is the runtime's own choice, so it only happens when that
+    device can run ``op``.  Otherwise the op stays on the host, which gives
+    the same bits: a host ``a / b`` must never fail because the default
+    target has no divide instruction."""
     t = _config.get("offload_threshold")
-    return t is not None and total > t
+    if t is None or total <= t:
+        return False
+    dev = _device.get_device(_config.get("default_device"))
+    ops = getattr(dev, "supported_ops", None)
+    if ops is not None and op not in ops:
+        return False
+    return op != "matmul_wide" or getattr(dev, "mx", False)
 
 
 _REDUCTIONS = ("sum", "matmul", "matmul_wide")
@@ -622,7 +634,7 @@ def sum_(x, axis=None):
         axis += codes.ndim
     if not (0 <= axis < codes.ndim):
         raise SFShapeError(f"axis {axis} is out of bounds for an array of dimension {codes.ndim}")
-    if x.device == _device.HOST and not _should_offload(codes.size):
+    if x.device == _device.HOST and not _should_offload(codes.size, "sum"):
         result, events = _linalg.sum_codes(fmt, codes, axis)
         _handle_events(events, fmt, "sum", int(np.prod(result.shape)) if result.shape else 1)
         return _result(result, dtype)
@@ -665,7 +677,7 @@ def dot(a, b, *, accumulate=None, shift=None):
         fmt = _widest([a, b])
         ka, kb = _to_codes(a, fmt), _to_codes(b, fmt)
         device = _device_of([a, b])
-        if device == _device.HOST and not _should_offload(ka.size):
+        if device == _device.HOST and not _should_offload(ka.size, "matmul_wide" if mode == "wide" else "matmul"):
             if mode == "wide":
                 k, events = _linalg.matmul_wide_codes(fmt, ka[None, :], kb[:, None], sh)
                 _handle_events(events, fmt, "dot (wide)", 1)
@@ -717,7 +729,8 @@ def matmul(a, b, *, accumulate=None, shift=None):
                            "cannot be broadcast") from None
     out_shape = batch + (ka.shape[-2], kb.shape[-1])
     device = _device_of([a, b])
-    if device == _device.HOST and not _should_offload(int(np.prod(out_shape)) * ka.shape[-1]):
+    if device == _device.HOST and not _should_offload(
+            int(np.prod(out_shape)) * ka.shape[-1], "matmul_wide" if mode == "wide" else "matmul"):
         if mode == "wide":
             result, events = _linalg.matmul_wide_codes(fmt, ka, kb, sh)
             _handle_events(events, fmt, "@ (wide)", int(np.prod(out_shape)))

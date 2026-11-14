@@ -67,7 +67,7 @@ class Device:
 
         An op not in ``supported_ops`` (when that is set) is refused on the
         host with ``SFUnsupportedError`` before ``run`` is called: Atreides
-        v1, for example, has no divide or square-root instruction.
+        v4.8.1, for example, has no divide or square-root instruction.
         """
         raise NotImplementedError
 
@@ -78,7 +78,9 @@ class Device:
 class MockAtreides(Device):
     """Atreides v4.8.1 stand-in: runs the vectorised reference and returns
     codes only, exactly like hardware with no status register.  Has the MX
-    engine, so it runs wide accumulation too."""
+    engine, so it runs wide accumulation too.  Has no divide and no square
+    root, so it refuses those two on device arrays, as the chip would; every
+    Atreides target inherits that."""
 
     name = "atreides"
     supported_bits = (16,)
@@ -87,6 +89,9 @@ class MockAtreides(Device):
     sticky_flags = False
     max_elements = 1 << 28
     mx = True                                # v4.8.1 has the MX engine
+    # v4.8.1 has no SF divide and no square root (ISA s5).  ``pow`` stays: it is a chain of mul.
+    supported_ops = frozenset({"add", "sub", "mul", "fma", "neg", "abs", "pow", "sum",
+                               "matmul", "matmul_wide"})
 
     def __init__(self) -> None:
         self.launches = 0                    # for tests: proves pre-flight skipped a launch
