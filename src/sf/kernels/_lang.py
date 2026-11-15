@@ -252,6 +252,9 @@ def dot(a, b, *, accumulate=None, shift=None) -> Sym:
     mode = _accumulate.resolve(accumulate)
     if mode == "chain" and shift is not None:
         raise ValueError("sf.dot: shift= only applies to accumulate=\"wide\"")
+    if mode == "wide" and shift is not None and not isinstance(shift, (int, np.integer)):
+        raise SFCompileError("sf.dot in a kernel: shift must be one int for the block; "
+                             "a shift per output works on arrays (sf.matmul), not in kernels yet")
     sh = _linalg.check_shift(shift) if mode == "wide" else 0
     bb = builder()
     bits = _sf_bits(a, b)

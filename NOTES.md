@@ -132,6 +132,28 @@ them. Each one is a single place to change if the team decides differently.
   automatically with an override, reported in `SFLayerStatus`; Alosh is
   computing golden values chip-side).
 
+## A shift per output (0.8.0, spec 1.3.0)
+
+* Item 1 of Alosh's build order.  POP takes one shift per token and column
+  (Rs = t << 8 | shift), and the heuristic picks one per output, so a wide
+  matmul now takes `shift` as an int or an int array broadcastable to the
+  result, every element from -32 to 31.
+* `_linalg.check_shift` returns an int or an int64 array (rejects bool,
+  floats, out of range); `_mx_pop` works element by element; `matmul_wide_codes`
+  broadcasts the shift to `(..., M, N)`.
+* `sf.matmul` broadcasts against the result shape the caller sees (1-D
+  operands squeezed), then lays it out as the internal shape.  `sf.dot` and
+  `sf.addmm` go the same way.  Device targets get the array through the same
+  keyword, so the mock and `atreides-sim` match the host bit for bit.
+* Kernels: the IR attribute stays one int per block.  A shift per output in a
+  kernel needs it as a third operand of `dot_wide` (Kartik's side too), so it
+  raises `SFCompileError` for now.
+* Tests: `tests/test_shift_arrays.py`, with the 13 matmul cases of the
+  heuristic section in `sf_golden_v4.9.2.json` (`pop_q` and the saturation
+  masks, 13 of 13).  `final_q` there is after the heuristic's redo at `l2`;
+  that is the `sft` wide-mode work, next.
+* Spec 1.2.0 had no changelog row (missed in 0.7.0); added with 1.3.0.
+
 ## Wide mode on v4.9.2 (0.7.0, spec 1.2.0)
 
 * Alosh's `sf wide mode (MX).md` (2026-11-16) makes v4.9.2 the flagship for

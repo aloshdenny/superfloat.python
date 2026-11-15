@@ -20,9 +20,11 @@ Versioning (see website/compiler/versioning.mdx):
     example a move to the v4.8.1 wide accumulator).
 """
 
-SPEC_VERSION = "1.2.0"
+SPEC_VERSION = "1.3.0"
 
 CHANGELOG = [
+    ("1.3.0", "2026-11-16", "dot_wide's shift can be one per output: sf.matmul / sf.dot / sf.addmm (accumulate=\"wide\") take an int or an int array broadcastable to the result shape, every element from -32 to 31. This is what POP does: one Rs per token and column. In kernels and the IR the attribute stays one int per block for now. DSL 0.8.0. Checked against the 13 matmul cases of the heuristic section in sf_golden_v4.9.2.json."),
+    ("1.2.0", "2026-11-15", "dot_wide models the chip's MX version; Atreides v4.9.2 (32-bit MX accumulators: SF16 Q10.22, products keep columns 6 and up, +80; SF8 Q18.14) is the default, v4.8.1 stays selectable. Golden vectors for dot_wide are v4.9.2's (240 cases). DSL 0.7.0."),
     ("1.1.1", "2026-11-07", "Adds the Atreides v4.8.1 target guide from the ISA doc: a verdict for every op (native, expand, limited, host, none) with its exact instruction sequence and cost, the machine limits, how kernel concepts map onto the chip, register constraints, the cost model and the known gaps. No op changes behaviour."),
     ("1.1.0", "2026-11-07", "Adds dot_wide: matmul on the v4.8.1 MX engine (wide accumulator, one rounding at POP with a power-of-two shift), from sf.dot(..., accumulate=\"wide\") and a @ b under sf.accumulate(\"wide\"). DSL 0.5.0. Golden vectors for dot_wide come from the chip repo's mxref.py. The dot entry now says v4.8.1 runs the chain as FMA instructions (MX replaced v1's systolic array)."),
     ("1.0.3", "2026-11-06", "Corrects 1.0.2 against the v4.8.1 ISA doc (compiler_v4.8.1.md): the chip has no sign-magnitude compare, max or min instructions. CMP is a signed 16-bit integer compare; compare, max, min, neg and abs are now given as the ISA section 5 sequences built from ACT, ADD and CMP. widen and narrow have no instruction. Op semantics unchanged."),
@@ -288,8 +290,10 @@ OPS = [
        notes=["sf.addmm(a, b, d) is NOT dot with the accumulator starting at d. It is the dot chain from 0, then ONE "
               "saturating add of d: add(dot(a, b), d). The two differ when a partial sum saturates."]),
 
-    _e(name="dot_wide", version="1.2", category="contraction", signature="%r:sfN[m,n] = dot_wide %a, %b {shift}",
-       operands=["a: sfN[m, k]", "b: sfN[k, n]"], attrs={"shift": "int from -32 to 31: the result is the total times 2^shift (POP's s)"},
+    _e(name="dot_wide", version="1.3", category="contraction", signature="%r:sfN[m,n] = dot_wide %a, %b {shift}",
+       operands=["a: sfN[m, k]", "b: sfN[k, n]"], attrs={"shift": "int from -32 to 31: the result is the total times 2^shift (POP's s). On arrays (sf.matmul) it can "
+                 "also be an int array broadcastable to the result (..., m, n): one shift per output, as POP takes one Rs per "
+                 "token and column. In the IR it is one int per block for now"},
        result="sfN", shape="(m, n)",
        semantics="The MX engine of the target chip; v4.9.2 is the default. Block: sf9..sf16 use the SF16 block, "
                  "sf4..sf8 the SF8 block. Units: v4.9.2 SF16 W = 32 bits, F = 22 fraction bits (Q10.22, about +-512), "

@@ -670,7 +670,24 @@ def _mode_and_shift(accumulate, shift, name):
             raise ValueError(f"sf.{name}: shift= only applies to accumulate=\"wide\" "
                              f"(this call accumulates as {mode!r})")
         return mode, 0
-    return mode, _linalg.check_shift(shift)
+    try:
+        return mode, _linalg.check_shift(shift)
+    except (TypeError, ValueError) as e:
+        raise type(e)(f"sf.{name}: {e}") from None
+
+
+def _shift_for(sh, shape, inner_shape, name):
+    """Broadcast an array shift to the result ``shape`` the caller sees, then
+    lay it out as ``inner_shape`` (the same outputs with 1-D operands still
+    unsqueezed).  An int passes through."""
+    if isinstance(sh, int):
+        return sh
+    try:
+        full = np.broadcast_to(sh, shape)
+    except ValueError:
+        raise SFShapeError(f"sf.{name}: shift of shape {sh.shape} does not broadcast to the "
+                           f"result shape {tuple(shape)}") from None
+    return np.ascontiguousarray(full).reshape(inner_shape)
 
 
 def dot(a, b, *, accumulate=None, shift=None):
@@ -685,6 +702,7 @@ def dot(a, b, *, accumulate=None, shift=None):
     if a.ndim == 1 and b.ndim == 1:
         if a.shape != b.shape:
             raise SFShapeError(f"sf.dot: shapes {a.shape} and {b.shape} differ")
+        sh = _shift_for(sh, (), (1, 1), "dot")
         fmt = _widest([a, b])
         ka, kb = _to_codes(a, fmt), _to_codes(b, fmt)
         device = _device_of([a, b])
@@ -712,7 +730,9 @@ def matmul(a, b, *, accumulate=None, shift=None):
 
     ``accumulate="chain"`` (default): per output a chain of fma.
     ``accumulate="wide"``: the MX engine (accumulator range +-512 on v4.9.2, one
-    rounding at ``2^shift``, ``shift`` from -32 to 31).  ``@`` uses the
+    rounding at ``2^shift``, ``shift`` from -32 to 31).  ``shift`` is an int,
+    or an int array broadcastable to the result shape: one shift per output,
+    e.g. shape ``(M, 1)`` per token or ``(N,)`` per column.  ``@`` uses the
     ``sf.accumulate`` setting.  Shape errors are raised on the host before
     any launch."""
     mode, sh = _mode_and_shift(accumulate, shift, "matmul")
@@ -739,6 +759,8 @@ def matmul(a, b, *, accumulate=None, shift=None):
         raise SFShapeError(f"matmul: batch shapes {ka.shape[:-2]} and {kb.shape[:-2]} "
                            "cannot be broadcast") from None
     out_shape = batch + (ka.shape[-2], kb.shape[-1])
+    seen = out_shape[:-2] + (() if squeeze_row else out_shape[-2:-1]) + (() if squeeze_col else out_shape[-1:])
+    sh = _shift_for(sh, seen, out_shape, "matmul")
     device = _device_of([a, b])
     if device == _device.HOST and not _should_offload(
             int(np.prod(out_shape)) * ka.shape[-1], "matmul_wide" if mode == "wide" else "matmul"):

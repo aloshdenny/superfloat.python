@@ -194,40 +194,72 @@ def _mx_products16(am: np.ndarray, wm: np.ndarray, unit: dict | None = None) -> 
     return rs >> (30 - unit["F"])
 
 
-def _mx_pop(fmt: SFFormat, acc: np.ndarray, shift: int, frac: int):
+def _mx_pop(fmt: SFFormat, acc: np.ndarray, shift, frac: int):
     """sfN codes of acc * 2^(shift - frac), rounded half to even and saturated.
-    Returns (codes, overflow mask, underflow mask)."""
+    ``shift`` is an int or an int array broadcastable to ``acc`` (one per
+    output, as POP takes one per column).  Returns (codes, overflow mask,
+    underflow mask)."""
     M = fmt.max_code
-    e = shift - frac + fmt.bits - 1          # exponent from accumulator units to output codes
+    e = np.asarray(shift, dtype=np.int64) - frac + fmt.bits - 1   # accumulator units to output codes
     mag = np.abs(acc)
-    if e >= 0:
-        q = mag << e
-    else:
-        d = -e
-        fl = mag >> d
-        rem = mag - (fl << d)
-        half = np.int64(1) << (d - 1)
-        q = fl + ((rem > half) | ((rem == half) & ((fl & 1) == 1)))
+    e = np.broadcast_to(e, mag.shape)
+    up = mag << np.maximum(e, 0)                          # e >= 0: exact
+    d = np.maximum(-e, 1)                                 # e < 0: round half to even
+    fl = mag >> d
+    rem = mag - (fl << d)
+    half = np.int64(1) << (d - 1)
+    down = fl + ((rem > half) | ((rem == half) & ((fl & 1) == 1)))
+    q = np.where(e >= 0, up, down)
     over = q > M
     q = np.minimum(q, M)
     under = (acc != 0) & (q == 0)
     return np.where(acc < 0, -q, q), over, under
 
 
-def check_shift(shift) -> int:
+def check_shift(shift, *, allow_array: bool = True):
+    """Validate POP's shift: an int, or (``allow_array``) an array of ints with
+    one shift per output, as POP takes one per column.  Returns an int, or an
+    int64 array; a 0-d array becomes an int."""
     if shift is None:
         return 0
-    if isinstance(shift, bool) or not isinstance(shift, (int, np.integer)):
-        raise TypeError(f"shift must be an int, got {type(shift).__name__}")
-    if not SHIFT_MIN <= int(shift) <= SHIFT_MAX:
-        raise ValueError(f"shift must be between {SHIFT_MIN} and {SHIFT_MAX}, got {shift}")
-    return int(shift)
+    if isinstance(shift, bool):
+        raise TypeError("shift must be an int or an array of ints, got bool")
+    if isinstance(shift, (int, np.integer)):
+        if not SHIFT_MIN <= int(shift) <= SHIFT_MAX:
+            raise ValueError(f"shift must be between {SHIFT_MIN} and {SHIFT_MAX}, got {shift}")
+        return int(shift)
+    if not allow_array:
+        raise TypeError(f"shift must be an int here, got {type(shift).__name__}")
+    try:
+        arr = np.asarray(shift)
+    except Exception:
+        raise TypeError(f"shift must be an int or an array of ints, got {type(shift).__name__}") from None
+    if arr.dtype == bool or not np.issubdtype(arr.dtype, np.integer):
+        raise TypeError(f"shift must be an int or an array of ints, got an array of {arr.dtype}")
+    if arr.size and (arr.min() < SHIFT_MIN or arr.max() > SHIFT_MAX):
+        raise ValueError(f"every shift must be between {SHIFT_MIN} and {SHIFT_MAX}, "
+                         f"got {int(arr.min())} to {int(arr.max())}")
+    arr = arr.astype(np.int64)
+    return int(arr) if arr.ndim == 0 else arr
 
 
-def matmul_wide_codes(fmt: SFFormat, a: np.ndarray, b: np.ndarray, shift: int = 0, mx=None):
+def broadcast_shift(shift, shape: tuple, where: str = "the output"):
+    """``shift`` as checked by ``check_shift``, broadcast to ``shape``; an int stays an int."""
+    if isinstance(shift, int):
+        return shift
+    try:
+        return np.broadcast_to(shift, shape)
+    except ValueError:
+        raise ValueError(f"shift of shape {tuple(np.shape(shift))} does not broadcast to {where} "
+                         f"shape {tuple(shape)}") from None
+
+
+def matmul_wide_codes(fmt: SFFormat, a: np.ndarray, b: np.ndarray, shift=0, mx=None):
     """(..., M, K) @ (..., K, N) on the MX engine, batched like ``matmul_codes``.
 
-    ``mx`` names the chip's MX version (default ``MX_DEFAULT``).  Returns
+    ``shift`` is POP's shift: an int, or an int array broadcastable to the
+    output (..., M, N), one per token and column.  ``mx`` names the chip's MX
+    version (default ``MX_DEFAULT``).  Returns
     ``(codes, events)``: ``overflow`` marks outputs whose accumulator
     saturated at its limit (+-512 on v4.9.2's SF16 block, +-32 on v4.8.1) or
     whose POP saturated at +-max; ``underflow`` marks outputs whose nonzero
@@ -238,6 +270,7 @@ def matmul_wide_codes(fmt: SFFormat, a: np.ndarray, b: np.ndarray, shift: int = 
     K = a.shape[-1]
     batch = np.broadcast_shapes(a.shape[:-2], b.shape[:-2])
     out_shape = batch + (a.shape[-2], b.shape[-1])
+    shift = broadcast_shift(shift, out_shape)
     blk = mx_block(fmt)
     unit = mx_units(mx)[blk]
     W, F = unit["W"], unit["F"]
