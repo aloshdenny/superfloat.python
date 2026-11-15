@@ -475,6 +475,14 @@ def _elementwise(op: str, *xs, **kw):
                       codes, shape, kw)
 
 
+def _host_mx() -> str:
+    """The MX version host arrays compute with: the default device's, so a
+    host result has the same bits whether or not it is offloaded; the default
+    chip when that device has no MX engine."""
+    dev = _device.get_device(_config.get("default_device"))
+    return _linalg.mx_version(getattr(dev, "mx", False)) or _linalg.MX_DEFAULT
+
+
 def _should_offload(total: int, op: str) -> bool:
     """Whether a host op of this size moves to ``default_device``.
 
@@ -516,6 +524,8 @@ def _no_underflow_possible(op, fmt, codes) -> bool:
 
 def _run_heavy(op, fmt, dtype, device, codes, out_shape, kw):
     dev = _device.get_device(device)
+    if op == "matmul_wide" and getattr(dev, "mx", False):
+        kw = {**kw, "mx": _linalg.mx_version(dev.mx)}   # the target's engine, for the launch and the host replay
     dev.check(fmt, max(int(np.prod(out_shape)) if out_shape else 1,
                        *(c.size for c in codes)))
     verdict = _preflight.check(op, fmt, *codes, **kw)
@@ -534,7 +544,7 @@ def _run_heavy(op, fmt, dtype, device, codes, out_shape, kw):
                                  f"(supported: {', '.join(sorted(ops))}); nothing was launched")
     if op == "matmul_wide" and not getattr(dev, "mx", False):
         raise SFUnsupportedError(f"{fmt.name} {opname}: wide accumulation needs the MX engine "
-                                 f"(Atreides v4.8.1) and {dev.name} has none; use "
+                                 f"(Atreides v4.8.1 or later) and {dev.name} has none; use "
                                  f"accumulate=\"chain\" or a target with MX. Nothing was launched")
     kw = {k: v for k, v in kw.items() if k != "live"}        # the gate's mask never reaches a kernel
     result, flags = dev.run(op, fmt, *codes, **kw)
@@ -559,9 +569,10 @@ def _run_heavy(op, fmt, dtype, device, codes, out_shape, kw):
         saturated, exact = 0, True                         # proved on the host; no scan needed
         underflow = None if can_under else 0
     elif op == "matmul_wide":
-        # the accumulator clips only at +-32: if the host proves it cannot, every
-        # saturation shows at the output as +-max, so the scan is an upper bound
-        saturated = at_max if _linalg.matmul_wide_acc_safe(fmt, codes[0], codes[1]) else None
+        # the accumulator clips only at its limit (+-512 on v4.9.2, +-32 on v4.8.1): if the
+        # host proves it cannot, every saturation shows at the output as +-max, so the scan
+        # is an upper bound
+        saturated = at_max if _linalg.matmul_wide_acc_safe(fmt, codes[0], codes[1], kw.get("mx")) else None
         exact, underflow = False, None                     # a nonzero total rounding to 0 is unseen
     elif op in _REDUCTIONS:
         saturated, exact = None, False                     # a partial sum can saturate and come back
@@ -679,7 +690,7 @@ def dot(a, b, *, accumulate=None, shift=None):
         device = _device_of([a, b])
         if device == _device.HOST and not _should_offload(ka.size, "matmul_wide" if mode == "wide" else "matmul"):
             if mode == "wide":
-                k, events = _linalg.matmul_wide_codes(fmt, ka[None, :], kb[:, None], sh)
+                k, events = _linalg.matmul_wide_codes(fmt, ka[None, :], kb[:, None], sh, _host_mx())
                 _handle_events(events, fmt, "dot (wide)", 1)
                 return _dtype_of(fmt).from_code(int(k.reshape(())))
             k, events = _linalg.dot_codes(fmt, ka, kb)
@@ -700,7 +711,7 @@ def matmul(a, b, *, accumulate=None, shift=None):
     """``a @ b`` with NumPy's rules for 1-D operands and batching.
 
     ``accumulate="chain"`` (default): per output a chain of fma.
-    ``accumulate="wide"``: the MX engine (accumulator range +-32, one
+    ``accumulate="wide"``: the MX engine (accumulator range +-512 on v4.9.2, one
     rounding at ``2^shift``, ``shift`` from -32 to 31).  ``@`` uses the
     ``sf.accumulate`` setting.  Shape errors are raised on the host before
     any launch."""
@@ -732,7 +743,7 @@ def matmul(a, b, *, accumulate=None, shift=None):
     if device == _device.HOST and not _should_offload(
             int(np.prod(out_shape)) * ka.shape[-1], "matmul_wide" if mode == "wide" else "matmul"):
         if mode == "wide":
-            result, events = _linalg.matmul_wide_codes(fmt, ka, kb, sh)
+            result, events = _linalg.matmul_wide_codes(fmt, ka, kb, sh, _host_mx())
             _handle_events(events, fmt, "@ (wide)", int(np.prod(out_shape)))
         else:
             result, events = _linalg.matmul_codes(fmt, ka, kb)

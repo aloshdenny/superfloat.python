@@ -37,7 +37,7 @@ Two operands on different devices, or one on the host and one on a device, raise
 
 ## What Atreides cannot run
 
-**Atreides v4.8.1 has no divide and no square root, so every Atreides target refuses them on device arrays.** Nothing is launched, and the work never moves to the host silently. To divide or take a square root, move the operands to the host yourself:
+**Atreides (v4.8.1 and v4.9.2) has no divide and no square root, so every Atreides target refuses them on device arrays.** Nothing is launched, and the work never moves to the host silently. To divide or take a square root, move the operands to the host yourself:
 
 ```python
 a = sf.asarray(np.array([0.25, 0.5]), dtype=sf.sf16, device="atreides")
@@ -105,4 +105,4 @@ with sf.config(offload_threshold=1_000_000):
 sf.devices()     # ('host', 'atreides', 'atreides-flags', 'atreides-sim', 'atreides-hw')
 ```
 
-`atreides` models the Atreides v4.8.1 chip (no flags), including the MX engine for [wide mode](/arrays/wide-mode). `atreides-flags` reports sticky flags, so statuses are exact and `over="raise"` works for heavy ops. `atreides-sim` is the kernel simulator, which also runs the built-ins. `atreides-hw` waits for the real driver. [Devices reference →](/reference/devices)
+`atreides` models the Atreides v4.9.2 chip (no flags), including the MX engine for [wide mode](/arrays/wide-mode). `atreides-flags` reports sticky flags, so statuses are exact and `over="raise"` works for heavy ops. `atreides-sim` is the kernel simulator, which also runs the built-ins. `atreides-hw` waits for the real driver. [Devices reference →](/reference/devices)

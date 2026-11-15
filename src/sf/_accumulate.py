@@ -3,8 +3,8 @@ sf.setaccumulate, sf.getaccumulate.
 
 * ``"chain"`` (default): a chain of fma on the FMA units.  Every product is
   truncated and every partial sum saturates at +-1, at data width.
-* ``"wide"``: the v4.8.1 MX engine.  Products go into a wide accumulator
-  (range +-32) and the total is rounded once, half to even, scaled by
+* ``"wide"``: the MX engine.  Products go into a wide accumulator
+  (range +-512 on v4.9.2, +-32 on v4.8.1) and the total is rounded once, half to even, scaled by
   ``2^shift`` (see ``_linalg.matmul_wide_codes``).
 
 Only ``@``, ``matmul``, ``dot`` and ``addmm`` read this setting.  Elementwise

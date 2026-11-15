@@ -109,26 +109,66 @@ def matmul_bound_safe(fmt: SFFormat, a: np.ndarray, b: np.ndarray) -> bool:
     return matmul_bound(fmt, a, b) <= fmt.max_code
 
 
-# --- wide accumulation: the v4.8.1 MX engine ------------------------------------------------
+# --- wide accumulation: the MX engine --------------------------------------------------------
 #
-# Written from the units' definitions in the chip repo (superfloat.gpu, branch
-# v4.8.1-openframe, test/v4/mxref.py and compiler_v4.8.1.md section 3.4) and
-# checked bit for bit against mxref.Engine (tests/test_wide_mode.py).
+# Written from the units' definitions in the chip repo (superfloat.gpu,
+# test/v4/mxref.py, and section 3.4 of compiler_v4.8.1.md and
+# compiler_v4.9.2.md) and checked bit for bit against mxref.Engine on both
+# chips (tests/test_wide_mode.py).
 #
 # * Operands are sfN codes left-aligned in 16-bit sign-magnitude words.
 #   sf9..sf16 run on the SF16 block, sf4..sf8 on the SF8 block, which reads
 #   only each word's top byte.
-# * SF16 block: each product is |a||w| with its partial-product bits below
-#   column 9 dropped, plus 1024, cut to 19 fraction bits (not v1's exact
+# * SF16 block: each product is |a||w| with its low partial-product columns
+#   dropped, plus a constant, cut to F fraction bits (not v1's exact
 #   truncation).  SF8 block: exact products, 14 fraction bits.
 # * K runs in chunks of 8 (one MAC).  A chunk's 8 products are summed exactly
-#   and added to a W-bit two's-complement accumulator (Q6.19 = 25 bits, or
-#   Q6.14 = 20 bits) that saturates near +-32 once per chunk.
+#   and added to a W-bit two's-complement accumulator that saturates once per
+#   chunk.
 # * POP: the total times 2^shift is rounded once to sfN, half to even, and
 #   saturated at +-(2^(N-1) - 1); never -0.
+#
+# The two chips differ only in the units' numbers:
+#
+#            SF16 block                                   SF8 block
+#   v4.9.2   Q10.22, 32 bits, +-512; columns below 6      Q18.14, 32 bits, +-131,072
+#            dropped, +80
+#   v4.8.1   Q6.19, 25 bits, +-32; columns below 9        Q6.14, 20 bits, +-32
+#            dropped, +1024
+#
+# ``tk`` is the first partial-product column kept and ``comp`` the constant
+# added, as in mxref.UNITS; both are None on the exact SF8 block.
 
-MX_UNITS = {16: {"W": 25, "F": 19}, 8: {"W": 20, "F": 14}}
+MX_TARGETS = {
+    "v4.9.2": {16: {"W": 32, "F": 22, "tk": 6, "comp": 80}, 8: {"W": 32, "F": 14, "tk": None, "comp": None}},
+    "v4.8.1": {16: {"W": 25, "F": 19, "tk": 9, "comp": 1024}, 8: {"W": 20, "F": 14, "tk": None, "comp": None}},
+}
+MX_DEFAULT = "v4.9.2"
+MX_UNITS = MX_TARGETS[MX_DEFAULT]            # the default chip's units
 SHIFT_MIN, SHIFT_MAX = -32, 31
+
+
+def mx_version(mx) -> str | None:
+    """Normalise a target's ``mx`` attribute: a version name, ``True`` (the
+    default chip) or a false value (no MX engine)."""
+    if not mx:
+        return None
+    if mx is True:
+        return MX_DEFAULT
+    if mx not in MX_TARGETS:
+        raise ValueError(f"unknown MX version {mx!r}; expected one of {tuple(MX_TARGETS)}")
+    return mx
+
+
+def mx_units(mx=None) -> dict:
+    """The accumulator units of an MX version (default: ``MX_DEFAULT``)."""
+    return MX_TARGETS[mx_version(mx) or MX_DEFAULT]
+
+
+def mx_limit(fmt: SFFormat, mx=None) -> int:
+    """The real value the wide total saturates near: 2^(W - F - 1)."""
+    u = mx_units(mx)[mx_block(fmt)]
+    return 1 << (u["W"] - u["F"] - 1)
 
 
 def mx_block(fmt: SFFormat) -> int:
@@ -143,14 +183,15 @@ def _mx_mags(fmt: SFFormat, codes: np.ndarray, blk: int) -> np.ndarray:
     return mag >> 8 if blk == 8 else mag
 
 
-def _mx_products16(am: np.ndarray, wm: np.ndarray) -> np.ndarray:
-    """SF16-block product magnitudes, in 19 fraction bits (see mxref.product)."""
-    keep = ~np.int64((1 << 9) - 1)
-    rs = np.full(np.broadcast_shapes(am.shape, wm.shape), 1024, dtype=np.int64)
+def _mx_products16(am: np.ndarray, wm: np.ndarray, unit: dict | None = None) -> np.ndarray:
+    """SF16-block product magnitudes, in the unit's fraction bits (see mxref.product)."""
+    unit = unit or MX_UNITS[16]
+    keep = ~np.int64((1 << unit["tk"]) - 1)
+    rs = np.full(np.broadcast_shapes(am.shape, wm.shape), unit["comp"], dtype=np.int64)
     for i in range(15):
         rs += ((am >> i) & 1) * ((wm << i) & keep)
     rs &= (1 << 30) - 1
-    return rs >> 11
+    return rs >> (30 - unit["F"])
 
 
 def _mx_pop(fmt: SFFormat, acc: np.ndarray, shift: int, frac: int):
@@ -183,12 +224,14 @@ def check_shift(shift) -> int:
     return int(shift)
 
 
-def matmul_wide_codes(fmt: SFFormat, a: np.ndarray, b: np.ndarray, shift: int = 0):
+def matmul_wide_codes(fmt: SFFormat, a: np.ndarray, b: np.ndarray, shift: int = 0, mx=None):
     """(..., M, K) @ (..., K, N) on the MX engine, batched like ``matmul_codes``.
 
-    Returns ``(codes, events)``: ``overflow`` marks outputs whose accumulator
-    saturated at +-32 or whose POP saturated at +-max; ``underflow`` marks
-    outputs whose nonzero total rounded to 0.
+    ``mx`` names the chip's MX version (default ``MX_DEFAULT``).  Returns
+    ``(codes, events)``: ``overflow`` marks outputs whose accumulator
+    saturated at its limit (+-512 on v4.9.2's SF16 block, +-32 on v4.8.1) or
+    whose POP saturated at +-max; ``underflow`` marks outputs whose nonzero
+    total rounded to 0.
     """
     shift = check_shift(shift)
     a, b = np.asarray(a, dtype=np.int64), np.asarray(b, dtype=np.int64)
@@ -196,7 +239,8 @@ def matmul_wide_codes(fmt: SFFormat, a: np.ndarray, b: np.ndarray, shift: int = 
     batch = np.broadcast_shapes(a.shape[:-2], b.shape[:-2])
     out_shape = batch + (a.shape[-2], b.shape[-1])
     blk = mx_block(fmt)
-    W, F = MX_UNITS[blk]["W"], MX_UNITS[blk]["F"]
+    unit = mx_units(mx)[blk]
+    W, F = unit["W"], unit["F"]
     lo, hi = -(1 << (W - 1)), (1 << (W - 1)) - 1
     am, bm = _mx_mags(fmt, a, blk), _mx_mags(fmt, b, blk)
     an, bn = a < 0, b < 0
@@ -205,7 +249,7 @@ def matmul_wide_codes(fmt: SFFormat, a: np.ndarray, b: np.ndarray, shift: int = 
     for k0 in range(0, K, 8):
         ca = am[..., :, k0:k0 + 8][..., :, :, None]          # (..., M, c, 1)
         cb = bm[..., k0:k0 + 8, :][..., None, :, :]          # (..., 1, c, N)
-        t = _mx_products16(ca, cb) if blk == 16 else ca * cb
+        t = _mx_products16(ca, cb, unit) if blk == 16 else ca * cb
         neg = an[..., :, k0:k0 + 8][..., :, :, None] ^ bn[..., k0:k0 + 8, :][..., None, :, :]
         s = acc + np.where(neg, -t, t).sum(axis=-2)
         clipped |= (s < lo) | (s > hi)
@@ -214,12 +258,13 @@ def matmul_wide_codes(fmt: SFFormat, a: np.ndarray, b: np.ndarray, shift: int = 
     return codes, {"overflow": clipped | over, "underflow": under}
 
 
-def matmul_wide_acc_safe(fmt: SFFormat, a: np.ndarray, b: np.ndarray) -> bool:
-    """Pre-flight proof that no accumulator of ``a @ b`` can reach +-32.
+def matmul_wide_acc_safe(fmt: SFFormat, a: np.ndarray, b: np.ndarray, mx=None) -> bool:
+    """Pre-flight proof that no accumulator of ``a @ b`` can reach the unit's
+    limit (+-512 on v4.9.2's SF16 block, +-32 on v4.8.1).
 
-    Each SF16-block product term is at most |a||w| / 2^11 + 1 (dropped bits
-    only lower it; the +1024 adds under one unit), and an SF8 term is exact,
-    so the L1 relaxation of ``matmul_bound`` bounds every partial total."""
+    Each SF16-block product term is at most |a||w| / 2^(30 - F) + 1 (dropped
+    bits only lower it; the constant adds under one unit), and an SF8 term is
+    exact, so the L1 relaxation of ``matmul_bound`` bounds every partial total."""
     a, b = np.asarray(a, dtype=np.int64), np.asarray(b, dtype=np.int64)
     if a.size == 0 or b.size == 0 or a.shape[-1] == 0:
         return True
@@ -228,6 +273,7 @@ def matmul_wide_acc_safe(fmt: SFFormat, a: np.ndarray, b: np.ndarray) -> bool:
     row_l1 = int(am.sum(axis=-1).max())
     col_l1 = int(bm.sum(axis=-2).max())
     l1 = min(row_l1 * int(bm.max()), int(am.max()) * col_l1)
-    W = MX_UNITS[blk]["W"]
-    bound = l1 // (1 << 11) + a.shape[-1] if blk == 16 else l1
+    unit = mx_units(mx)[blk]
+    W = unit["W"]
+    bound = l1 // (1 << (30 - unit["F"])) + a.shape[-1] if blk == 16 else l1
     return bound <= (1 << (W - 1)) - 1

@@ -1,9 +1,13 @@
-"""Wide accumulation (the v4.8.1 MX engine): accumulate="wide", shift=.
+"""Wide accumulation (the MX engine): accumulate="wide", shift=.
 
-The bit-exact source is Alosh's reference model, superfloat.gpu branch
-v4.8.1-openframe test/v4/mxref.py.  CI cannot fetch that repo, so
-tests/data/mx_golden.json holds outputs computed by mxref.Engine itself (not
-by sf); the file records the sha256 of the mxref.py it came from.
+The bit-exact source is Alosh's reference model, superfloat.gpu
+test/v4/mxref.py.  CI cannot fetch that repo, so the outputs are checked in,
+computed by mxref.Engine itself (not by sf):
+
+* tests/data/mx_golden.json: v4.9.2, the default chip (32-bit accumulators),
+  the ``mx`` section of tests/data/sf_golden_v4.9.2.json;
+* tests/data/mx_golden_v4.8.1.json: the signed-off v4.8.1 chip (Q6.19, +-32),
+  the same 240 inputs.
 """
 import asyncio
 import json
@@ -18,7 +22,10 @@ import sf
 from sf import _device, _linalg
 from sf._format import FORMATS
 
-GOLDEN = json.loads((Path(__file__).parent / "data" / "mx_golden.json").read_text())
+DATA = Path(__file__).parent / "data"
+GOLDEN = json.loads((DATA / "mx_golden.json").read_text())
+GOLDEN_V481 = json.loads((DATA / "mx_golden_v4.8.1.json").read_text())
+FULL_V492 = json.loads((DATA / "sf_golden_v4.9.2.json").read_text())
 
 
 @pytest.fixture(autouse=True)
@@ -32,22 +39,72 @@ def _quiet_underflow():
 
 @pytest.mark.parametrize("i", range(len(GOLDEN["cases"])))
 def test_model_matches_mxref(i):
+    """v4.9.2, the default: no mx argument."""
     c = GOLDEN["cases"][i]
     codes, _ = _linalg.matmul_wide_codes(FORMATS[c["bits"]], np.array(c["a"]), np.array(c["b"]),
                                          c["shift"])
     assert codes.tolist() == c["out"]
 
 
-def test_golden_covers_every_block_and_extreme():
-    cs = GOLDEN["cases"]
+@pytest.mark.parametrize("i", range(len(GOLDEN_V481["cases"])))
+def test_model_matches_mxref_v481(i):
+    c = GOLDEN_V481["cases"][i]
+    codes, _ = _linalg.matmul_wide_codes(FORMATS[c["bits"]], np.array(c["a"]), np.array(c["b"]),
+                                         c["shift"], mx="v4.8.1")
+    assert codes.tolist() == c["out"]
+
+
+def test_the_golden_files():
+    assert GOLDEN["target"] == "v4.9.2" and GOLDEN_V481["target"] == "v4.8.1"
+    assert GOLDEN["cases"] == FULL_V492["mx"]["cases"]         # the mx section, unchanged
+    same_inputs = all(x["a"] == y["a"] and x["b"] == y["b"] and x["shift"] == y["shift"]
+                      for x, y in zip(GOLDEN["cases"], GOLDEN_V481["cases"]))
+    assert same_inputs and len(GOLDEN["cases"]) == len(GOLDEN_V481["cases"]) == 240
+    # the chips differ only near +-32 and in the SF16 product cut: 8 of the 240 cases
+    differ = sum(x["out"] != y["out"] for x, y in zip(GOLDEN["cases"], GOLDEN_V481["cases"]))
+    assert differ == 8
+
+
+def test_units_per_chip():
+    u, v = _linalg.MX_TARGETS["v4.9.2"], _linalg.MX_TARGETS["v4.8.1"]
+    assert (u[16]["W"], u[16]["F"], u[8]["W"], u[8]["F"]) == (32, 22, 32, 14)        # Q10.22, Q18.14
+    assert (v[16]["W"], v[16]["F"], v[8]["W"], v[8]["F"]) == (25, 19, 20, 14)        # Q6.19, Q6.14
+    assert _linalg.MX_DEFAULT == "v4.9.2" and _linalg.MX_UNITS is u
+    assert _linalg.mx_limit(FORMATS[16]) == 512 and _linalg.mx_limit(FORMATS[8]) == 131072
+    assert _linalg.mx_limit(FORMATS[16], "v4.8.1") == 32 == _linalg.mx_limit(FORMATS[8], "v4.8.1")
+    assert _linalg.mx_version(True) == "v4.9.2" and _linalg.mx_version(False) is None
+    with pytest.raises(ValueError, match="unknown MX version"):
+        _linalg.mx_version("v5")
+
+
+@pytest.mark.parametrize("mx,golden", [("v4.9.2", GOLDEN), ("v4.8.1", GOLDEN_V481)])
+def test_golden_covers_every_block_and_extreme(mx, golden):
+    cs = golden["cases"]
     assert {c["bits"] for c in cs} >= {16, 12, 9, 8, 6, 4}
     assert {-32, 31} <= {c["shift"] for c in cs}
     clipped = 0
     for c in cs:
         _, ev = _linalg.matmul_wide_codes(FORMATS[c["bits"]], np.array(c["a"]), np.array(c["b"]),
-                                          c["shift"])
+                                          c["shift"], mx)
         clipped += int(ev["overflow"].sum())
-    assert clipped > 0                    # saturation paths are exercised
+    assert clipped > 0                    # saturation paths (POP at +-max, or the accumulator) are exercised
+
+
+def test_accumulator_limit_per_chip():
+    """80 terms of 0.99: a total of about 78 clips v4.8.1's +-32 accumulator,
+    not v4.9.2's +-512; 600 terms (about 594) clip both."""
+    f = FORMATS[16]
+    a = np.full((1, 80), 32440)                   # 0.99 in sf16 codes
+    b = np.full((80, 1), 32440)
+    r92, e92 = _linalg.matmul_wide_codes(f, a, b, -7)
+    r81, e81 = _linalg.matmul_wide_codes(f, a, b, -7, mx="v4.8.1")
+    assert not e92["overflow"].any() and r92[0, 0] * 2 ** -15 * 2 ** 7 == pytest.approx(78.4, abs=0.1)
+    assert e81["overflow"].all() and r81[0, 0] * 2 ** -15 * 2 ** 7 == pytest.approx(32, abs=2 ** -7)
+    a, b = np.full((1, 600), 32440), np.full((600, 1), 32440)
+    r, e = _linalg.matmul_wide_codes(f, a, b, -10)
+    assert e["overflow"].all() and r[0, 0] * 2 ** -15 * 2 ** 10 == pytest.approx(512, abs=2 ** -4)
+    assert _linalg.matmul_wide_acc_safe(f, np.full((1, 80), 32440), np.full((80, 1), 32440))
+    assert not _linalg.matmul_wide_acc_safe(f, np.full((1, 80), 32440), np.full((80, 1), 32440), "v4.8.1")
 
 
 # --- Alosh's examples (sf wide mode (MX).md) ----------------------------------------------
@@ -219,10 +276,19 @@ class _NoMX(_device.MockAtreides):
 
 @pytest.fixture
 def mxdev():
-    """The default target: Atreides v4.8.1, which has MX."""
+    """The default target: Atreides v4.9.2, which has MX."""
     d = _device.get_device("atreides")
-    assert d.mx
+    assert d.mx == "v4.9.2"
     return d
+
+
+@pytest.fixture
+def v481dev():
+    """The signed-off v4.8.1 chip, registered under its own name."""
+    d = _device.MockAtreides(mx="v4.8.1", name="test-atreides-v4.8.1")
+    _device.register_device(d)
+    yield d
+    _device._registry.pop(d.name, None)
 
 
 @pytest.fixture
@@ -235,7 +301,25 @@ def nomx():
 
 @pytest.mark.parametrize("name", ["atreides", "atreides-flags", "atreides-sim", "atreides-hw"])
 def test_every_atreides_target_has_mx(name):
-    assert _device.get_device(name).mx
+    assert _device.get_device(name).mx == "v4.9.2"
+
+
+def test_a_target_can_model_v481(v481dev):
+    assert v481dev.mx == "v4.8.1" and _device.get_device("atreides").mx == "v4.9.2"
+    with pytest.raises(ValueError, match="unknown MX version"):
+        _device.MockAtreides(mx="v9")
+    c = next(c for c, d in zip(GOLDEN["cases"], GOLDEN_V481["cases"]) if c["out"] != d["out"] and c["bits"] == 16)
+    f = FORMATS[16]
+    a, b = sf.from_codes(np.array(c["a"]), sf.sf16), sf.from_codes(np.array(c["b"]), sf.sf16)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with sf.errstate(all="ignore"):
+            on92 = sf.matmul(a.to("atreides"), b.to("atreides"), accumulate="wide", shift=c["shift"])
+            on81 = sf.matmul(a.to(v481dev.name), b.to(v481dev.name), accumulate="wide", shift=c["shift"])
+    assert on92._codes.tolist() == c["out"]
+    v481 = next(d for d in GOLDEN_V481["cases"] if d["a"] == c["a"] and d["b"] == c["b"] and d["shift"] == c["shift"])
+    assert on81._codes.tolist() == v481["out"] != c["out"]
+    assert f.bits == 16
 
 
 def test_target_without_mx_refuses_wide(nomx):
@@ -261,7 +345,7 @@ def test_device_wide_is_bit_identical_to_host(mxdev):
 def test_device_status_rules(mxdev):
     a, b = _mats(9)
     r = sf.matmul(a.to(mxdev.name), b.to(mxdev.name), accumulate="wide")
-    # small values: the host proves the +-32 accumulator cannot clip, so the
+    # small values: the host proves the accumulator cannot clip, so the
     # output scan is a valid upper bound; underflow is invisible on the chip
     assert r.status.saturated == r.status.outputs_at_max and not r.status.exact
     assert r.status.underflow is None
@@ -270,19 +354,34 @@ def test_device_status_rules(mxdev):
     assert r2.status.exact and r2.status.underflow is not None
 
 
-def test_device_unknown_when_accumulator_can_clip(mxdev):
+def test_device_unknown_when_accumulator_can_clip(mxdev, v481dev):
+    # v4.9.2: about 594 > 512 clips; v4.8.1: about 78 > 32 clips.  Either way the
+    # clipped total, scaled down, is not at +-max, so the device cannot see it.
+    for dev, k, limit, sh in ((mxdev, 600, 512, -10), (v481dev, 80, 32, -6)):
+        big = sf.asarray(np.full((1, k), 0.99), dtype=sf.sf16)
+        col = sf.asarray(np.full((k, 1), 0.99), dtype=sf.sf16)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r = sf.matmul(big.to(dev.name), col.to(dev.name), accumulate="wide", shift=sh)
+        assert r.status.saturated is None
+        assert float(r.numpy().reshape(())) == pytest.approx(limit * 2.0 ** sh, abs=2 ** -14)
+
+
+def test_device_proves_safe_below_the_v492_limit(mxdev):
+    # about 78: proved safe on v4.9.2, so the output scan is a valid upper bound
     big = sf.asarray(np.full((1, 80), 0.99), dtype=sf.sf16)
-    col = sf.asarray(np.full((80, 1), 0.99), dtype=sf.sf16)       # total ~78 > 32
+    col = sf.asarray(np.full((80, 1), 0.99), dtype=sf.sf16)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        r = sf.matmul(big.to(mxdev.name), col.to(mxdev.name), accumulate="wide", shift=-6)
-    assert r.status.saturated is None                       # clipped at 32 then scaled: not at max
-    assert float(r.numpy().reshape(())) == pytest.approx(32 * 2 ** -6, abs=2 ** -14)
+        r = sf.matmul(big.to(mxdev.name), col.to(mxdev.name), accumulate="wide", shift=-7)
+    assert r.status.saturated == 0
+    assert float(r.numpy().reshape(())) == pytest.approx(0.99 * 0.99 * 80 / 128, abs=2 ** -12)
 
 
 def test_products_below_the_engine_resolution_vanish_without_an_event():
-    # On the SF16 block a product's partial-product bits below column 9 are
-    # dropped, so 2^-15 * 2^-15 contributes 0 and the total is exactly 0.
+    # On the SF16 block a product's low partial-product columns are dropped
+    # (below 6 on v4.9.2, below 9 on v4.8.1), so 2^-15 * 2^-15 contributes 0
+    # and the total is exactly 0.
     # That is not "a nonzero total rounded to 0", so no underflow is raised.
     t = sf.array([2 ** -15] * 4, dtype=sf.sf16)
     with sf.errstate(under="raise"):
@@ -346,7 +445,8 @@ def test_kernel_dot_wide_matches_host(backend, shape, shift):
 
 
 def test_kernel_dot_wide_events_agree_across_backends():
-    # totals near 70: the accumulator clips at 32 for every output
+    # totals near 70: every output saturates (at v4.8.1's +-32 accumulator, or at
+    # POP on v4.9.2, where 70 x 2^-6 > 1)
     shape = (4, 4, 80)
     A, B, dA, dB, dev = _host_and_dev(shape, 7, 0.85, 0.95)
     results = {}
@@ -382,3 +482,46 @@ def test_kernel_shift_validation():
     A, B, dA, dB, dev = _host_and_dev((4, 4, 8), 3)
     with pytest.raises(ValueError):
         mm_wide[(1, 1)](dA, dB, dev.alloc((4, 4)), 4, 4, K=8, BM=4, BN=4, SHIFT=40)
+
+
+@pytest.mark.parametrize("be", BACKENDS)
+def test_kernel_dot_wide_on_a_v481_simulator(be):
+    """A simulator set to the signed-off chip runs v4.8.1's units in both
+    backends; the default simulator runs v4.9.2's.  Totals near 70 show it:
+    v4.8.1 clips them at 32, v4.9.2 keeps them."""
+    from sf.kernels import _runtime
+
+    class SimV481(_runtime.SimulatorAtreides):
+        name = "test-sim-v4.8.1"
+        mx = "v4.8.1"
+
+    dev81 = SimV481()
+    _device.register_device(dev81)
+    try:
+        rng = np.random.default_rng(3)
+        A = sf.asarray(rng.uniform(0.85, 0.95, (4, 80)), dtype=sf.sf16)
+        B = sf.asarray(rng.uniform(0.85, 0.95, (80, 4)), dtype=sf.sf16)
+        out = {}
+        for dev in (dev81, sf.device("atreides-sim")):
+            with sf.config(kernel_backend=be), sf.errstate(all="ignore"):
+                C = dev.alloc((4, 4))
+                mm_wide[(1, 1)](dev.upload(A), dev.upload(B), C, 4, 4, K=80, BM=4, BN=4, SHIFT=-7)
+            out[dev.mx] = C.codes.copy()
+        for mx, codes in out.items():
+            want, _ = _linalg.matmul_wide_codes(FORMATS[16], A.codes, B.codes, -7, mx)
+            assert np.array_equal(codes, want), mx
+        assert not np.array_equal(out["v4.8.1"], out["v4.9.2"])
+        assert (out["v4.8.1"] == 1 << 13).all()            # 32 x 2^-7 = 0.25: clipped at 32
+    finally:
+        _device._registry.pop(dev81.name, None)
+
+
+def test_c_backend_takes_the_targets_units():
+    shape = (2, 2, 8)
+    A, B, dA, dB, dev = _host_and_dev(shape, 1)
+    with sf.errstate(all="ignore"):
+        C = dev.alloc((2, 2))
+        mm_wide[(1, 1)](dA, dB, C, 2, 2, K=8, BM=2, BN=2, SHIFT=0)
+    ir = next(ir for ir in mm_wide.cache.values() if "dot_wide" in ir.dump())
+    assert "0, 32, 22, 6, 80, &le" in _cgen.emit_c(ir)
+    assert "0, 25, 19, 9, 1024, &le" in _cgen.emit_c(ir, "v4.8.1")

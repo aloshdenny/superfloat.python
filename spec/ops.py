@@ -20,7 +20,7 @@ Versioning (see website/compiler/versioning.mdx):
     example a move to the v4.8.1 wide accumulator).
 """
 
-SPEC_VERSION = "1.1.1"
+SPEC_VERSION = "1.2.0"
 
 CHANGELOG = [
     ("1.1.1", "2026-11-07", "Adds the Atreides v4.8.1 target guide from the ISA doc: a verdict for every op (native, expand, limited, host, none) with its exact instruction sequence and cost, the machine limits, how kernel concepts map onto the chip, register constraints, the cost model and the known gaps. No op changes behaviour."),
@@ -288,18 +288,21 @@ OPS = [
        notes=["sf.addmm(a, b, d) is NOT dot with the accumulator starting at d. It is the dot chain from 0, then ONE "
               "saturating add of d: add(dot(a, b), d). The two differ when a partial sum saturates."]),
 
-    _e(name="dot_wide", version="1.1", category="contraction", signature="%r:sfN[m,n] = dot_wide %a, %b {shift}",
+    _e(name="dot_wide", version="1.2", category="contraction", signature="%r:sfN[m,n] = dot_wide %a, %b {shift}",
        operands=["a: sfN[m, k]", "b: sfN[k, n]"], attrs={"shift": "int from -32 to 31: the result is the total times 2^shift (POP's s)"},
        result="sfN", shape="(m, n)",
-       semantics="The v4.8.1 MX engine. Block: sf9..sf16 use the SF16 block (accumulator W = 25 bits, F = 19 fraction "
-                 "bits); sf4..sf8 use the SF8 block (W = 20, F = 14). Operands are sign-magnitude, left-aligned in 16 bits; "
-                 "am, bm are the magnitudes the block reads (15 bits, or the 7 bits of the top byte on SF8). Product "
-                 "magnitude: SF16 t = (1024 + sum over set bits i of am of ((bm << i) & ~511)) >> 11, so NOT exact; SF8 "
-                 "t = am * bm, exact. Sign = sign(a) xor sign(b). For each (i, j): acc = 0; for k0 = 0, 8, 16, ...: acc = "
-                 "saturate_W(acc + sum of the signed t for k in k0 .. k0+7) (two's complement, about +-32). Result (POP): "
-                 "q = round_half_to_even(|acc| * 2^(shift - F + N - 1)), clamped to M, with the sign of acc; never -0.",
+       semantics="The MX engine of the target chip; v4.9.2 is the default. Block: sf9..sf16 use the SF16 block, "
+                 "sf4..sf8 the SF8 block. Units: v4.9.2 SF16 W = 32 bits, F = 22 fraction bits (Q10.22, about +-512), "
+                 "tk = 6, comp = 80; SF8 W = 32, F = 14 (Q18.14, about +-131,072). v4.8.1 SF16 W = 25, F = 19 (Q6.19, "
+                 "about +-32), tk = 9, comp = 1024; SF8 W = 20, F = 14 (Q6.14, about +-32). Operands are sign-magnitude, "
+                 "left-aligned in 16 bits; am, bm are the magnitudes the block reads (15 bits, or the 7 bits of the top "
+                 "byte on SF8). Product magnitude: SF16 t = ((comp + sum over set bits i of am of ((bm << i) & ~(2^tk - 1))) "
+                 "mod 2^30) >> (30 - F), so NOT exact; SF8 t = am * bm, exact. Sign = sign(a) xor sign(b). For each (i, j): "
+                 "acc = 0; for k0 = 0, 8, 16, ...: acc = saturate_W(acc + sum of the signed t for k in k0 .. k0+7) (two's "
+                 "complement). Result (POP): q = round_half_to_even(|acc| * 2^(shift - F + N - 1)), clamped to M, with the "
+                 "sign of acc; never -0.",
        events=["overflow", "underflow"], predication="events",
-       hw_v1="v4.8.1 MX engine, one per tile (ISA section 3.4): CFG (block, N) from thread 0, CLR; per chunk of 8 k: WL "
+       hw_v1="MX engine, one per tile (ISA section 3.4 of compiler_v4.9.2.md; the instructions are the same on v4.8.1): CFG (block, N) from thread 0, CLR; per chunk of 8 k: WL "
              "rows 7..0 then SWAP; MAC per token into slot t (up to 8 tokens per weight tile); then POP with Rs(c) = "
              "t << 8 | (shift & 63). 8 output columns per weight tile, 64 MACs per instruction. The engine has no flags.",
        mlir={"name": "sf.matmul_wide {shift}", "traits": ["EventEffect (not Pure)"]},
@@ -312,11 +315,14 @@ OPS = [
                  "chunk boundaries are at k = 0, 8, 16, ... (saturation happens once per chunk); pad a short last chunk "
                  "with zeros, which add nothing",
                  "inside a chunk the order of k does not matter (the 8 products are summed exactly)"],
-       notes=["overflow means the accumulator clipped at +-32 or the POP result clamped at +-M; underflow means a "
-              "nonzero acc rounded to 0",
+       notes=["overflow means the accumulator clipped at its limit (about +-512 on v4.9.2's SF16 block, +-32 on "
+              "v4.8.1) or the POP result clamped at +-M; underflow means a nonzero acc rounded to 0",
+              "the chips differ only in the units: on the 240 golden inputs, v4.8.1 and v4.9.2 differ in 8 cases (sums "
+              "near +-32 and the SF16 product cut). A lowering targets one chip and must use that chip's units",
               "on the SF16 block a product below the engine's resolution (e.g. 2^-15 x 2^-15) adds 0, so a total of "
               "exactly 0 raises nothing",
-              "golden vectors: spec/golden/dot_wide.json, computed by the chip repo's mxref.Engine (sha256 in the file)",
+              "golden vectors: spec/golden/dot_wide.json, v4.9.2, computed by the chip repo's mxref.Engine (the mx section "
+              "of sf golden v4.9.2.json); the v4.8.1 outputs of the same inputs are in tests/data/mx_golden_v4.8.1.json",
               "the kernel trace picks dot or dot_wide from sf.accumulate at trace time; the kernel cache keys on it"]),
 
     # ---- memory -------------------------------------------------------------------------------

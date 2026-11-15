@@ -92,8 +92,10 @@ def _index(src_shape, dst_shape) -> str:
 
 
 class Emitter:
-    def __init__(self, ir: KernelIR) -> None:
+    def __init__(self, ir: KernelIR, mx=None) -> None:
+        from .._linalg import mx_units
         self.ir = ir
+        self.mx_unit = mx_units(mx)[16]          # the target's SF16 unit, for dot_wide
         self.lines: list[str] = []
         # user parameter names never reach the C: every argument is mangled to
         # ``arg<i>`` so a kernel parameter called ``o``, ``e``, ``C`` or ``px``
@@ -285,7 +287,8 @@ class Emitter:
             w(f"    for (int64_t i = 0; i < {M}; i++) for (int64_t j = 0; j < {N}; j++) {{"
               f" sf16_events *pe = {pe}; sf16_events le = {{0, 0, 0, 0}};"
               f" v{r.id}[i * {N} + j] = __sf16_dot_wide(&v{x.id}[i * {K}], 1, &v{y.id}[j], {N}, {K},"
-              f" {op.attrs['shift']}, &le); sf16_fold(pe, &le); }} C->macs += {M * K * N};")
+              f" {op.attrs['shift']}, {self.mx_unit['W']}, {self.mx_unit['F']}, {self.mx_unit['tk']},"
+              f" {self.mx_unit['comp']}, &le); sf16_fold(pe, &le); }} C->macs += {M * K * N};")
             return
         if n == "dot":
             x, y = op.args
@@ -378,8 +381,8 @@ class Emitter:
                f" for (int64_t k = 0; k < {n}; k++) {step} v{r.id}[e] = acc; sf16_fold(pe, &le); }}")
 
 
-def emit_c(ir: KernelIR) -> str:
-    src = Emitter(ir).emit()
+def emit_c(ir: KernelIR, mx=None) -> str:
+    src = Emitter(ir, mx).emit()
     # the event block is shared by every op of a program; declare it once
     src = src.replace("    C->programs++;", "    C->programs++; sf16_events E = {0, 0, 0, 0};", 1)
     src = src.replace("  }\n}\n", "    C->sat += E.sat; C->under += E.under; C->div0 += E.div0; C->invalid += E.invalid;\n  }\n}\n")
@@ -391,11 +394,11 @@ class _CCounters(ctypes.Structure):
                                               "sat", "under", "div0", "invalid", "barriers", "fault")]
 
 
-def build(ir: KernelIR) -> ctypes.CDLL:
+def build(ir: KernelIR, mx=None) -> ctypes.CDLL:
     cc = compiler()
     if cc is None:
         raise SFUnsupportedError("the C kernel backend needs a C compiler (cc, gcc or clang) on PATH")
-    src = emit_c(ir)
+    src = emit_c(ir, mx)
     # the key covers everything the .so depends on: the emitted C, the builtins header,
     # the compiler and its flags.  A revised header or toolchain never reuses an old build
     key = hashlib.sha256("\0".join([src, _header_text(), cc, _toolchain(cc), " ".join(_FLAGS)])
@@ -432,8 +435,8 @@ def build(ir: KernelIR) -> ctypes.CDLL:
         return lib
 
 
-def run_c(ir: KernelIR, buffers: dict, scalars: dict, grid) -> Counters:
-    lib = build(ir)
+def run_c(ir: KernelIR, buffers: dict, scalars: dict, grid, mx=None) -> Counters:
+    lib = build(ir, mx)
     # same order as the emitted signature: every pointer (with its size), then every scalar
     args = []
     keep = []

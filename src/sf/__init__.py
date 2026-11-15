@@ -32,7 +32,7 @@ from .kernels import (HardwareAtreides, Kernel, LaunchResult, Limits, SimulatorA
                       arange, autotune, barrier, block_dim, block_idx, cdiv, constexpr, jit, kernel,
                       load, predicate, program_id, shared, store, synchronize, thread_idx)
 
-__version__ = "0.6.1"           # Atreides targets refuse divide and sqrt (v4.8.1 has neither)
+__version__ = "0.7.0"           # MX model per chip: v4.9.2 (32-bit accumulators) by default, v4.8.1 selectable
 
 # sf.sf4 .. sf.sf16
 globals().update({cls.__name__: cls for cls in DTYPES.values()})
