@@ -20,9 +20,10 @@ Versioning (see website/compiler/versioning.mdx):
     example a move to the v4.8.1 wide accumulator).
 """
 
-SPEC_VERSION = "1.1.0"
+SPEC_VERSION = "1.1.1"
 
 CHANGELOG = [
+    ("1.1.1", "2026-11-07", "Adds the Atreides v4.8.1 target guide from the ISA doc: a verdict for every op (native, expand, limited, host, none) with its exact instruction sequence and cost, the machine limits, how kernel concepts map onto the chip, register constraints, the cost model and the known gaps. No op changes behaviour."),
     ("1.1.0", "2026-11-07", "Adds dot_wide: matmul on the v4.8.1 MX engine (wide accumulator, one rounding at POP with a power-of-two shift), from sf.dot(..., accumulate=\"wide\") and a @ b under sf.accumulate(\"wide\"). DSL 0.5.0. Golden vectors for dot_wide come from the chip repo's mxref.py. The dot entry now says v4.8.1 runs the chain as FMA instructions (MX replaced v1's systolic array)."),
     ("1.0.3", "2026-11-06", "Corrects 1.0.2 against the v4.8.1 ISA doc (compiler_v4.8.1.md): the chip has no sign-magnitude compare, max or min instructions. CMP is a signed 16-bit integer compare; compare, max, min, neg and abs are now given as the ISA section 5 sequences built from ACT, ADD and CMP. widen and narrow have no instruction. Op semantics unchanged."),
     ("1.0.2", "2026-11-06", "Chip team confirmed registers hold sign-magnitude and compare / max / min work on it, so there is no conversion on load and store. Lowering notes for neg, abs, cmp, cmp_lit, maximum, minimum, max, min, widen, narrow and the width rule updated to sign-magnitude. Op semantics unchanged."),
@@ -417,3 +418,12 @@ GLOBAL_RULES = [
     "Host pre-flight: before a launch the host decides everything it can (a zero divisor, an op that must saturate everywhere, an op that cannot saturate). The compiler never needs to handle those cases specially, but must still produce correct bits for them.",
     "Width: sfN for N < 16 runs on the sf16 datapath. In sign-magnitude the MAGNITUDE is shifted left by 16-N and the sign moves to bit 15; after every op the low 16-N magnitude bits must be re-truncated (masked) so the result equals true sfN.",
 ]
+
+
+# --- Atreides v4.8.1 lowering (spec/target_v481.py) ------------------------------------------
+
+from spec import target_v481 as _t   # noqa: E402
+
+for _o in OPS:
+    _v, _low, _cost = _t.OPS_V481[_o["name"]]
+    _o["v481"] = {"verdict": _v, "lowering": _low, "cost": _cost}

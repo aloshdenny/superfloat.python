@@ -3,7 +3,7 @@ title: "Lowering spec"
 description: "Everything the compiler needs to lower every Superfloat op: types, events, global rules, and where the machine-readable spec lives."
 ---
 
-**Spec version 1.1.0.** Generated from `spec/ops.py` by `tools/gen_spec.py`; do not edit by hand.
+**Spec version 1.1.1.** Generated from `spec/ops.py` by `tools/gen_spec.py`; do not edit by hand.
 
 This section is written for the compiler (MLIR) side. The Python reference is the ground truth: if the compiled code gives different bits from the reference on any input, the compiler is wrong (or the spec is, and we fix it).
 
@@ -15,6 +15,7 @@ This section is written for the compiler (MLIR) side. The Python reference is th
 | `spec/golden/<op>.json` | Conformance vectors per op at sf16, sf8 and sf4 (edge codes and random), from the exact-fraction oracle. Run your lowered op on `in`, compare `out` and the events bit for bit. |
 | [IR ops](/compiler/ops) | The same content as readable pages. |
 | [Python API map](/compiler/python-api) | Which IR op each public Python function becomes, and where it runs. |
+| [Atreides v4.8.1 target](/compiler/target-v4-8-1) | How every op lowers to the v4.8.1 chip: verdicts, instruction sequences, machine limits, kernel mapping, register rules, cost. |
 | [Versioning](/compiler/versioning) | How versions change and the changelog. |
 
 ## Global rules

@@ -1,6 +1,6 @@
 ---
 title: "IR ops"
-description: "Every SF IR op, one section each. Spec version 1.1.0."
+description: "Every SF IR op, one section each. Spec version 1.1.1."
 ---
 
 Each op lists its operands, attributes, result, shape rule, exact semantics on integer codes, events, memory effects, faults, predication, the v1 hardware unit, a suggested MLIR op with traits, and the rewrites that are and are not legal. Ops with golden vectors say so.
@@ -20,7 +20,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | overflow |
 | Memory | none |
 | Predication | events |
-| v1 hardware | ACT unit (add) |
+| Hardware | ACT unit (add) |
+| v4.8.1 | **native**: ACT f=00 Rd, Ra, Rb with Rd in &#123;R0, R4, R8, R12&#125;. Not integer ADD, which is wrong for negative sign-magnitude values (ISA s3.2) |
+| v4.8.1 cost | 1 instruction |
 | MLIR | sf.add; traits: EventEffect (not Pure), Commutative, Elementwise, SameOperandsAndResultType |
 | From Python | a + b |
 | Golden vectors | `spec/golden/add.json` |
@@ -49,7 +51,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | overflow |
 | Memory | none |
 | Predication | events |
-| v1 hardware | ACT unit (sub) |
+| Hardware | ACT unit (sub) |
+| v4.8.1 | **expand**: ADD n, b, S (flips b's sign bit), then ACT f=00 Rd, a, n (ISA s5) |
+| v4.8.1 cost | 2 instructions |
 | MLIR | sf.sub; traits: EventEffect (not Pure), Elementwise, SameOperandsAndResultType |
 | From Python | a - b |
 | Golden vectors | `spec/golden/sub.json` |
@@ -72,7 +76,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | underflow |
 | Memory | none |
 | Predication | events |
-| v1 hardware | FMA unit (c = 0) |
+| Hardware | FMA unit (c = 0) |
+| v4.8.1 | **native**: FMA with Rd = +0: CONST Rd, 0 (or copy Z), then FMA Rd, Ra, Rb. Truncates toward zero (ISA s5) |
+| v4.8.1 cost | 2 instructions |
 | MLIR | sf.mul; traits: EventEffect (not Pure), Commutative, Elementwise, SameOperandsAndResultType |
 | From Python | a * b |
 | Golden vectors | `spec/golden/mul.json` |
@@ -102,7 +108,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | divide, overflow |
 | Memory | none |
 | Predication | events |
-| v1 hardware | NOT SUPPORTED on v1 (no divider). Device.supported_ops excludes it; the runtime raises SFUnsupportedError. Host pre-flight decides every b == 0 lane before launch. |
+| Hardware | NOT SUPPORTED on v1 (no divider). Device.supported_ops excludes it; the runtime raises SFUnsupportedError. Host pre-flight decides every b == 0 lane before launch. |
+| v4.8.1 | **host**: no SF divide or reciprocal on the chip (ISA s5) |
+| v4.8.1 cost | - |
 | MLIR | sf.div; traits: EventEffect (not Pure), Elementwise, SameOperandsAndResultType |
 | From Python | a / b, sf.div(a, b, where=mask) |
 | Golden vectors | `spec/golden/div.json` |
@@ -129,7 +137,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | overflow, underflow |
 | Memory | none |
 | Predication | events |
-| v1 hardware | FMA unit |
+| Hardware | FMA unit |
+| v4.8.1 | **native**: FMA Rd, Ra, Rb with Rd holding c on entry: Rd = c + a*b. Copy c first if it is still needed |
+| v4.8.1 cost | 1 instruction |
 | MLIR | sf.fma; traits: EventEffect (not Pure), Elementwise, SameOperandsAndResultType |
 | From Python | sf.fma(a, b, c), a * b + c |
 | Golden vectors | `spec/golden/fma.json` |
@@ -156,7 +166,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | v4.8.1 (ISA section 5): integer ADD x, 0x8000 to flip bit 15, then ACT f=00 with +0 so a 0 input never leaves 0x8000 |
+| Hardware | v4.8.1 (ISA section 5): integer ADD x, 0x8000 to flip bit 15, then ACT f=00 with +0 so a 0 input never leaves 0x8000 |
+| v4.8.1 | **expand**: ADD n, x, S (flip bit 15), then ACT f=00 Rd, n, Z so a 0 input never leaves 0x8000 (ISA s5) |
+| v4.8.1 cost | 2 instructions |
 | MLIR | sf.neg; traits: Pure, Elementwise, Involution |
 | From Python | -a |
 | Golden vectors | `spec/golden/neg.json` |
@@ -178,7 +190,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | v4.8.1 (ISA section 5): abs(x) = ReLU(x) + ReLU(-x), using ACT f=01 for ReLU, neg for -x and ACT f=00 for the add |
+| Hardware | v4.8.1 (ISA section 5): abs(x) = ReLU(x) + ReLU(-x), using ACT f=01 for ReLU, neg for -x and ACT f=00 for the add |
+| v4.8.1 | **expand**: abs(x) = ReLU(x) + ReLU(-x): ACT f=01 p, x, Z; ADD n, x, S; ACT f=01 q, n, Z; ACT f=00 Rd, p, q (ISA s5; mind the ACT destination classes) |
+| v4.8.1 cost | 4 instructions |
 | MLIR | sf.abs; traits: Pure, Elementwise, Idempotent |
 | From Python | abs(a) |
 | Golden vectors | `spec/golden/abs.json` |
@@ -196,7 +210,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | invalid |
 | Memory | none |
 | Predication | events |
-| v1 hardware | NOT SUPPORTED on v1 (no sqrt unit); runtime raises SFUnsupportedError |
+| Hardware | NOT SUPPORTED on v1 (no sqrt unit); runtime raises SFUnsupportedError |
+| v4.8.1 | **host**: no sqrt or rsqrt on the chip (ISA s5) |
+| v4.8.1 cost | - |
 | MLIR | sf.sqrt; traits: EventEffect (not Pure), Elementwise, SameOperandsAndResultType |
 | From Python | sf.sqrt(a) |
 | Golden vectors | `spec/golden/sqrt.json` |
@@ -215,7 +231,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | v4.8.1 (ISA section 5): R = ACT f=00 (a, -b), then CMP R, zero. Saturation keeps the sign, so this is exact over the whole range. Only thread 0's NZP steers a branch |
+| Hardware | v4.8.1 (ISA section 5): R = ACT f=00 (a, -b), then CMP R, zero. Saturation keeps the sign, so this is exact over the whole range. Only thread 0's NZP steers a branch |
+| v4.8.1 | **limited**: R = ACT f=00 (a, -b) using ADD n, b, S; then CMP R, Z. Exact over the whole range, because saturation keeps the sign (ISA s5). Like icmp, usable only as a uniform branch condition |
+| v4.8.1 cost | 3 instructions plus the branch |
 | MLIR | sf.cmp (expands to ACT + CMP, not arith.cmpi); traits: Pure |
 | From Python | a &lt; b, a == b, ... |
 
@@ -233,7 +251,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | v4.8.1: as cmp, with -threshold as a sign-magnitude constant: R = ACT f=00 (a, -t), then CMP R, zero |
+| Hardware | v4.8.1: as cmp, with -threshold as a sign-magnitude constant: R = ACT f=00 (a, -t), then CMP R, zero |
+| v4.8.1 | **limited**: as cmp, with -threshold built as a sign-magnitude constant: ACT f=00 R, a, (-t); CMP R, Z |
+| v4.8.1 cost | 2 instructions plus the constant and the branch |
 | MLIR | sf.cmp with a constant (expands to ACT + CMP, not arith.cmpi); traits: Pure |
 | From Python | x &lt; 0.3, x > 1 |
 
@@ -253,7 +273,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | v4.8.1: no conversion instruction (ISA section 5). In sign-magnitude it means: magnitude shifted left by M - N, sign bit moved from bit N-1 to bit M-1. Expand or do it on the host |
+| Hardware | v4.8.1: no conversion instruction (ISA section 5). In sign-magnitude it means: magnitude shifted left by M - N, sign bit moved from bit N-1 to bit M-1. Expand or do it on the host |
+| v4.8.1 | **native**: (derived) free when sfN values are kept left-aligned in 16 bits, as the MX engine expects: the word of an sfN code is already the sf16 word of the same value |
+| v4.8.1 cost | free |
 | MLIR | sf.cast (widening); traits: Pure, Elementwise |
 | From Python | sf.cast(x, wider), x.astype(wider) |
 | Golden vectors | `spec/golden/widen.json` |
@@ -272,7 +294,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | overflow, underflow |
 | Memory | none |
 | Predication | events |
-| v1 hardware | v4.8.1: no conversion instruction; the only hardware rounding is POP on MX results (ISA section 5). Expand or do it on the host |
+| Hardware | v4.8.1: no conversion instruction; the only hardware rounding is POP on MX results (ISA section 5). Expand or do it on the host |
+| v4.8.1 | **none**: no conversion or rounding instruction on FMA / ACT (ISA s5); the only hardware rounding is POP. Run it on the host, or produce sfN directly from MX with POP at N bits |
+| v4.8.1 cost | - |
 | MLIR | sf.cast (narrowing); traits: EventEffect (not Pure), Elementwise |
 | From Python | sf.cast(x, narrower), x.astype(narrower) |
 | Golden vectors | `spec/golden/narrow.json` |
@@ -298,7 +322,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | overflow |
 | Memory | none |
 | Predication | events |
-| v1 hardware | ACT chain, sequential |
+| Hardware | ACT chain, sequential |
+| v4.8.1 | **expand**: an ACT f=00 chain in index order (order matters: it saturates). Across threads (suggested): each thread STRs its value to the scratchpad, then the chain LDRs them in order |
+| v4.8.1 cost | 1 ACT per element, plus scratchpad traffic |
 | MLIR | sf.reduce_sum; traits: EventEffect (not Pure) |
 | From Python | sf.sum(x, axis), x.sum() |
 | Golden vectors | `spec/golden/sum.json` |
@@ -322,7 +348,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | v4.8.1: tree of the ISA section 5 max sequence |
+| Hardware | v4.8.1: tree of the ISA section 5 max sequence |
+| v4.8.1 | **expand**: the maximum sequence folded over the elements; any order. Across threads via the scratchpad (suggested) |
+| v4.8.1 cost | 16 instructions per element |
 | MLIR | sf.reduce_max; traits: Pure |
 | From Python | sf.max |
 
@@ -344,7 +372,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | v4.8.1: tree of the ISA section 5 min sequence |
+| Hardware | v4.8.1: tree of the ISA section 5 min sequence |
+| v4.8.1 | **expand**: the minimum sequence folded over the elements; any order |
+| v4.8.1 cost | about 18 instructions per element |
 | MLIR | sf.reduce_min; traits: Pure |
 | From Python | sf.min |
 
@@ -367,7 +397,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | overflow, underflow |
 | Memory | none |
 | Predication | events |
-| v1 hardware | v4.8.1: a chain of FMA instructions (Rd = accumulator in and out), k in increasing order. Not MX: MX gives different bits (see dot_wide) |
+| Hardware | v4.8.1: a chain of FMA instructions (Rd = accumulator in and out), k in increasing order. Not MX: MX gives different bits (see dot_wide) |
+| v4.8.1 | **expand**: (suggested) per output, an FMA chain in increasing k: FMA acc, a[k], b[k] (LDR the operands first). Never MX: MX gives different bits (ISA s3.4 rule 5) |
+| v4.8.1 cost | per output: K FMA plus 2K loads |
 | MLIR | sf.matmul (linalg.matmul with sf semantics); traits: EventEffect (not Pure) |
 | From Python | sf.dot(a, b) in a kernel, a @ b, sf.matmul, sf.addmm (accumulate="chain", the default) |
 | Golden vectors | `spec/golden/dot.json` |
@@ -395,7 +427,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | overflow, underflow |
 | Memory | none |
 | Predication | events |
-| v1 hardware | v4.8.1 MX engine, one per tile (ISA section 3.4): CFG (block, N) from thread 0, CLR; per chunk of 8 k: WL rows 7..0 then SWAP; MAC per token into slot t (up to 8 tokens per weight tile); then POP with Rs(c) = t &lt;&lt; 8 \| (shift & 63). 8 output columns per weight tile, 64 MACs per instruction. The engine has no flags. |
+| Hardware | v4.8.1 MX engine, one per tile (ISA section 3.4): CFG (block, N) from thread 0, CLR; per chunk of 8 k: WL rows 7..0 then SWAP; MAC per token into slot t (up to 8 tokens per weight tile); then POP with Rs(c) = t &lt;&lt; 8 \| (shift & 63). 8 output columns per weight tile, 64 MACs per instruction. The engine has no flags. |
+| v4.8.1 | **expand**: the MX sequence of ISA s3.4: CFG (block and N, from thread 0) and CLR; per chunk of 8 k: WL rows 7..0 then SWAP; MAC per token into its slot (up to 8 tokens per weight tile); then POP with Rs(c) = slot &lt;&lt; 8 \| (shift & 63). Thread j supplies lane or column j. 8 output columns per weight tile. Weights are not reset at block start: always load all 8 rows and SWAP |
+| v4.8.1 cost | 8 WL + 1 SWAP + 1 MAC per token per chunk of 8 k, then 1 POP per token |
 | MLIR | sf.matmul_wide &#123;shift&#125;; traits: EventEffect (not Pure) |
 | From Python | sf.dot(a, b, accumulate="wide", shift=s) in a kernel, a @ b in a kernel traced under sf.accumulate("wide"), sf.matmul / sf.dot / sf.addmm (accumulate="wide") on host and device arrays |
 | Golden vectors | `spec/golden/dot_wide.json` |
@@ -430,7 +464,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | select / predicated move |
+| Hardware | select / predicated move |
+| v4.8.1 | **limited**: only for SF values, if-converted arithmetically with ReLU (ISA s5). A general select on a mask: no lowering |
+| v4.8.1 cost | a few ACT instructions |
 | MLIR | arith.select; traits: Pure |
 | From Python | sf.where(cond, x, y) |
 
@@ -447,7 +483,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | v4.8.1: no instruction. Use the exact 16-instruction ReLU sequence in ISA section 5: max(a, b) = max(a+, b+) - min(a-, b-). Do not use b + ReLU(a - b): the difference can saturate |
+| Hardware | v4.8.1: no instruction. Use the exact 16-instruction ReLU sequence in ISA section 5: max(a, b) = max(a+, b+) - min(a-, b-). Do not use b + ReLU(a - b): the difference can saturate |
+| v4.8.1 | **expand**: the exact 16-instruction sequence of ISA s5: max(a, b) = max(a+, b+) - min(a-, b-). Never b + ReLU(a - b): the difference saturates (wrong on 118 of 1,024 pairs, measured) |
+| v4.8.1 cost | 16 instructions, about 160 cycles |
 | MLIR | sf.maximum (expands to the ISA ReLU sequence, not arith.maxsi); traits: Pure, Commutative |
 | From Python | sf.maximum, ReLU = maximum(x, 0) |
 
@@ -468,7 +506,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | v4.8.1: no instruction. min(a, b) = -max(-a, -b) with the ISA section 5 sequence, finished as M - P so the result is never -0 |
+| Hardware | v4.8.1: no instruction. min(a, b) = -max(-a, -b) with the ISA section 5 sequence, finished as M - P so the result is never -0 |
+| v4.8.1 | **expand**: min(a, b) = -max(-a, -b) with the ISA s5 sequence, finished as M - P so the result is never -0 |
+| v4.8.1 cost | about 18 instructions |
 | MLIR | sf.minimum (expands to the ISA ReLU sequence, not arith.minsi); traits: Pure, Commutative |
 | From Python | sf.minimum, sf.clip |
 
@@ -492,7 +532,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | READ global buffer ptr at offs on live lanes only |
 | Faults | any live lane with offs &lt; 0 or offs >= buffer size faults the launch. Masked lanes never fault. |
 | Predication | memory |
-| v1 hardware | global load (64K-word data window) |
+| Hardware | global load (64K-word data window) |
+| v4.8.1 | **limited**: LDR Rd, Ra with Ra a word address below 0xFFC0. Masked lanes: only a tail mask, lowered as the launch's thread count (see the mapping). No bounds check: an out-of-range address silently reads other memory or the scratchpad |
+| v4.8.1 cost | about 10 + 8 x 8 cycles for 8 threads |
 | MLIR | sf.load (masked, like triton.load); traits: MemRead |
 | From Python | sf.load(ptr + offs, mask=, other=) |
 
@@ -510,7 +552,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | WRITE global buffer ptr at offs on live lanes only |
 | Faults | a live lane out of bounds faults the launch. The faulting store writes nothing (no lane, in or out of bounds). Writes by earlier ops stay. See the fault rule. |
 | Predication | memory |
-| v1 hardware | global store |
+| Hardware | global store |
+| v4.8.1 | **limited**: STR Ra, Rv (address register first). Same mask and bounds rules as load. If several threads store to one address in one instruction, the highest thread's value lands last (derived) |
+| v4.8.1 cost | about 10 + 8 x 16 cycles for 8 threads (2 beats each) |
 | MLIR | sf.store; traits: MemWrite |
 | From Python | sf.store(ptr + offs, val, mask=) |
 
@@ -533,7 +577,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | READ block-local shared buffer |
 | Faults | live lane out of bounds faults |
 | Predication | memory |
-| v1 hardware | tile-local SRAM |
+| Hardware | tile-local SRAM |
+| v4.8.1 | **limited**: LDR from 0xFFC0 + index. At most 64 words per tile. The scratchpad is NEVER cleared, but DSL shared memory starts at 0: emit the zeroing stores if the kernel reads before writing |
+| v4.8.1 cost | about 3 cycles per thread |
 | MLIR | memref.load on workgroup memory; traits: MemRead |
 | From Python | buf[idx] where buf = sf.shared(shape) |
 
@@ -552,7 +598,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | WRITE block-local shared buffer. Shared memory is zeroed at the start of every program. |
 | Faults | live lane out of bounds faults |
 | Predication | memory |
-| v1 hardware | tile-local SRAM |
+| Hardware | tile-local SRAM |
+| v4.8.1 | **limited**: STR to 0xFFC0 + index; at most 64 words per tile |
+| v4.8.1 cost | about 2 cycles per thread |
 | MLIR | memref.store on workgroup memory; traits: MemWrite |
 | From Python | buf[idx] = val |
 
@@ -571,7 +619,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | orders shared memory |
 | Predication | pure |
-| v1 hardware | tile barrier |
+| Hardware | tile barrier |
+| v4.8.1 | **native**: nothing to emit inside a block: every instruction finishes for all 8 threads before the next, so a store is visible to the whole block from the next instruction (ISA s1.5). There is no barrier between blocks |
+| v4.8.1 cost | free |
 | MLIR | gpu.barrier; traits: MemRead, MemWrite (barrier) |
 | From Python | sf.barrier() |
 
@@ -595,7 +645,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | kernel argument register / constant bank |
+| Hardware | kernel argument register / constant bank |
+| v4.8.1 | **expand**: LDR Rd, [param block + i]: one load per parameter (no argument registers, ISA s4.1) |
+| v4.8.1 cost | one external LDR |
 | MLIR | func argument; traits: Pure |
 | From Python | kernel signature |
 
@@ -613,7 +665,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | immediate |
+| Hardware | immediate |
+| v4.8.1 | **native**: int or code in -128..127: CONST Rd, imm (sign-extended). Larger: CONST then ADD x,x,x doublings plus adds per set bit (build_large_const, ISA s7), or LDR from a constant table. An sf constant is its 16-bit sign-magnitude word, built the same way. 0xFFC0 is one CONST 0xC0 |
+| v4.8.1 cost | 1 instruction, or about 1 + log2 + 2 per set bit |
 | MLIR | sf.constant / arith.constant; traits: Pure, ConstantLike |
 | From Python | Python literals inside a kernel |
 
@@ -631,7 +685,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | tile / block id register |
+| Hardware | tile / block id register |
+| v4.8.1 | **limited**: axis 0: read R13 directly (no instruction). Axes 1, 2: not on the chip; flatten the grid. At most 32 blocks per launch |
+| v4.8.1 cost | free |
 | MLIR | gpu.block_id; traits: Pure |
 | From Python | sf.program_id(axis), sf.block_idx(axis) |
 
@@ -649,7 +705,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | lane id (8 threads per tile in v1) |
+| Hardware | lane id (8 threads per tile in v1) |
+| v4.8.1 | **limited**: axis 0: read R15 directly. Axes 1, 2: flatten. More than 8 lanes: strip-mine (see the mapping) |
+| v4.8.1 cost | free |
 | MLIR | gpu.thread_id; traits: Pure |
 | From Python | sf.thread_idx(axis) |
 
@@ -667,7 +725,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | lane id + start |
+| Hardware | lane id + start |
+| v4.8.1 | **expand**: lanes &lt;= 8: ADD Rd, R15, Rstart. More lanes: the same per strip-mined chunk, plus 8*chunk |
+| v4.8.1 cost | 1 instruction per chunk |
 | MLIR | sf.arange (or tensor.generate); traits: Pure |
 | From Python | sf.arange(start, end) |
 
@@ -687,7 +747,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | register replication / free |
+| Hardware | register replication / free |
+| v4.8.1 | **expand**: a value every thread computes the same way needs nothing. Moving one lane's value to all threads (suggested): STR it to the scratchpad, then every thread LDRs that word |
+| v4.8.1 cost | free, or 2 scratchpad ops |
 | MLIR | tensor broadcast / linalg.broadcast; traits: Pure |
 | From Python | sf.full, sf.zeros, implicit broadcasting |
 
@@ -704,7 +766,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | free (layout only) |
+| Hardware | free (layout only) |
+| v4.8.1 | **native**: layout only: no instruction when the lane-to-thread mapping is unchanged. Otherwise go through the scratchpad |
+| v4.8.1 cost | free |
 | MLIR | tensor.reshape; traits: Pure |
 | From Python | x.reshape(...) |
 
@@ -721,7 +785,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | data movement |
+| Hardware | data movement |
+| v4.8.1 | **expand**: no shuffle instruction. Suggested: STR to the scratchpad in one layout, LDR in the other (64 words per tile) |
+| v4.8.1 cost | 2 scratchpad ops per element per thread |
 | MLIR | linalg.transpose; traits: Pure |
 | From Python | x.T |
 
@@ -740,7 +806,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer ALU |
+| Hardware | integer ALU |
+| v4.8.1 | **native**: ADD Rd, Rs, Rt (mod 2^16) |
+| v4.8.1 cost | 1 instruction |
 | MLIR | arith.addi; traits: Pure, Commutative |
 | From Python | int + int |
 
@@ -761,7 +829,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer ALU |
+| Hardware | integer ALU |
+| v4.8.1 | **native**: SUB Rd, Rs, Rt (mod 2^16) |
+| v4.8.1 cost | 1 instruction |
 | MLIR | arith.subi; traits: Pure |
 | From Python | int - int |
 
@@ -782,7 +852,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer ALU |
+| Hardware | integer ALU |
+| v4.8.1 | **limited**: both operands provably &lt; 256: MUL (8 x 8 unsigned; high bytes are ignored). Otherwise the 16 x 16 sequence lo*lo + ((hi*lo + lo*hi) &lt;&lt; 8), about 17 instructions (ISA s5) |
+| v4.8.1 cost | 1 or about 17 instructions |
 | MLIR | arith.muli; traits: Pure, Commutative |
 | From Python | int * int |
 
@@ -804,7 +876,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | none |
 | Faults | any lane with b == 0 faults the whole launch (SFDeviceError) |
 | Predication | pure |
-| v1 hardware | integer ALU |
+| Hardware | integer ALU |
+| v4.8.1 | **limited**: non-negative dividend and divisor 1, 2, 4, 8, 16, 32 or 64: DIV (a logical shift of all 16 bits, ISA s3.1). Divisor 3, 9, 10, 11 or 12 with dividend &lt; 256: DIV. Anything else: no lowering, and DIV silently returns 0, so precompute on the host. Negative dividends break (derived): DIV shifts logically, idiv floors |
+| v4.8.1 cost | 1 instruction |
 | MLIR | arith.floordivsi; traits: none |
 | From Python | int // int, sf.cdiv |
 
@@ -827,7 +901,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Memory | none |
 | Faults | b == 0 in any lane faults the launch |
 | Predication | pure |
-| v1 hardware | integer ALU |
+| Hardware | integer ALU |
+| v4.8.1 | **limited**: non-negative x mod 2^k, k &lt;= 6: x - ((x >> k) &lt;&lt; k), using DIV for >> and ADD doubling for &lt;&lt; (ISA s5). Other divisors: no lowering |
+| v4.8.1 cost | about k + 3 instructions |
 | MLIR | arith.remsi + sign fix (floor semantics); traits: none |
 | From Python | int % int |
 
@@ -844,7 +920,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer ALU |
+| Hardware | integer ALU |
+| v4.8.1 | **native**: SUB Rd, Z, Rs |
+| v4.8.1 cost | 1 instruction |
 | MLIR | arith.subi 0, a; traits: Pure |
 | From Python | -int |
 
@@ -861,7 +939,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer ALU |
+| Hardware | integer ALU |
+| v4.8.1 | **none**: no instruction, no select, and no sequence in the ISA. Avoid it, or compute on the host |
+| v4.8.1 cost | - |
 | MLIR | math.absi; traits: Pure |
 | From Python | abs(int) |
 
@@ -879,7 +959,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | integer compare |
+| Hardware | integer compare |
+| v4.8.1 | **limited**: only as a branch condition that is uniform across the block: CMP Ra, Rb sets NZP (signed: lt, eq, gt; le, ge, ne by the BR mask), then BR. The result cannot be put in a register. Unsigned compare: add 0x8000 to both operands first |
+| v4.8.1 cost | 1 instruction plus the branch |
 | MLIR | arith.cmpi; traits: Pure |
 | From Python | offs &lt; n etc. |
 
@@ -896,7 +978,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | select |
+| Hardware | select |
+| v4.8.1 | **none**: nothing writes NZP to a register (ISA s5) |
+| v4.8.1 cost | - |
 | MLIR | arith.extui; traits: Pure |
 | From Python | using a mask in int math |
 
@@ -915,7 +999,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | predicate logic |
+| Hardware | predicate logic |
+| v4.8.1 | **none**: no AND instruction (ISA s5). Two uniform conditions can be combined with branch structure instead |
+| v4.8.1 cost | - |
 | MLIR | arith.andi; traits: Pure, Commutative |
 | From Python | m1 & m2, nested `with sf.predicate` |
 
@@ -932,7 +1018,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | predicate logic |
+| Hardware | predicate logic |
+| v4.8.1 | **none**: no OR instruction (ISA s5). Uniform conditions: branch structure |
+| v4.8.1 cost | - |
 | MLIR | arith.ori; traits: Pure, Commutative |
 | From Python | m1 \| m2 |
 
@@ -949,7 +1037,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | predicate logic |
+| Hardware | predicate logic |
+| v4.8.1 | **none**: no XOR instruction (ISA s5) |
+| v4.8.1 cost | - |
 | MLIR | arith.xori; traits: Pure, Commutative |
 | From Python | m1 ^ m2 |
 
@@ -966,6 +1056,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 | Events | none |
 | Memory | none |
 | Predication | pure |
-| v1 hardware | predicate logic |
+| Hardware | predicate logic |
+| v4.8.1 | **none**: no NOT instruction (ISA s5). A uniform condition: branch on the inverse NZP mask |
+| v4.8.1 cost | - |
 | MLIR | arith.xori a, true; traits: Pure |
 | From Python | ~m |
