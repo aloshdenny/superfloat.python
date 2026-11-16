@@ -44,18 +44,20 @@ kernel must not return a value.
 | `sf.barrier()` | Block-wide barrier. |
 | `with sf.predicate(mask):` | Stores and event counts inside are masked by `mask` (and any enclosing predicate). Values are still computed on every lane. Nested predicates AND. |
 | `sf.where(cond, x, y)` | Select per lane. |
-| `sf.fma(a, b, c)`, `sf.sqrt(a)`, `sf.maximum(a, b)`, `sf.minimum(a, b)`, `sf.clip(x, lo, hi)`, `sf.cast(x, dtype)` | Same semantics as the host versions. |
+| `sf.fma(a, b, c)`, `sf.sqrt(a)`, `sf.maximum(a, b)`, `sf.minimum(a, b)`, `sf.clip(x, lo, hi)`, `sf.cast(x, dtype)` | Same semantics as the host versions. `sf.sqrt` is refused on the Atreides targets (no instruction). |
 | `sf.dot(a, b, accumulate=None, shift=None)` | 2-D tile matmul. Default: a sequential fma chain per output (op `dot`). `accumulate="wide"`: the MX engine, one rounding at `2^shift` (op `dot_wide`). `None` uses the `sf.accumulate` setting when the kernel is traced; `a @ b` does the same. [Wide mode →](/arrays/wide-mode) |
 | `sf.sum(x, axis=None)`, `sf.max(x, axis=None)`, `sf.min(x, axis=None)` | Tile reductions; `sum` is the sequential saturating chain. |
 | `sf.zeros(shape, dtype="sf16")`, `sf.full(shape, value, dtype="sf16")` | Tile constants. |
 | `v.reshape(...)`, `v[:, None]`, `v[None, :]` | Reshape and expand dims on tile values; NumPy broadcasting applies. |
-| `v + w`, `v - w`, `v * w`, `v / w`, `-v`, `abs(v)`, `v < w`, `v == 0.1`, `m & n`, `m \\| n`, `~m`, `i // 2`, `i % 2` (ints) | Operators on traced values. Literals follow Stage 1 (quantized for arithmetic, exact for comparisons). |
+| `v + w`, `v - w`, `v * w`, `v / w`, `-v`, `abs(v)`, `v < w`, `v == 0.1`, `m & n`, `m \\| n`, `~m`, `i // 2`, `i % 2` (ints) | Operators on traced values. Literals follow Stage 1 (quantized for arithmetic, exact for comparisons). SF `v / w` is refused on the Atreides targets (no instruction); integer `//` and `%` are fine. |
 | `sf.kernels.is_traced(x)` | True for a traced value. |
 
 **Lockstep rule.** `if`, `while`, `and`, `or`, `not` on a traced value, or
 a traced value in `range()`, raise `SFCompileError` at trace time. Use
 `sf.where` for a value and `sf.predicate` for statements. Loops run over
 Python ints or constexprs and are unrolled.
+
+**Divide and square root.** Atreides has no SF divide and no square root, so `atreides-sim` and `atreides-hw` refuse a kernel that uses SF `/` or `sf.sqrt` with `SFUnsupportedError`, before anything is launched (the same rule as device arrays). Compute those values on the host, for example a reciprocal to multiply by.
 
 **Faults.** Out-of-bounds load / store / shared access and integer division
 by zero raise `SFDeviceError`. The faulting op writes nothing; writes by
