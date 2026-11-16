@@ -191,6 +191,7 @@ class ConversionReport:
     skipped: list = field(default_factory=list)       # (name, kind, reason)
     shared: list = field(default_factory=list)        # (alias name, converted name): same module
     kept_sf16: list = field(default_factory=list)     # (name, why): converted at sf16, not the narrower dtype
+    attention: str = "float (not converted)"          # where F.scaled_dot_product_attention runs
 
     def __repr__(self) -> str:
         lines = [f"ConversionReport: {len(self.converted)} converted, {len(self.skipped)} skipped"
@@ -198,6 +199,7 @@ class ConversionReport:
                  + (f", {len(self.kept_sf16)} kept at sf16" if self.kept_sf16 else "")]
         lines += [f"  + {n} ({k})" for n, k in self.converted]
         lines += [f"  ^ {n} kept at sf16: {w}" for n, w in self.kept_sf16]
+        lines += [f"  attention: {self.attention}"]
         lines += [f"  = {a} is {n} (shared module, converted once)" for a, n in self.shared]
         lines += [f"  - {n} ({k}): {r}" for n, k, r in self.skipped]
         return "\n".join(lines)
@@ -245,7 +247,7 @@ def find_lm_heads(model: nn.Module) -> dict[int, str]:
 
 def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom: str = "bound",
             inplace: bool = False, *, accumulate: str = "chain", shift: int | None = None,
-            calibration: str = "heuristic", keep_sf16="auto") -> nn.Module:
+            calibration: str = "heuristic", keep_sf16="auto", attention="auto") -> nn.Module:
     """Swap ``nn.Linear``, ``nn.Conv2d`` and Hugging Face's ``Conv1D`` (GPT-2's
     layers) for SF versions with a scale policy.
 
@@ -258,11 +260,18 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
     which costs accuracy at sf8 and little time; ``False`` keeps none; a list
     of module names keeps exactly those.  The report lists them.
 
+    ``attention``: ``"auto"`` (default) runs the model's
+    ``F.scaled_dot_product_attention`` calls on the MX engine at sf16 when
+    ``accumulate="wide"`` (``sft.attention``), named ``attention.0``,
+    ``attention.1``, ... per forward; ``False`` leaves them in float.
+
     Other modules (activations, normalisation, pooling, softmax, ...) stay as
     they are and run in float on the host; ``sft.conversion_report(model)``
     lists what was converted and what was skipped, and why.
     """
     cfg = SFConfig(_bits_of(dtype), scale, headroom, accumulate, shift, calibration)
+    if attention not in ("auto", False, None):
+        raise ValueError(f"attention must be \"auto\" or False, got {attention!r}")
     if not inplace:
         model = copy.deepcopy(model)
     report = ConversionReport()
@@ -352,6 +361,10 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
         model = rep
     elif not leaf:
         visit(model, "")
+    if attention == "auto" and cfg.accumulate == "wide":
+        from ._attention import install
+        install(model)
+        report.attention = "F.scaled_dot_product_attention on the MX engine at sf16 (attention.0, attention.1, ...)"
     model._sf_conversion_report = report
     return model
 

@@ -91,12 +91,12 @@ def linear_wide_impl(x, weight, bias, bits, shift, name, runner):
     return torch.from_numpy(r.y.reshape(*lead, N)).to(out_dtype(x.dtype))
 
 
-def matmul_wide_impl(a, b, bits, shift, name, runner):
+def matmul_wide_impl(a, b, bits, shift, name, runner, out_rule="heuristic"):
     if a.dim() < 2 or b.dim() < 2:
         raise ValueError("sf.matmul expects operands with at least 2 dimensions")
     if a.shape[-1] != b.shape[-2]:
         raise ValueError(f"sf.matmul: shapes {tuple(a.shape)} and {tuple(b.shape)} are not aligned")
-    r = _core.wide_matmul(_np(a), _np(b), bits, shift, runner, _mx_of(runner))
+    r = _core.wide_matmul(_np(a), _np(b), bits, shift, runner, _mx_of(runner), out_rule)
     _record(name, "matmul", runner, bits, r)
     return torch.from_numpy(np.ascontiguousarray(r.y)).to(out_dtype(torch.promote_types(a.dtype, b.dtype)))
 
@@ -293,6 +293,33 @@ def _matmul_wide_backward(ctx, g):
 torch.library.register_autograd("sf::matmul_wide", _matmul_wide_backward, setup_context=_matmul_setup)
 
 
+def matmul_wide_pv_impl(p, v, bits, name, runner):
+    return matmul_wide_impl(p, v, bits, None, name, runner, out_rule="max_b")
+
+
+@torch.library.custom_op("sf::matmul_wide_pv", mutates_args=())
+def matmul_wide_pv(p: torch.Tensor, v: torch.Tensor, bits: int, name: str) -> torch.Tensor:
+    """Attention's P @ V on the MX engine: rows of P are probabilities, so
+    each output channel's exponent is V's, pow2_exp(max |V[:, c]|)."""
+    return matmul_wide_pv_impl(p, v, bits, name, _core.HostRunner())
+
+
+@matmul_wide_pv.register_fake
+def _(p, v, bits, name):
+    batch = torch.broadcast_shapes(p.shape[:-2], v.shape[:-2])
+    return p.new_empty(tuple(batch) + (p.shape[-2], v.shape[-1]),
+                       dtype=out_dtype(torch.promote_types(p.dtype, v.dtype)))
+
+
+def _pv_setup(ctx, inputs, output):
+    p, v, bits, name = inputs
+    ctx.save_for_backward(p, v)
+
+
+torch.library.register_autograd("sf::matmul_wide_pv", lambda ctx, g: _matmul_wide_backward(ctx, g)[:2] + (None, None),
+                                setup_context=_pv_setup)
+
+
 # --- one entry point for modules, autocast and the functional API ------------------------------
 
 def call_linear(x, weight, bias, cfg, name):
@@ -310,7 +337,9 @@ def call_matmul(a, b, cfg, name):
 SF_OPS = {"sf.linear": "linear", "sf.linear.default": "linear",
           "sf.matmul": "matmul", "sf.matmul.default": "matmul",
           "sf.linear_wide": "linear_wide", "sf.linear_wide.default": "linear_wide",
-          "sf.matmul_wide": "matmul_wide", "sf.matmul_wide.default": "matmul_wide"}
+          "sf.matmul_wide": "matmul_wide", "sf.matmul_wide.default": "matmul_wide",
+          "sf.matmul_wide_pv": "matmul_wide_pv", "sf.matmul_wide_pv.default": "matmul_wide_pv"}
 
 # (bits, name) argument positions of each op, for the compile backend
-SF_OP_ARGS = {"linear": (3, 6), "matmul": (2, 4), "linear_wide": (3, 5), "matmul_wide": (2, 4)}
+SF_OP_ARGS = {"linear": (3, 6), "matmul": (2, 4), "linear_wide": (3, 5), "matmul_wide": (2, 4),
+              "matmul_wide_pv": (2, 3)}

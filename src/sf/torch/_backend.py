@@ -25,7 +25,8 @@ import torch
 from torch._dynamo import register_backend
 
 from . import _core
-from ._ops import SF_OP_ARGS, SF_OPS, linear_impl, linear_wide_impl, matmul_impl, matmul_wide_impl
+from ._ops import (SF_OP_ARGS, SF_OPS, linear_impl, linear_wide_impl, matmul_impl, matmul_wide_impl,
+                   matmul_wide_pv_impl)
 
 # float ops that could have been SF if the model had been converted
 _UNCONVERTED = {
@@ -140,7 +141,8 @@ def superfloat(gm: torch.fx.GraphModule, example_inputs, **kwargs):
     report = GraphReport()
     impl = {"linear": _device_linear(dev.name), "matmul": _device_matmul(dev.name),
             "linear_wide": _device_wide(dev.name, linear_wide_impl, "linear_wide"),
-            "matmul_wide": _device_wide(dev.name, matmul_wide_impl, "matmul_wide")}
+            "matmul_wide": _device_wide(dev.name, matmul_wide_impl, "matmul_wide"),
+            "matmul_wide_pv": _device_wide(dev.name, matmul_wide_pv_impl, "matmul_wide_pv")}
     for node in gm.graph.nodes:
         if node.op not in ("call_function", "call_method", "call_module"):
             continue
@@ -150,9 +152,9 @@ def superfloat(gm: torch.fx.GraphModule, example_inputs, **kwargs):
             ib, iname = SF_OP_ARGS[op]
             bits = _arg(node, ib, "bits")
             layer = _arg(node, iname, "name")
-            if op.endswith("_wide") and not dev.mx:
+            if "_wide" in op and not dev.mx:
                 report.host_emulated.append((node.name, op, layer, f"{dev.name} has no MX engine"))
-            elif bits in dev.widths_for("matmul_wide" if op.endswith("_wide") else op):
+            elif bits in dev.widths_for("matmul_wide" if "_wide" in op else op):
                 node.target = impl[op]
                 report.on_device.append((node.name, op, layer, dev.name))
             else:

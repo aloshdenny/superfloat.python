@@ -1,6 +1,11 @@
 {
- "spec_version": "1.5.0",
+ "spec_version": "1.6.0",
  "changelog": [
+  [
+   "1.6.0",
+   "2026-11-16",
+   "Attention on the MX engine: sft.attention (F.scaled_dot_product_attention's arguments, GQA included) runs Q K^T with the wide-mode rule and P V with the output exponent per channel from max|V| (rows of P sum to 1; new op sf::matmul_wide_pv), both at sf16; softmax in float. sft.autocast / sft.convert(accumulate=\"wide\") catch SDPA calls (convert: attention=\"auto\"). DSL 0.11.0."
+  ],
   [
    "1.5.0",
    "2026-11-16",

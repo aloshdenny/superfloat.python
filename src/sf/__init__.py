@@ -32,7 +32,7 @@ from .kernels import (HardwareAtreides, Kernel, LaunchResult, Limits, SimulatorA
                       arange, autotune, barrier, block_dim, block_idx, cdiv, constexpr, jit, kernel,
                       load, predicate, program_id, shared, store, synchronize, thread_idx)
 
-__version__ = "0.10.0"          # sf8/sf16 split: MX at sf4-sf16 on Atreides, LM head kept at sf16; sft wide mode
+__version__ = "0.11.0"          # attention on MX; sf8/sf16 split; sft wide mode
 
 # sf.sf4 .. sf.sf16
 globals().update({cls.__name__: cls for cls in DTYPES.values()})

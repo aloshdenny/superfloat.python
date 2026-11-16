@@ -54,6 +54,14 @@ The rule has no state, so an output depends only on its inputs. Its numbers live
 
 A model with no embedding (a classifier) has no LM head, so nothing is kept. `sft.conversion_report(model).kept_sf16` lists what was kept and why. `keep_sf16=False` turns this off; `keep_sf16=["fc"]` keeps exactly the layers you name.
 
+**Attention runs on MX too.** With `accumulate="wide"`, `sft.convert` and `sft.autocast` catch the model's `F.scaled_dot_product_attention` calls; most Hugging Face LLMs use it. Both matmuls run on the MX engine at sf16, whatever the layers' dtype:
+
+1. Scores `Q Kᵀ`: one exponent per query row and per key, output exponents from the rule above.
+2. Mask and softmax: in float on the host, like LayerNorm.
+3. `P V`: one exponent per query row and per channel of V. Each row of P sums to 1, so no output can exceed its channel's largest |V|; that is the output exponent, and nothing can saturate.
+
+Each call is reported as `attention.0.scores` and `attention.0.pv`, then `attention.1...`, in the order the forward makes them. `attention=False` keeps attention in float. Called directly: `sft.attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, enable_gqa=False, name="attention")`. `nn.MultiheadAttention` is not converted yet.
+
 - In wide mode `scale=` and `headroom=` are not used: weights are always per channel, and partial sums cannot clip at ±1.
 - The bias is added in float after POP, on the host.
 - A target without an MX engine keeps wide layers on the host, and `sft.compile_report()` says so.
