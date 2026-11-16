@@ -1,6 +1,11 @@
 {
- "spec_version": "1.4.0",
+ "spec_version": "1.5.0",
  "changelog": [
+  [
+   "1.5.0",
+   "2026-11-16",
+   "Atreides targets hold sf4 to sf16 and run dot_wide at every width (the MX engine: sf4-sf8 on the SF8 block, sf9-sf16 on the SF16 block); every other op stays sf16 and is refused below it before launch. Device.wide_bits / widths_for(op) / can_run(op, fmt). A host op is offloaded only when the default device can run it at that width. sft.convert(dtype narrower than sf16) keeps the LM head at sf16 (keep_sf16=\"auto\"). DSL 0.10.0."
+  ],
   [
    "1.4.0",
    "2026-11-16",

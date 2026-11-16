@@ -95,10 +95,11 @@ def test_placement_and_transfer():
     assert x.numpy().tolist() == [0.5, 0.25] and x[0] == 0.5 and x.codes.tolist() == [16384, 8192]
     y = x.to("host").to(DEV)
     assert y.device == DEV and y.codes.tolist() == x.codes.tolist()
-    with pytest.raises(sf.SFUnsupportedError):
-        sf.array([0.5], dtype=sf.sf8, device=DEV)              # only sf16 on Atreides v1
-    with pytest.raises(sf.SFUnsupportedError):
-        sf.array([0.5], dtype=sf.sf8).to(DEV)
+    # sf4 to sf16 can live on Atreides (the MX engine takes them); only sf16 runs outside wide matmuls
+    assert sf.array([0.5], dtype=sf.sf8, device=DEV).device == DEV
+    assert sf.array([0.5], dtype=sf.sf8).to(DEV).device == DEV
+    with pytest.raises(sf.SFUnsupportedError, match="only in wide matmuls"):
+        sf.array([0.5], dtype=sf.sf8, device=DEV) * sf.array([0.5], dtype=sf.sf8, device=DEV)
     with pytest.raises(sf.SFUnsupportedError):
         sf.array([0.5], dtype=sf.sf16, device="nowhere")
     assert "atreides" in sf.devices() and "host" in sf.devices()

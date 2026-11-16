@@ -465,7 +465,7 @@ def _elementwise(op: str, *xs, **kw):
                            f"{[c.shape for c in codes]}") from None
     total = int(np.prod(shape)) if shape else 1
     opname = _SYM[op]
-    if device == _device.HOST and not _should_offload(total, op):
+    if device == _device.HOST and not _should_offload(total, op, fmt):
         fn = {"abs": vec.abs_, "pow": vec.pow_int}.get(op) or getattr(vec, op)
         result, events = fn(fmt, *codes, **kw)
         _handle_events(events, fmt, opname, total)
@@ -483,13 +483,13 @@ def _host_mx() -> str:
     return _linalg.mx_version(getattr(dev, "mx", False)) or _linalg.MX_DEFAULT
 
 
-def _should_offload(total: int, op: str) -> bool:
+def _should_offload(total: int, op: str, fmt=None) -> bool:
     """Whether a host op of this size moves to ``default_device``.
 
     Offloading is the runtime's own choice, so it only happens when that
-    device can run ``op``.  Otherwise the op stays on the host, which gives
-    the same bits: a host ``a / b`` must never fail because the default
-    target has no divide instruction."""
+    device can run ``op`` at ``fmt``'s width.  Otherwise the op stays on the
+    host, which gives the same bits: a host ``a / b`` or a host sf8 ``a * b``
+    must never fail because the default target cannot run it."""
     t = _config.get("offload_threshold")
     if t is None or total <= t:
         return False
@@ -497,7 +497,9 @@ def _should_offload(total: int, op: str) -> bool:
     ops = getattr(dev, "supported_ops", None)
     if ops is not None and op not in ops:
         return False
-    return op != "matmul_wide" or getattr(dev, "mx", False)
+    if op == "matmul_wide" and not getattr(dev, "mx", False):
+        return False
+    return fmt is None or fmt.bits in dev.widths_for(op)
 
 
 _REDUCTIONS = ("sum", "matmul", "matmul_wide")
@@ -527,7 +529,7 @@ def _run_heavy(op, fmt, dtype, device, codes, out_shape, kw):
     if op == "matmul_wide" and getattr(dev, "mx", False):
         kw = {**kw, "mx": _linalg.mx_version(dev.mx)}   # the target's engine, for the launch and the host replay
     dev.check(fmt, max(int(np.prod(out_shape)) if out_shape else 1,
-                       *(c.size for c in codes)))
+                       *(c.size for c in codes)), op)
     verdict = _preflight.check(op, fmt, *codes, **kw)
     # known answers first: div0 / invalid are read off the inputs, exact, before launch
     opname = _SYM[op]
@@ -645,7 +647,7 @@ def sum_(x, axis=None):
         axis += codes.ndim
     if not (0 <= axis < codes.ndim):
         raise SFShapeError(f"axis {axis} is out of bounds for an array of dimension {codes.ndim}")
-    if x.device == _device.HOST and not _should_offload(codes.size, "sum"):
+    if x.device == _device.HOST and not _should_offload(codes.size, "sum", fmt):
         result, events = _linalg.sum_codes(fmt, codes, axis)
         _handle_events(events, fmt, "sum", int(np.prod(result.shape)) if result.shape else 1)
         return _result(result, dtype)
@@ -706,7 +708,7 @@ def dot(a, b, *, accumulate=None, shift=None):
         fmt = _widest([a, b])
         ka, kb = _to_codes(a, fmt), _to_codes(b, fmt)
         device = _device_of([a, b])
-        if device == _device.HOST and not _should_offload(ka.size, "matmul_wide" if mode == "wide" else "matmul"):
+        if device == _device.HOST and not _should_offload(ka.size, "matmul_wide" if mode == "wide" else "matmul", fmt):
             if mode == "wide":
                 k, events = _linalg.matmul_wide_codes(fmt, ka[None, :], kb[:, None], sh, _host_mx())
                 _handle_events(events, fmt, "dot (wide)", 1)
@@ -763,7 +765,7 @@ def matmul(a, b, *, accumulate=None, shift=None):
     sh = _shift_for(sh, seen, out_shape, "matmul")
     device = _device_of([a, b])
     if device == _device.HOST and not _should_offload(
-            int(np.prod(out_shape)) * ka.shape[-1], "matmul_wide" if mode == "wide" else "matmul"):
+            int(np.prod(out_shape)) * ka.shape[-1], "matmul_wide" if mode == "wide" else "matmul", fmt):
         if mode == "wide":
             result, events = _linalg.matmul_wide_codes(fmt, ka, kb, sh, _host_mx())
             _handle_events(events, fmt, "@ (wide)", int(np.prod(out_shape)))

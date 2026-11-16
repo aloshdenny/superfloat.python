@@ -50,8 +50,7 @@ def test_targets_and_copies(dev):
     z = dev.alloc((3, 4))
     assert z.device == DEV and z.shape == (3, 4) and not z.any()
     assert sf.synchronize(DEV) is dev.last
-    with pytest.raises(sf.SFUnsupportedError):
-        dev.alloc((2,), sf.sf8)
+    assert dev.alloc((2,), sf.sf8).device == dev.name                          # sf8 lives there for wide matmuls
     with pytest.raises(sf.SFUnsupportedError):
         sf.synchronize("atreides")                                            # no kernels there
 

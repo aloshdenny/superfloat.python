@@ -26,7 +26,7 @@ description: "6. Stage 3: kernels"
 Argument rules: device arrays become pointers; `sf.sf16(...)` scalars and
 Python ints become scalar arguments; host arrays, raw floats, bools, and
 non-contiguous views (a transpose or strided slice) are rejected before
-launch; all arrays must be on one device; sf16 only on the simulator. A
+launch; all arrays must be on one device; sf16 only in kernels on the simulator (sf4 to sf16 arrays can still live there for wide matmuls). A
 kernel must not return a value.
 
 ## Kernel language (valid only inside a kernel)

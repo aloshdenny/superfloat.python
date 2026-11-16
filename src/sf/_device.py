@@ -46,12 +46,40 @@ class Device:
     max_elements: int | None = None          # launch limit, None = unbounded
     supported_ops: frozenset[str] | None = None  # heavy ops the target has instructions for; None = all
     mx: str | bool = False                   # MX engine version ("v4.9.2", "v4.8.1"), or False: none
+    wide_bits: tuple[int, ...] = ()          # widths the MX engine takes (wide matmul only); () = supported_bits
 
-    def check(self, fmt: SFFormat, n_elements: int) -> None:
-        if fmt.bits not in self.supported_bits:
+    def widths_for(self, op: str | None = None) -> tuple[int, ...]:
+        """The widths this target runs ``op`` at.  ``matmul_wide`` runs on the
+        MX engine (``wide_bits``); every other op at ``supported_bits``.
+        ``None`` asks which widths an array can be placed at: either."""
+        wide = (self.wide_bits or self.supported_bits) if self.mx else ()
+        if op == "matmul_wide":
+            return wide
+        if op is None:
+            return tuple(sorted(set(self.supported_bits) | set(wide)))
+        return self.supported_bits
+
+    def can_run(self, op: str, fmt: SFFormat) -> bool:
+        """Whether ``op`` at ``fmt``'s width runs here (instruction and width)."""
+        if self.supported_ops is not None and op not in self.supported_ops:
+            return False
+        return fmt.bits in self.widths_for(op)
+
+    def check(self, fmt: SFFormat, n_elements: int, op: str | None = None) -> None:
+        if fmt.bits not in self.widths_for(op):
+            def names(bits):
+                return ", ".join(f"sf{b}" for b in bits) if len(bits) < 4 else f"sf{min(bits)} to sf{max(bits)}"
+            if op is not None and op != "matmul_wide" and fmt.bits in self.widths_for("matmul_wide"):
+                raise SFUnsupportedError(
+                    f"{fmt.name} {op} is not supported on {self.name}: it runs {fmt.name} only in wide "
+                    f"matmuls on the MX engine (accumulate=\"wide\"); {op} needs "
+                    f"{names(self.supported_bits)}")
+            wide = self.widths_for("matmul_wide")
+            extra = (f"; {names(wide)} in wide matmuls (accumulate=\"wide\")"
+                     if wide and set(wide) != set(self.supported_bits) else "")
             raise SFUnsupportedError(
                 f"{fmt.name} is not supported on {self.name} "
-                f"(supported: {', '.join(f'sf{b}' for b in self.supported_bits)})")
+                f"(supported: {names(self.supported_bits)}{extra})")
         if self.max_elements is not None and n_elements > self.max_elements:
             raise SFLaunchError(f"{n_elements} elements exceed the {self.name} limit "
                                 f"of {self.max_elements}")
@@ -88,6 +116,7 @@ class MockAtreides(Device):
     accumulator_bits = None
     sticky_flags = False
     max_elements = 1 << 28
+    wide_bits = tuple(range(4, 17))          # the MX engine takes sf4 to sf16 (sf4-sf8 on the SF8 block)
     mx = "v4.9.2"                            # the MX engine this target models; "v4.8.1" also exists
     # v4.8.1 and v4.9.2 have no SF divide and no square root (ISA s5).  ``pow`` stays: it is a chain of mul.
     supported_ops = frozenset({"add", "sub", "mul", "fma", "neg", "abs", "pow", "sum",

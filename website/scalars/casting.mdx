@@ -43,4 +43,4 @@ This is deliberate: a silent narrowing could drop precision or saturate somewher
 
 ## Which widths exist
 
-All of sf4 to sf16 on the host. The device accepts sf16 only; placing a narrower array on a device raises `SFTypeError`.
+All of sf4 to sf16 on the host. On Atreides, sf4 to sf16 arrays can be placed, but only wide matmuls (`accumulate="wide"`, the MX engine) run below sf16. Any other op on a narrower device array raises `SFUnsupportedError` before launch.

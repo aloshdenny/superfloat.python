@@ -250,10 +250,11 @@ def test_offload_threshold_for_reductions():
     assert launches() == n0 + 4
     assert all(r.device == DEV and r.status is not None for r in (s, d, m, v))
     assert s.codes.tolist() == sf.array([0.1, 0.1, 0.1], dtype=sf.sf16).sum().code
-    # a device that rejects the dtype refuses before dispatch
+    # a host op the default device cannot run at that width is not offloaded:
+    # it stays on the host with the same bits (0.9.1; it used to raise)
     with sf.config(offload_threshold=1):
-        with pytest.raises(sf.SFUnsupportedError):
-            sf.array([0.1, 0.1], dtype=sf.sf8).sum()
-        with pytest.raises(sf.SFUnsupportedError):
-            sf.zeros((2, 2), sf.sf8) @ sf.zeros((2, 2), sf.sf8)
+        s8 = sf.array([0.1, 0.1], dtype=sf.sf8).sum()
+        m8 = sf.zeros((2, 2), sf.sf8) @ sf.zeros((2, 2), sf.sf8)
+    assert m8.device == "host"                                    # s8 is a host scalar
+    assert s8.code == sf.array([0.1, 0.1], dtype=sf.sf8).sum().code
     assert launches() == n0 + 4

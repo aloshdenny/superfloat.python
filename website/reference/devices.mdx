@@ -33,7 +33,9 @@ Add a target, or replace one with the same name. This is how a simulator or the 
 Subclass `sf.Device` and set:
 
 <ResponseField name="name" type="str">The name used in `device=` and `sf.devices()`.</ResponseField>
-<ResponseField name="supported_bits" type="tuple[int, ...]">Widths the target accepts; `(16,)` for Atreides.</ResponseField>
+<ResponseField name="supported_bits" type="tuple[int, ...]">Widths every op runs at; `(16,)` for Atreides.</ResponseField>
+<ResponseField name="wide_bits" type="tuple[int, ...]">Widths the MX engine takes for wide matmuls; sf4 to sf16 for Atreides. Empty means `supported_bits`.</ResponseField>
+<ResponseField name="widths_for(op)" type="tuple[int, ...]">The widths `op` runs at: `wide_bits` for `"matmul_wide"`, `supported_bits` otherwise, both for `None` (where an array may be placed). `can_run(op, fmt)` checks the instruction and the width.</ResponseField>
 <ResponseField name="sticky_flags" type="bool">`True` if `run` returns per-element event flags. With flags, statuses are exact and `over="raise"` applies to heavy ops.</ResponseField>
 <ResponseField name="accumulation_order, accumulator_bits" type="str, int">What the target does in reductions; the reference assumes sequential at data width.</ResponseField>
 <ResponseField name="max_elements" type="int">Largest buffer the target takes; checked before launch.</ResponseField>

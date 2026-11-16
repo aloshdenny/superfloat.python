@@ -133,6 +133,31 @@ them. Each one is a single place to change if the team decides differently.
   automatically with an override, reported in `SFLayerStatus`; Alosh is
   computing golden values chip-side).
 
+## The sf8 / sf16 split (0.10.0, spec 1.5.0)
+
+* Items 7 and 3 of Alosh's build order.
+* Devices: `Device.wide_bits` (widths the MX engine takes), `widths_for(op)`
+  and `can_run(op, fmt)`.  Atreides targets: `wide_bits = sf4..sf16`,
+  `supported_bits = (16,)` unchanged.  `check(fmt, n, op)` uses the op:
+  placement accepts either set, `matmul_wide` the wide set, every other op
+  sf16.  A narrower non-wide op gets an error that names `accumulate="wide"`.
+* Offload: `_should_offload(total, op, fmt)` now also checks the width.
+  Before, a host sf8 op with `offload_threshold` set raised
+  `SFUnsupportedError`; now it stays on the host with the same bits, as a
+  host divide already did (0.6.1).  Decision to confirm with Alosh: the old
+  test (`test_offload_threshold_for_reductions`) asserted the error.
+* Kernels: unchanged, sf16 only (the C back end emits sf16; an sf8
+  `dot_wide` in a kernel is future work).  `dev.alloc(shape, sf.sf8)` now
+  works on `atreides-sim`, for wide matmuls.
+* `sft.convert(..., keep_sf16="auto")`: with a dtype below sf16 the LM head
+  stays sf16.  `find_lm_heads(model)`: `get_output_embeddings()`, else a
+  linear tied to an `nn.Embedding`, else the last linear whose output size
+  is a vocabulary.  No embedding, no head.  `keep_sf16=False` or a list of
+  names.  `ConversionReport.kept_sf16` lists (name, why).  Grouped convs are
+  not converted at all yet (they run in float), so nothing to keep there.
+* Tests: `tests/test_sf8_split.py` (20); three older tests updated to the
+  new placement and offload rules.
+
 ## sf.torch wide mode (0.9.0, spec 1.4.0)
 
 * Items 2, 5 and 6 of Alosh's build order.  `accumulate="wide"` on
