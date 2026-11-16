@@ -66,6 +66,9 @@ class Device:
         return fmt.bits in self.widths_for(op)
 
     def check(self, fmt: SFFormat, n_elements: int, op: str | None = None) -> None:
+        if op == "matmul_wide" and not self.mx:
+            raise SFUnsupportedError(f"{self.name} has no MX engine, so accumulate=\"wide\" cannot "
+                                     f"run there; nothing was launched")
         if fmt.bits not in self.widths_for(op):
             def names(bits):
                 return ", ".join(f"sf{b}" for b in bits) if len(bits) < 4 else f"sf{min(bits)} to sf{max(bits)}"
