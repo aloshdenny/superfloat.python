@@ -76,7 +76,7 @@ class KernelDevice(_device.MockAtreides):
 
     limits = Limits()
     sticky_flags = True
-    supported_bits = (16,)
+    kernel_bits = (16,)              # user kernels: the C backend and the builtins are sf16 only
 
     def __init__(self) -> None:
         super().__init__()
@@ -375,7 +375,7 @@ def _launch(k: Kernel, grid, block, bound, constexpr, config_tag=None) -> Launch
     dev = _resolve_device(bound)
     ir = k.compiled(bound, constexpr, block)
     for p in ir.params:
-        if p.kind in ("ptr", "sf") and p.type.bits not in dev.supported_bits:
+        if p.kind in ("ptr", "sf") and p.type.bits not in dev.kernel_bits:
             raise SFUnsupportedError(f"sf{p.type.bits} is not supported on {dev.name}")
     buffers = {n: v._codes for n, v in bound if isinstance(v, SFArray)}
     scalars = {n: (v._code if isinstance(v, SFScalar) else int(v)) for n, v in bound

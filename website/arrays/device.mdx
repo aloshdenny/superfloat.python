@@ -23,7 +23,7 @@ out = y.numpy()              # floats on the host
 
 `saturated=0, exact=True` is a proof from the host's range bound. `underflow=unknown` is honest too: some inputs are small enough that a product could truncate to 0, and the chip cannot report it. A target with flags, or `sf.config(status="replay")`, gives the exact count. [Reading status →](/arrays/status)
 
-`sf.asarray(..., device=...)` quantizes on the host and uploads; `.to("host")` downloads; `.numpy()` downloads and converts. sf4 to sf16 arrays can live on Atreides, but only wide matmuls (`accumulate="wide"`) run below sf16; every other op needs sf16.
+`sf.asarray(..., device=...)` quantizes on the host and uploads; `.to("host")` downloads; `.numpy()` downloads and converts. sf4 to sf16 arrays can live on Atreides, and every op except `/` and `sqrt` runs at every width. Below sf16 the chip runs the sf16 op and then masks the low bits, which gives the same bits as the host but takes about 10 times as long at sf8 (16 times at sf4); wide matmuls run natively on the MX engine at every width.
 
 ## What runs where
 

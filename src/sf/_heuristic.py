@@ -108,13 +108,18 @@ def acc_guard(fmt: SFFormat, x: np.ndarray, qa: np.ndarray, ea: np.ndarray, qb: 
     raise RuntimeError("sf: accumulator guard did not converge")    # pragma: no cover
 
 
-def plan(fmt: SFFormat, qa, ea, qb, eb, eo=None):
+def plan(fmt: SFFormat, qa, ea, qb, eb, eo=None, bias_abs=None):
     """The rule for (..., M, K) @ (..., K, N) with token exponents ``ea``
     (..., M) and column exponents ``eb`` (..., N).
 
     ``eo``: output exponents to use instead of ``l2 - h`` (broadcastable to
     the output), for products whose bound is known: attention's P @ V,
     whose rows of P sum to 1, takes ``eo`` from max|V| per channel.
+
+    ``bias_abs``: |bias| per output column (N,), when a bias is added after
+    POP on the chip.  The first POP's exponent is unchanged; the redo
+    exponent bounds the dot product plus the bias, pow2_exp(|a||w| + |b|),
+    so a redone output can never clip in the POP or in the bias add.
 
     Returns (shift, shift_l2, h): POP's shift per output, the shift at the
     safe l2 exponent for redos, and the table value used (None with ``eo``)."""
@@ -123,9 +128,11 @@ def plan(fmt: SFFormat, qa, ea, qb, eb, eo=None):
     h = h_for(K) if eo is None else None
     na = _norms(fmt, qa, -1) * np.ldexp(1.0, (ea - P).astype(np.int64))       # dequantized norms
     nb = _norms(fmt, qb, -2) * np.ldexp(1.0, (eb - P).astype(np.int64))
-    l2 = pow2_exp(na[..., :, None] * nb[..., None, :])
+    prod = na[..., :, None] * nb[..., None, :]
+    l2 = pow2_exp(prod)
     base = ea[..., :, None] + eb[..., None, :]
     target = (l2 - h) if eo is None else np.broadcast_to(eo, base.shape)
     shift = np.clip(base - target, _linalg.SHIFT_MIN, _linalg.SHIFT_MAX)
-    shift_l2 = np.clip(base - l2, _linalg.SHIFT_MIN, _linalg.SHIFT_MAX)
+    l2_redo = l2 if bias_abs is None else pow2_exp(prod + np.asarray(bias_abs, dtype=np.float64))
+    shift_l2 = np.clip(base - l2_redo, _linalg.SHIFT_MIN, _linalg.SHIFT_MAX)
     return shift, shift_l2, h
