@@ -20,7 +20,8 @@ limit once per group of 8 terms, and the clip mask are as in the reference.
 ``tests/test_fastmx.py`` checks this against the reference on every width,
 both chips, random and edge codes and the golden files.  If no C compiler is
 found, or the build fails, ``available()`` is False and sf uses the
-reference, with the same bits.  ``SF_FAST_MX=0`` turns it off.
+reference, with the same bits.  ``SF_FAST_MX=0`` turns it off.  The
+library is cached in a private per-user folder (``_cache``).
 """
 from __future__ import annotations
 
@@ -34,6 +35,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
+
+from . import _cache
 
 _SRC = r"""
 #include <stdint.h>
@@ -109,8 +112,7 @@ def _load():
                 raise OSError("no C compiler")
             banner = subprocess.run([cc, "--version"], capture_output=True, text=True).stdout.splitlines()[:1]
             key = hashlib.sha256("\0".join([_SRC, cc, *banner, *_FLAGS]).encode()).hexdigest()[:20]
-            d = os.path.join(tempfile.gettempdir(), f"sf-fastmx-{os.getuid() if hasattr(os, 'getuid') else 0}")
-            os.makedirs(d, exist_ok=True)
+            d = _cache.private_dir("fastmx")             # never a shared temp folder (see _cache)
             so = os.path.join(d, f"mx_{key}.so")
             if not os.path.exists(so):
                 fd, tmp = tempfile.mkstemp(suffix=".so", prefix=f".{key}-", dir=d)
@@ -129,6 +131,7 @@ def _load():
                             os.remove(f_)
                         except FileNotFoundError:
                             pass
+            _cache.check_file(so)
             lib = ctypes.CDLL(so)
             i64, i32, p = ctypes.c_int64, ctypes.c_int32, ctypes.c_void_p
             lib.mx_acc.argtypes = [i64, i64, i64, i64, p, p, p, p, i32, i32, i32, i32, p, i64, i64, p, p]

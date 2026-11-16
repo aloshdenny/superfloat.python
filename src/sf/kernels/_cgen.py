@@ -23,12 +23,13 @@ import threading
 
 import numpy as np
 
+from .. import _cache
 from .._errors import SFCompileError, SFDeviceError, SFUnsupportedError
 from ._interp import Counters
 from ._ir import BOOL, INT, KernelIR, PtrType, SFType
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_CACHE_DIR = os.path.join(tempfile.gettempdir(), "sf-kernels-c")
+_CACHE_DIR: str | None = None        # None: the private per-user folder of sf._cache; tests may set it
 _lock = threading.Lock()
 _loaded: dict[str, ctypes.CDLL] = {}
 
@@ -407,13 +408,16 @@ def build(ir: KernelIR, mx=None) -> ctypes.CDLL:
         lib = _loaded.get(key)
         if lib is not None:
             return lib
-        os.makedirs(_CACHE_DIR, exist_ok=True)
-        so_path = os.path.join(_CACHE_DIR, f"{key}.so")
+        try:                            # never a shared temp folder: loading a .so runs its code
+            cache = _cache.private_dir("kernels-c") if _CACHE_DIR is None else _cache.ensure_private(_CACHE_DIR)
+        except OSError as e:
+            raise SFUnsupportedError(f"the C kernel backend has no private cache folder: {e}") from None
+        so_path = os.path.join(cache, f"{key}.so")
         if not os.path.exists(so_path):
             # several processes (pytest -n, a serving pool) may build the same kernel at once:
             # each compiles into its own temp files and publishes with an atomic rename, so no
             # process ever loads a half-written library
-            fd, tmp_so = tempfile.mkstemp(suffix=".so", prefix=f".{key}-", dir=_CACHE_DIR)
+            fd, tmp_so = tempfile.mkstemp(suffix=".so", prefix=f".{key}-", dir=cache)
             os.close(fd)
             c_path = tmp_so[:-3] + ".c"
             try:
@@ -430,6 +434,10 @@ def build(ir: KernelIR, mx=None) -> ctypes.CDLL:
                         os.remove(p)
                     except FileNotFoundError:
                         pass
+        try:
+            _cache.check_file(so_path)
+        except OSError as e:
+            raise SFUnsupportedError(f"refusing to load {so_path}: {e}") from None
         lib = ctypes.CDLL(so_path)
         _loaded[key] = lib
         return lib
