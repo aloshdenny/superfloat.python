@@ -62,7 +62,7 @@ A model with no embedding (a classifier) has no LM head, so nothing is kept. `sf
 
 Each call is reported as `attention.0.scores` and `attention.0.pv`, then `attention.1...`, in the order the forward makes them. `attention=False` keeps attention in float. Called directly: `sft.attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, enable_gqa=False, name="attention")`. `nn.MultiheadAttention` is not converted yet.
 
-**Speed on the host.** Wide mode emulates the chip bit for bit, which costs time on a CPU. sf compiles a small C accumulator the first time it is used (with `cc`, `gcc` or `clang`) keeps it in a private per-user cache folder (`~/.cache/sf`, or `$SF_CACHE_DIR`), and splits rows across cores; GPT-2 small runs about 30 times faster than the plain NumPy model, with the same bits. With no C compiler sf uses the NumPy model; `SF_FAST_MX=0` forces it.
+**Speed on the host.** Wide mode emulates the chip bit for bit, which costs time on a CPU. sf compiles a small C accumulator the first time it is used (with `cc`, `gcc` or `clang`), keeps it in a private per-user cache folder (`~/.cache/sf`, or `$SF_CACHE_DIR`), and splits rows across cores; GPT-2 small runs about 30 times faster than the plain NumPy model, with the same bits. With no C compiler sf uses the NumPy model; `SF_FAST_MX=0` forces it.
 
 - In wide mode `scale=` and `headroom=` are not used: weights are always per channel, and partial sums cannot clip at ±1.
 - The bias is added in float after POP, on the host.
