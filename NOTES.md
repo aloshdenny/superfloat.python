@@ -133,6 +133,19 @@ them. Each one is a single place to change if the team decides differently.
   automatically with an override, reported in `SFLayerStatus`; Alosh is
   computing golden values chip-side).
 
+## Big layers in blocks (0.11.2)
+
+* Qwen2.5-0.5B's LM head (151,936 x 896) ran out of memory on a 7 GB
+  machine: the weight was quantized at once, with several full-size copies.
+* `_core.wide_linear` now takes a weight bigger than `WIDE_BLOCK` (8M
+  elements) a block of output channels at a time.  Each channel's exponent
+  depends only on its row; the guard needs the whole layer's largest column
+  norm, so pass 1 finds it (`_heuristic.col_norm_max`, `acc_guard(bmax=)`)
+  and pass 2 computes.  Same bits and the same status
+  (`test_big_layers_in_blocks_give_the_same_bits_and_status`).
+* Qwen2.5-0.5B, first 256 tokens: float 17.40, sf16 wide with attention on
+  MX 17.42.  About 2 minutes per 256 tokens on 2 cores.
+
 ## A compiled MX accumulator on the host (0.11.1)
 
 * `sf/_fastmx.py`: the MX accumulation in C (compiled once with `cc`,
