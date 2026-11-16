@@ -273,9 +273,13 @@ them. Each one is a single place to change if the team decides differently.
 * Tests that exercise the device rules for divide and square root (exact div0
   and invalid, masked divide) run on a test-only target with every op,
   `mock-all-ops` in `tests/conftest.py`.
-* Not changed: kernels. `@sf.jit` code can still use divide and square root on
-  `atreides-sim`. The v4.8.1 target guide marks both as host-only, so whether
-  the simulator should refuse them is an open question for Alosh and Kartik.
+* Kernels too (decided by Alosh, 2026-11-17): `@sf.jit` code that uses SF `/`
+  or `sf.sqrt` is refused on `atreides-sim` and `atreides-hw` with
+  `SFUnsupportedError` before launch (`KernelDevice.check_launch` reads the
+  traced IR against `supported_ops`). Otherwise a kernel could pass in the
+  simulator and fail on the chip. Integer `//` and `%` for index arithmetic
+  are separate ops and stay allowed. Their kernel semantics (events, the C
+  builtins) are tested on `sim-all-ops` in `tests/conftest.py`.
 
 ## Immutability
 
