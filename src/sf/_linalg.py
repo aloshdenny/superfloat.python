@@ -146,6 +146,7 @@ MX_TARGETS = {
 MX_DEFAULT = "v4.9.2"
 MX_UNITS = MX_TARGETS[MX_DEFAULT]            # the default chip's units
 SHIFT_MIN, SHIFT_MAX = -32, 31
+_WIDE_BLOCK_ELEMS = 1 << 22          # products held at once by matmul_wide_acc (memory, not bits)
 
 
 def mx_version(mx) -> str | None:
@@ -254,6 +255,51 @@ def broadcast_shift(shift, shape: tuple, where: str = "the output"):
                          f"shape {tuple(shape)}") from None
 
 
+def matmul_wide_acc(fmt: SFFormat, a: np.ndarray, b: np.ndarray, mx=None):
+    """The MX engine's accumulators for (..., M, K) @ (..., K, N), before POP.
+
+    Returns ``(acc, clipped, F)``: the saturated totals in units of 2^-F,
+    the mask of totals that reached the unit's limit, and F.  Large outputs
+    are computed in blocks of columns (the same bits, bounded memory)."""
+    a, b = np.asarray(a, dtype=np.int64), np.asarray(b, dtype=np.int64)
+    K = a.shape[-1]
+    batch = np.broadcast_shapes(a.shape[:-2], b.shape[:-2])
+    out_shape = batch + (a.shape[-2], b.shape[-1])
+    blk = mx_block(fmt)
+    unit = mx_units(mx)[blk]
+    W, F = unit["W"], unit["F"]
+    lo, hi = -(1 << (W - 1)), (1 << (W - 1)) - 1
+    am, bm = _mx_mags(fmt, a, blk), _mx_mags(fmt, b, blk)
+    an, bn = a < 0, b < 0
+    acc = np.zeros(out_shape, dtype=np.int64)
+    clipped = np.zeros(out_shape, dtype=bool)
+    N = out_shape[-1]
+    rows = int(np.prod(out_shape[:-1])) if out_shape[:-1] else 1
+    step = max(1, min(N, _WIDE_BLOCK_ELEMS // max(1, rows * 8)))
+    for n0 in range(0, N, step):
+        cols = slice(n0, n0 + step)
+        bmc, bnc = bm[..., cols], bn[..., cols]
+        acc_c = np.zeros(out_shape[:-1] + (bmc.shape[-1],), dtype=np.int64)
+        clip_c = np.zeros(acc_c.shape, dtype=bool)
+        for k0 in range(0, K, 8):
+            ca = am[..., :, k0:k0 + 8][..., :, :, None]          # (..., M, c, 1)
+            cb = bmc[..., k0:k0 + 8, :][..., None, :, :]         # (..., 1, c, n)
+            t = _mx_products16(ca, cb, unit) if blk == 16 else ca * cb
+            neg = an[..., :, k0:k0 + 8][..., :, :, None] ^ bnc[..., k0:k0 + 8, :][..., None, :, :]
+            s_ = acc_c + np.where(neg, -t, t).sum(axis=-2)
+            clip_c |= (s_ < lo) | (s_ > hi)
+            acc_c = np.clip(s_, lo, hi)
+        acc[..., cols] = acc_c
+        clipped[..., cols] = clip_c
+    return acc, clipped, F
+
+
+def mx_pop(fmt: SFFormat, acc: np.ndarray, shift, frac: int):
+    """POP of MX totals ``acc`` (units of 2^-frac) at ``shift`` (an int or an
+    array broadcastable to ``acc``).  Returns (codes, overflow mask, underflow mask)."""
+    return _mx_pop(fmt, acc, broadcast_shift(check_shift(shift), np.shape(acc)), frac)
+
+
 def matmul_wide_codes(fmt: SFFormat, a: np.ndarray, b: np.ndarray, shift=0, mx=None):
     """(..., M, K) @ (..., K, N) on the MX engine, batched like ``matmul_codes``.
 
@@ -267,26 +313,10 @@ def matmul_wide_codes(fmt: SFFormat, a: np.ndarray, b: np.ndarray, shift=0, mx=N
     """
     shift = check_shift(shift)
     a, b = np.asarray(a, dtype=np.int64), np.asarray(b, dtype=np.int64)
-    K = a.shape[-1]
     batch = np.broadcast_shapes(a.shape[:-2], b.shape[:-2])
     out_shape = batch + (a.shape[-2], b.shape[-1])
     shift = broadcast_shift(shift, out_shape)
-    blk = mx_block(fmt)
-    unit = mx_units(mx)[blk]
-    W, F = unit["W"], unit["F"]
-    lo, hi = -(1 << (W - 1)), (1 << (W - 1)) - 1
-    am, bm = _mx_mags(fmt, a, blk), _mx_mags(fmt, b, blk)
-    an, bn = a < 0, b < 0
-    acc = np.zeros(out_shape, dtype=np.int64)
-    clipped = np.zeros(out_shape, dtype=bool)
-    for k0 in range(0, K, 8):
-        ca = am[..., :, k0:k0 + 8][..., :, :, None]          # (..., M, c, 1)
-        cb = bm[..., k0:k0 + 8, :][..., None, :, :]          # (..., 1, c, N)
-        t = _mx_products16(ca, cb, unit) if blk == 16 else ca * cb
-        neg = an[..., :, k0:k0 + 8][..., :, :, None] ^ bn[..., k0:k0 + 8, :][..., None, :, :]
-        s = acc + np.where(neg, -t, t).sum(axis=-2)
-        clipped |= (s < lo) | (s > hi)
-        acc = np.clip(s, lo, hi)
+    acc, clipped, F = matmul_wide_acc(fmt, a, b, mx)
     codes, over, under = _mx_pop(fmt, acc, shift, F)
     return codes, {"overflow": clipped | over, "underflow": under}
 

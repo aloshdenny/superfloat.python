@@ -22,6 +22,19 @@ class SFLayerStatus:
     accumulator scale.  ``headroom_bits``: activation bits given up so the
     accumulation cannot saturate.  ``act_scale``: the float activation scale
     ``a`` used for this call (input value = a * code / 2^(N-1)).
+
+    Wide mode (``accumulate="wide"``, the MX engine).  A wrong shift raises
+    no error and can take accuracy to 0, so these are the warning signs:
+    ``shift_min`` / ``shift_max``: the range of POP shifts used.  ``h``: the
+    table value for this layer's K.  ``redone``: outputs that came back at
+    +-max and were popped again at the safe l2 exponent.  ``flushed``:
+    nonzero totals that rounded to 0 (``None`` on a device: the chip cannot
+    report it); ``underflow`` holds the same count in wide mode.
+    ``acc_clipped``: totals clipped at the accumulator's limit (+-512 on
+    v4.9.2), exact on the host and 0 on a device because the host guard
+    rules it out.  ``guard_raised``: tokens whose exponent that guard raised.
+    ``saturated``: outputs still at +-max after the redo.  ``act_scale`` is
+    2^max(ea), the largest token scale.
     """
 
     name: str
@@ -37,6 +50,14 @@ class SFLayerStatus:
     bias_saturated: int
     headroom_bits: float
     act_scale: float = 1.0
+    accumulate: str = "chain"
+    shift_min: int | None = None
+    shift_max: int | None = None
+    h: int | None = None
+    redone: int = 0
+    flushed: int | None = None
+    acc_clipped: int | None = None
+    guard_raised: int = 0
 
     @property
     def ok(self) -> bool | None:
@@ -48,6 +69,11 @@ class SFLayerStatus:
 
     def __repr__(self) -> str:
         sat = "unknown" if self.saturated is None else str(self.saturated)
+        if self.accumulate == "wide":
+            fl = "unknown" if self.flushed is None else str(self.flushed)
+            return (f"SFLayerStatus({self.name!r}, {self.op} wide on {self.placement}, {self.dtype}, "
+                    f"shift={self.shift_min}..{self.shift_max}, h={self.h}, redone={self.redone}, "
+                    f"flushed={fl}, saturated={sat})")
         return (f"SFLayerStatus({self.name!r}, {self.op} on {self.placement}, {self.dtype}, "
                 f"saturated={sat}, underflow={self.underflow}, "
                 f"headroom_bits={self.headroom_bits:.2f})")

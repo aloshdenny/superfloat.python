@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from torch.overrides import TorchFunctionMode
 
 from ._modules import SFConfig, _bits_of
+from ._ops import call_linear, call_matmul
 
 _MATMULS = {torch.matmul, torch.Tensor.matmul, torch.Tensor.__matmul__, torch.mm, torch.bmm,
             torch.Tensor.mm, torch.Tensor.bmm}
@@ -40,7 +41,7 @@ class _SFMode(TorchFunctionMode):
         if func is F.linear:
             x, w = args[0], args[1]
             b = args[2] if len(args) > 2 else kwargs.get("bias")
-            return torch.ops.sf.linear(x, w, b, cfg.bits, cfg.scale, cfg.headroom, self._name("linear"))
+            return call_linear(x, w, b, cfg, self._name("linear"))
         if func in _MATMULS:
             a, b = args[0], args[1]
             if a.dim() == 0 or b.dim() == 0:
@@ -48,7 +49,7 @@ class _SFMode(TorchFunctionMode):
             sq_a, sq_b = a.dim() == 1, b.dim() == 1
             a2 = a.unsqueeze(0) if sq_a else a
             b2 = b.unsqueeze(-1) if sq_b else b
-            y = torch.ops.sf.matmul(a2, b2, cfg.bits, cfg.headroom, self._name("matmul"))
+            y = call_matmul(a2, b2, cfg, self._name("matmul"))
             if sq_a:
                 y = y.squeeze(-2)
             if sq_b:
@@ -74,8 +75,7 @@ class _SFMode(TorchFunctionMode):
         cols = F.unfold(x, (kh, kw), dilation=dilation, padding=padding, stride=stride)
         oh = (h + 2 * padding[0] - dilation[0] * (kh - 1) - 1) // stride[0] + 1
         ow = (wd + 2 * padding[1] - dilation[1] * (kw - 1) - 1) // stride[1] + 1
-        y = torch.ops.sf.linear(cols.transpose(1, 2), w.reshape(oc, -1), b, self.cfg.bits,
-                                self.cfg.scale, self.cfg.headroom, self._name("conv2d"))
+        y = call_linear(cols.transpose(1, 2), w.reshape(oc, -1), b, self.cfg, self._name("conv2d"))
         return y.transpose(1, 2).reshape(n, oc, oh, ow)
 
 
@@ -87,8 +87,8 @@ class autocast:
     """Context manager and decorator (plain and ``async`` functions)."""
 
     def __init__(self, dtype="sf16", scale: str = "per_tensor", headroom: str = "bound",
-                 prefix: str = "autocast.") -> None:
-        self.cfg = SFConfig(_bits_of(dtype), scale, headroom)
+                 prefix: str = "autocast.", *, accumulate: str = "chain", shift: int | None = None) -> None:
+        self.cfg = SFConfig(_bits_of(dtype), scale, headroom, accumulate, shift)
         self.prefix = prefix
         self._modes = []
 
@@ -103,7 +103,7 @@ class autocast:
 
     def __call__(self, fn):
         kw = dict(dtype=self.cfg.dtype_name, scale=self.cfg.scale, headroom=self.cfg.headroom,
-                  prefix=self.prefix)
+                  prefix=self.prefix, accumulate=self.cfg.accumulate, shift=self.cfg.shift)
         if inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn) \
                 or inspect.isgeneratorfunction(fn):
             # torch function modes live on a thread-local stack, not a context

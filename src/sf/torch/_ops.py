@@ -9,6 +9,10 @@
   dequantized weights ``W_q``.
 * ``sf::matmul(a, b, bits, headroom, name)``: chip-exact SF matmul of two
   activations, straight-through gradient.
+* ``sf::linear_wide(x, weight, bias, bits, shift, name)`` and
+  ``sf::matmul_wide(a, b, bits, shift, name)``: the same on the MX engine
+  (``accumulate="wide"``), with the wide-mode shift rule; ``shift`` (an int
+  or None) overrides the rule.  Separate ops, so chain graphs are unchanged.
 
 Each op is one opaque node in a ``torch.compile`` graph, which is what lets
 the ``superfloat`` backend send exactly these to the chip.  Eager execution
@@ -25,6 +29,7 @@ from typing import Optional
 import numpy as np
 import torch
 
+from .. import _linalg
 from . import _core
 from ._status import SFLayerStatus, record
 
@@ -44,7 +49,21 @@ def _record(name, op, runner, bits, r: _core.CoreResult):
         name=name, op=op, placement=runner.placement, dtype=_FMT_NAMES[bits], outputs=r.outputs,
         saturated=r.saturated, exact=r.exact, underflow=r.underflow,
         input_underflow=r.input_underflow, weight_underflow=r.weight_underflow,
-        bias_saturated=r.bias_saturated, headroom_bits=r.headroom_bits, act_scale=r.act_scale))
+        bias_saturated=r.bias_saturated, headroom_bits=r.headroom_bits, act_scale=r.act_scale,
+        accumulate=r.accumulate, shift_min=r.shift_min, shift_max=r.shift_max, h=r.h,
+        redone=r.redone, flushed=r.flushed, acc_clipped=r.acc_clipped, guard_raised=r.guard_raised))
+
+
+def _mx_of(runner):
+    """The MX version the runner's target has (the host follows the default device)."""
+    from .. import _array, _device
+    if runner.placement == "host":
+        return _array._host_mx()
+    mx = _device.get_device(runner.placement).mx
+    if not mx:
+        import sf
+        raise sf.SFUnsupportedError(f"accumulate=\"wide\" needs an MX engine; {runner.placement} has none")
+    return _linalg.mx_version(mx)
 
 
 # --- implementations shared by eager and the compile backend ---------------------------
@@ -59,6 +78,27 @@ def linear_impl(x, weight, bias, bits, wscale, headroom, name, runner):
                      bits, wscale, headroom, runner)
     _record(name, "linear", runner, bits, r)
     return torch.from_numpy(r.y.reshape(*lead, N)).to(out_dtype(x.dtype))
+
+
+def linear_wide_impl(x, weight, bias, bits, shift, name, runner):
+    K, N = weight.shape[1], weight.shape[0]
+    if x.shape[-1] != K:
+        raise ValueError(f"sf.linear: input has {x.shape[-1]} features, weight expects {K}")
+    lead = x.shape[:-1]
+    r = _core.wide_linear(_np(x).reshape(-1, K), _np(weight), None if bias is None else _np(bias),
+                          bits, shift, runner, _mx_of(runner))
+    _record(name, "linear", runner, bits, r)
+    return torch.from_numpy(r.y.reshape(*lead, N)).to(out_dtype(x.dtype))
+
+
+def matmul_wide_impl(a, b, bits, shift, name, runner):
+    if a.dim() < 2 or b.dim() < 2:
+        raise ValueError("sf.matmul expects operands with at least 2 dimensions")
+    if a.shape[-1] != b.shape[-2]:
+        raise ValueError(f"sf.matmul: shapes {tuple(a.shape)} and {tuple(b.shape)} are not aligned")
+    r = _core.wide_matmul(_np(a), _np(b), bits, shift, runner, _mx_of(runner))
+    _record(name, "matmul", runner, bits, r)
+    return torch.from_numpy(np.ascontiguousarray(r.y)).to(out_dtype(torch.promote_types(a.dtype, b.dtype)))
 
 
 def matmul_impl(a, b, bits, headroom, name, runner):
@@ -190,5 +230,87 @@ def _matmul_backward(ctx, g):
 
 torch.library.register_autograd("sf::matmul", _matmul_backward, setup_context=_matmul_setup)
 
+# --- wide mode: sf::linear_wide, sf::matmul_wide ----------------------------------------------
+
+@torch.library.custom_op("sf::linear_wide", mutates_args=())
+def linear_wide(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor], bits: int,
+                shift: Optional[int], name: str) -> torch.Tensor:
+    return linear_wide_impl(x, weight, bias, bits, shift, name, _core.HostRunner())
+
+
+@linear_wide.register_fake
+def _(x, weight, bias, bits, shift, name):
+    return x.new_empty(tuple(x.shape[:-1]) + (weight.shape[0],), dtype=out_dtype(x.dtype))
+
+
+def _linear_wide_setup(ctx, inputs, output):
+    x, weight, bias, bits, shift, name = inputs
+    ctx.save_for_backward(x, weight)
+    ctx.has_bias = bias is not None
+    ctx.bits = bits
+
+
+def _linear_wide_backward(ctx, g):
+    """Straight-through: the gradient of x @ W_q^T + b, W_q the weights as
+    wide mode quantizes them (one power-of-two exponent per output channel)."""
+    x, weight = ctx.saved_tensors
+    import sf
+    from .. import _heuristic
+    fmt = sf.dtypes[ctx.bits - 4]._fmt
+    qw, ew, _ = _heuristic.quantize_pow2(fmt, _np(weight), -1)
+    w_q = torch.from_numpy(np.ldexp(qw.astype(np.float64), (ew - (fmt.bits - 1))[:, None])).to(g.dtype)
+    g2 = g.reshape(-1, g.shape[-1])
+    x2 = x.detach().reshape(-1, x.shape[-1]).to(g.dtype)
+    grad_x = (g2 @ w_q).reshape(x.shape).to(x.dtype) if ctx.needs_input_grad[0] else None
+    grad_w = (g2.T @ x2).to(weight.dtype) if ctx.needs_input_grad[1] else None
+    grad_b = g2.sum(0).to(weight.dtype) if (ctx.has_bias and ctx.needs_input_grad[2]) else None
+    return grad_x, grad_w, grad_b, None, None, None
+
+
+torch.library.register_autograd("sf::linear_wide", _linear_wide_backward, setup_context=_linear_wide_setup)
+
+
+@torch.library.custom_op("sf::matmul_wide", mutates_args=())
+def matmul_wide(a: torch.Tensor, b: torch.Tensor, bits: int, shift: Optional[int], name: str) -> torch.Tensor:
+    return matmul_wide_impl(a, b, bits, shift, name, _core.HostRunner())
+
+
+@matmul_wide.register_fake
+def _(a, b, bits, shift, name):
+    batch = torch.broadcast_shapes(a.shape[:-2], b.shape[:-2])
+    return a.new_empty(tuple(batch) + (a.shape[-2], b.shape[-1]),
+                       dtype=out_dtype(torch.promote_types(a.dtype, b.dtype)))
+
+
+def _matmul_wide_backward(ctx, g):
+    a, b = ctx.saved_tensors
+    ad, bd = a.detach().to(g.dtype), b.detach().to(g.dtype)
+    grad_a = _reduce_to(g @ bd.transpose(-1, -2), a.shape).to(a.dtype) if ctx.needs_input_grad[0] else None
+    grad_b = _reduce_to(ad.transpose(-1, -2) @ g, b.shape).to(b.dtype) if ctx.needs_input_grad[1] else None
+    return grad_a, grad_b, None, None, None
+
+
+torch.library.register_autograd("sf::matmul_wide", _matmul_wide_backward, setup_context=_matmul_setup)
+
+
+# --- one entry point for modules, autocast and the functional API ------------------------------
+
+def call_linear(x, weight, bias, cfg, name):
+    if cfg.accumulate == "wide":
+        return torch.ops.sf.linear_wide(x, weight, bias, cfg.bits, cfg.shift, name)
+    return torch.ops.sf.linear(x, weight, bias, cfg.bits, cfg.scale, cfg.headroom, name)
+
+
+def call_matmul(a, b, cfg, name):
+    if cfg.accumulate == "wide":
+        return torch.ops.sf.matmul_wide(a, b, cfg.bits, cfg.shift, name)
+    return torch.ops.sf.matmul(a, b, cfg.bits, cfg.headroom, name)
+
+
 SF_OPS = {"sf.linear": "linear", "sf.linear.default": "linear",
-          "sf.matmul": "matmul", "sf.matmul.default": "matmul"}
+          "sf.matmul": "matmul", "sf.matmul.default": "matmul",
+          "sf.linear_wide": "linear_wide", "sf.linear_wide.default": "linear_wide",
+          "sf.matmul_wide": "matmul_wide", "sf.matmul_wide.default": "matmul_wide"}
+
+# (bits, name) argument positions of each op, for the compile backend
+SF_OP_ARGS = {"linear": (3, 6), "matmul": (2, 4), "linear_wide": (3, 5), "matmul_wide": (2, 4)}

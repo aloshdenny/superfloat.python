@@ -32,7 +32,7 @@ from .kernels import (HardwareAtreides, Kernel, LaunchResult, Limits, SimulatorA
                       arange, autotune, barrier, block_dim, block_idx, cdiv, constexpr, jit, kernel,
                       load, predicate, program_id, shared, store, synchronize, thread_idx)
 
-__version__ = "0.8.0"           # shift per output in wide matmul; MX model v4.9.2 by default, v4.8.1 selectable
+__version__ = "0.9.0"           # sf.torch wide mode with the shift rule; shift per output; MX v4.9.2 by default
 
 # sf.sf4 .. sf.sf16
 globals().update({cls.__name__: cls for cls in DTYPES.values()})

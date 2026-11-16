@@ -60,20 +60,25 @@ def quantize(t: torch.Tensor, dtype="sf16", scale=None) -> torch.Tensor:
 
 
 def linear(x: torch.Tensor, weight: torch.Tensor, bias=None, dtype="sf16", scale: str = "per_tensor",
-           headroom: str = "bound", name: str = "linear") -> torch.Tensor:
-    """Functional chip-exact SF linear (what ``SFLinear`` calls)."""
-    return torch.ops.sf.linear(x, weight, bias, _bits(dtype), scale, headroom, name)
+           headroom: str = "bound", name: str = "linear", *, accumulate: str = "chain",
+           shift: int | None = None) -> torch.Tensor:
+    """Functional chip-exact SF linear (what ``SFLinear`` calls).
+    ``accumulate="wide"``: the MX engine with the wide-mode shift rule;
+    ``shift`` (an int) overrides the rule."""
+    return _ops.call_linear(x, weight, bias, SFConfig(_bits(dtype), scale, headroom, accumulate, shift), name)
 
 
 def matmul(a: torch.Tensor, b: torch.Tensor, dtype="sf16", headroom: str = "bound",
-           name: str = "matmul") -> torch.Tensor:
+           name: str = "matmul", *, accumulate: str = "chain", shift: int | None = None) -> torch.Tensor:
     """Functional chip-exact SF matmul of two activations (both dynamic
     per-tensor scale), for custom modules such as attention.  1-D operands
-    follow ``torch.matmul``."""
+    follow ``torch.matmul``.  ``accumulate="wide"``: the MX engine, one
+    exponent per row of ``a`` and per column of ``b``, shifts from the rule."""
+    cfg = SFConfig(_bits(dtype), "per_tensor", headroom, accumulate, shift)
     sq_a, sq_b = a.dim() == 1, b.dim() == 1
     a2 = a.unsqueeze(0) if sq_a else a
     b2 = b.unsqueeze(-1) if sq_b else b
-    y = torch.ops.sf.matmul(a2, b2, _bits(dtype), headroom, name)
+    y = _ops.call_matmul(a2, b2, cfg, name)
     if sq_a:
         y = y.squeeze(-2)
     if sq_b:
