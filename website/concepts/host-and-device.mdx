@@ -48,13 +48,15 @@ Only the probe costs anything, and it is small and host-side.
 
 ## What status can and cannot tell you
 
-Atreides v1 has no saturation flag the host can read back. `sf` is honest about that:
+Atreides (v4.8.1 and v4.9.2) has no saturation flag the host can read back. `sf` is honest about that:
 
 | Operation | `status.saturated` | `exact` |
 |---|---|---|
 | Any op the range bound proved safe | `0` | `True` |
 | Elementwise op, not proven safe | an upper bound from scanning the output for ±max | `False` |
 | Reduction (`sum`, `dot`, `@`), not proven safe | `None` (unknown): a partial sum can saturate and come back into range, so a scan cannot see it | `False` |
+
+Wide mode gives the same bits on the host and on a device; only the status differs ([wide mode on the device](/arrays/status#wide-mode-on-the-device)).
 
 `status.outputs_at_max` always holds the raw count of outputs sitting at ±max. `status.ok` is `True`, `False`, or `None` when unknown.
 
@@ -76,7 +78,7 @@ r.status
 | Name | What it is |
 |---|---|
 | `host` | The reference implementation, in NumPy. |
-| `atreides` | Mock of the v1 chip: runs the same reference, reports no flags. The default device. |
+| `atreides` | Mock of the v4.9.2 chip: runs the same reference, reports no flags, has the MX engine. The default device. |
 | `atreides-flags` | The same mock with sticky flags, for testing the exact-status path. |
 | `atreides-sim` | The Stage 3 simulator that also runs user kernels. |
 | `atreides-hw` | Reserved for the real chip; raises until a driver is attached. |

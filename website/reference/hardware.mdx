@@ -30,8 +30,8 @@ From then on `k[grid, block](...)` on arrays placed on `"atreides-hw"` goes
 through the driver, and `LaunchResult.status` is built from the `Counters`
 it returns. Raise `sf.SFDeviceError` from `launch` for a device fault.
 
-A count the hardware cannot read back must be `None`, not 0: v1 silicon has
-no flag register, so a v1 driver returns
+A count the hardware cannot read back must be `None`, not 0: Atreides
+(v4.8.1, v4.9.2) has no flag register, so its driver returns
 `Counters(saturated=None, underflow=None, div0=None, invalid=None)`. The status
 then says `unknown` instead of a false "0, exact". If the counts are only an
 upper bound, set `exact=False` and the runtime warns with the bound. Under
@@ -85,3 +85,17 @@ The Stage 3 tests take the target from the `DEV` constant at the top of
 Point those at your device name and run `pytest`. Every assertion compares
 integer codes and event counts, so any difference from the host reference
 is a real disagreement between the hardware and the spec.
+
+## The MX engine
+
+`Device.mx` names the chip's MX version; `sf` models both and picks the
+accumulator from it. A driver for real silicon sets it to the chip it talks to.
+
+| | v4.9.2 (default) | v4.8.1 |
+| --- | --- | --- |
+| SF16 block (sf9 to sf16) | Q10.22, 32 bits, ±512; products drop columns below 6, +80, cut to 22 fraction bits | Q6.19, 25 bits, ±32; columns below 9 dropped, +1024, cut to 19 bits |
+| SF8 block (sf4 to sf8) | Q18.14, 32 bits, exact products | Q6.14, 20 bits, exact |
+| Shift | -32 to 31, one per output (POP's Rs per token and column) | the same |
+
+`supported_bits` is the widths every op runs at (`(16,)` on Atreides);
+`wide_bits` the widths the MX engine takes (sf4 to sf16).

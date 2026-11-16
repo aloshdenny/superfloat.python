@@ -20,9 +20,10 @@ Versioning (see website/compiler/versioning.mdx):
     example a move to the v4.8.1 wide accumulator).
 """
 
-SPEC_VERSION = "1.6.0"
+SPEC_VERSION = "1.6.1"
 
 CHANGELOG = [
+    ("1.6.1", "2026-11-16", "Golden vectors: spec/golden/wide/dot_wide_shift.json (dot_wide with shift arrays, sf4 to sf16, v4.9.2 and v4.8.1, 144 cases) and spec/golden/wide/sft_wide.json (sft wide layers with every SFLayerStatus field, attention, one small model end to end), from sf's host model; to confirm on the RTL. Docs: wide-mode status, events, rounding, policy, kernels, hardware; v1 wording removed."),
     ("1.6.0", "2026-11-16", "Attention on the MX engine: sft.attention (F.scaled_dot_product_attention's arguments, GQA included) runs Q K^T with the wide-mode rule and P V with the output exponent per channel from max|V| (rows of P sum to 1; new op sf::matmul_wide_pv), both at sf16; softmax in float. sft.autocast / sft.convert(accumulate=\"wide\") catch SDPA calls (convert: attention=\"auto\"). DSL 0.11.0."),
     ("1.5.0", "2026-11-16", "Atreides targets hold sf4 to sf16 and run dot_wide at every width (the MX engine: sf4-sf8 on the SF8 block, sf9-sf16 on the SF16 block); every other op stays sf16 and is refused below it before launch. Device.wide_bits / widths_for(op) / can_run(op, fmt). A host op is offloaded only when the default device can run it at that width. sft.convert(dtype narrower than sf16) keeps the LM head at sf16 (keep_sf16=\"auto\"). DSL 0.10.0."),
     ("1.4.0", "2026-11-16", "Ships the wide-mode shift rule (sf._heuristic, margin 2): h = max(0, floor(log2 K) // 2 - 2), eo = l2 - h with l2 = pow2_exp(|a_t| |w_c|), shift = clamp(ea + ew - eo, -32, 31), and a redo at l2 for outputs at +-max. sf.torch runs Linear, Conv2d and Hugging Face Conv1D on dot_wide with it: sft.convert / autocast / linear / matmul / SFLinear take accumulate=\"wide\". Pinned by the 13 matmul cases and the h table of the heuristic section in sf_golden_v4.9.2.json. DSL 0.9.0."),
@@ -330,6 +331,10 @@ OPS = [
               "exactly 0 raises nothing",
               "golden vectors: spec/golden/dot_wide.json, v4.9.2, computed by the chip repo's mxref.Engine (the mx section "
               "of sf golden v4.9.2.json); the v4.8.1 outputs of the same inputs are in tests/data/mx_golden_v4.8.1.json",
+              "more golden vectors (sf's host model, which matches the cases above; to confirm on the RTL): "
+              "spec/golden/wide/dot_wide_shift.json (shift as an array, sf4 to sf16, both chips, 144 cases) and "
+              "spec/golden/wide/sft_wide.json (the sft wide path: layers with every status field, attention, one small "
+              "model); written by tools/gen_golden_wide.py",
               "the kernel trace picks dot or dot_wide from sf.accumulate at trace time; the kernel cache keys on it"]),
 
     # ---- memory -------------------------------------------------------------------------------

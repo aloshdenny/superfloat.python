@@ -25,7 +25,7 @@ y.status
 
 ## Three kinds of saturation count
 
-Atreides v1 has no saturation flag the host can read back, so the library distinguishes what it knows from what it guesses.
+Atreides (v4.8.1 and v4.9.2) has no saturation flag the host can read back, so the library distinguishes what it knows from what it guesses.
 
 <Tabs>
   <Tab title="Exact: proven on the host">
@@ -54,6 +54,25 @@ Atreides v1 has no saturation flag the host can read back, so the library distin
     `ok` is `None` here: the library will not claim the result is fine.
   </Tab>
 </Tabs>
+
+## Wide mode on the device
+
+**Wide mode is more accurate, but its underflow status is weaker.** `sf.errstate` decides who gets told, as always; it never selects wide mode and never changes the number.
+
+| Event | Default chain on the device | Wide mode on the device |
+| --- | --- | --- |
+| Overflow in a partial sum | Hidden if it comes back into range: `saturated` unknown | Cannot happen below the accumulator's limit (±512 on v4.9.2, ±32 on v4.8.1) |
+| Overflow at the output | Scan for ±max: an upper bound | Scan for ±max: an upper bound, `saturated<=n`, a warning |
+| Overflow at the accumulator's limit | Does not apply | Ruled out on the host when it can prove the bound; otherwise unknown |
+| Underflow | A nonzero product truncated to 0 | A nonzero **total** rounded to 0. The chip cannot report it: `underflow=unknown` |
+| Divide, invalid | Decided on the host before launch | The same; `dot` raises neither |
+
+```python
+sf.matmul(a_dev, b_dev, accumulate="wide").status
+# SFStatus(saturated<=4, underflow=unknown, div0=0, invalid=0, exact=False)
+```
+
+On the host both counts are exact, so `raise` works as usual. Under `sft`, `SFLayerStatus` adds the wide fields (`shift_min`, `shift_max`, `h`, `redone`, `flushed`, `acc_clipped`, `guard_raised`); see [PyTorch models](/guides/pytorch#wide-mode).
 
 ## Making it exact
 

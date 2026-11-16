@@ -20,6 +20,11 @@ r = axpy[(sf.cdiv(n, 256),)](sf.sf16(0.75), x, y, out, n, BLOCK=256)
 r.status, r.cycles                                     # exact events, simulated cycles
 ```
 
+Inside a kernel, `sf.dot(x, y, accumulate="wide", shift=s)` runs a block's
+dot product on the MX engine: a wide accumulator and one rounding. In a kernel
+`shift` is one int for the block; a shift per output works on arrays
+(`sf.matmul`), not in kernels yet.
+
 There is also a CUDA-style `@sf.kernel` with `thread_idx`, shared memory and
 barriers. Kernels run on a simulator today (`atreides-sim`) which has two
 independent back ends, a Python interpreter and generated C, that must agree

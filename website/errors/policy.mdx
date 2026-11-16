@@ -16,6 +16,8 @@ sf.geterr()
 
 Overflow, divide and invalid raise because they usually mean the data is outside what the format can hold. Underflow only warns because small products vanishing is normal.
 
+`errstate` never selects wide mode (`accumulate="wide"`) and never changes a result. In wide mode on a device, output overflow is an upper bound (it warns) and underflow is unknown; see [wide mode status](/arrays/status#wide-mode-on-the-device).
+
 ## Set it globally
 
 `sf.seterr` changes the policy for the current thread and returns the previous one, like `numpy.seterr`:

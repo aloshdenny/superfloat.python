@@ -133,6 +133,28 @@ them. Each one is a single place to change if the team decides differently.
   automatically with an override, reported in `SFLayerStatus`; Alosh is
   computing golden values chip-side).
 
+## Golden vectors and docs for wide mode (spec 1.6.1)
+
+* Items 9 and 10 of Alosh's build order.
+* `tools/gen_golden_wide.py` writes `spec/golden/wide/dot_wide_shift.json` (144
+  cases: sf4, 6, 8, 10, 12, 16 x full, small and sparse codes x shift per
+  token, per column, a full grid and a scalar, on v4.9.2 and v4.8.1; 60
+  saturate) and `spec/golden/wide/sft_wide.json` (6 wide layers with every
+  `SFLayerStatus` field, including the guard raising a token and two redos;
+  3 attention cases; a one-block model with a tied head, at sf16 and sf8).
+  `--check` fails if the files are out of date.
+* Source: sf's host model, which matches the emulator's 240 `dot_wide` and
+  13 heuristic cases.  To confirm on the RTL (item 9 says "then the RTL").
+* `tests/test_golden_wide.py` (160) replays them on the host, `atreides` and
+  `atreides-sim`, and checks the generator writes the same bytes.
+* Docs (item 10): wide-mode status on the device (`arrays/status`),
+  `errors/policy`, `concepts/events` (underflow in wide mode),
+  `concepts/rounding-and-truncation` (wide rounds once), `guides/kernels`,
+  `reference/hardware` (both MX engines), `concepts/host-and-device`.  "v1"
+  wording removed outside the decision records.
+* Still open from item 9: BFCL accuracy on Qwen2.5-0.5B and Qwen3-0.6B
+  (needs a GPU and Alosh's harness).
+
 ## Attention on MX (0.11.0, spec 1.6.0)
 
 * Item 4 of Alosh's build order.  `sft.attention(q, k, v, attn_mask,

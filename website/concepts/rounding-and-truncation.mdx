@@ -50,8 +50,11 @@ Rounding on the way in gives the best possible representation of your data. Trun
 | `a / b` | `trunc(k_a * 2^(N-1) / k_b)` | toward zero |
 | `sf.fma(a, b, c)` | `k_c + trunc(k_a * k_b / 2^(N-1))` | the product toward zero, then an exact add |
 | `sf.sqrt(a)` | `isqrt(k_a * 2^(N-1))` | toward zero |
+| `sf.matmul(a, b, accumulate="wide", shift=s)` | `round_half_even(total * 2^s)`, `total` in the MX accumulator | nearest, ties to even, **once** (the exception) |
 
 `a * b + c` and `sf.fma(a, b, c)` give the same bits: the product is truncated once in both. This is tested on every width.
+
+**Wide mode is the exception to "arithmetic truncates".** The MX engine adds the products in a wide accumulator and rounds once, to nearest with ties to even, when `POP` writes the result. On the SF16 block the products themselves lose their lowest partial-product columns first (v4.9.2: columns below 6 dropped, +80); on the SF8 block they are exact. See [wide mode](/arrays/wide-mode).
 
 ## Comparisons never round
 
