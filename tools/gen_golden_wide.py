@@ -111,10 +111,10 @@ def sft_wide():
 
     attn = []
     for desc, kw, hk in (("plain", {}, 2), ("causal", {"is_causal": True}, 2), ("gqa causal", {"is_causal": True, "enable_gqa": True}, 1)):
-        g = torch.Generator().manual_seed(len(attn) + 1)
-        q = torch.randn(1, 2, 6, 8, generator=g, dtype=torch.float64)
-        k = torch.randn(1, hk, 6, 8, generator=g, dtype=torch.float64)
-        v = torch.randn(1, hk, 6, 8, generator=g, dtype=torch.float64)
+        # inputs come from NumPy, not torch.randn: torch's float64 normal sampler changed by
+        # an ulp between releases, which made --check depend on the torch version
+        g = np.random.default_rng(len(attn) + 1)
+        q, k, v = (torch.from_numpy(g.standard_normal(s)) for s in ((1, 2, 6, 8), (1, hk, 6, 8), (1, hk, 6, 8)))
         sft.reset_status()
         y = sft.attention(q, k, v, name="golden", **kw)
         st = sft.last_status()
@@ -122,7 +122,7 @@ def sft_wide():
                      "y": y.tolist(), "status": {n: _status(st[f"golden.{n}"]) for n in ("scores", "pv")}})
 
     model = tiny_model(torch)
-    x = torch.randn(1, 6, 16, generator=torch.Generator().manual_seed(99), dtype=torch.float64)
+    x = torch.from_numpy(np.random.default_rng(99).standard_normal((1, 6, 16)))
     outs = {}
     for dtype in ("sf16", "sf8"):
         c = sft.convert(model, dtype=dtype, accumulate="wide")
@@ -169,8 +169,24 @@ def tiny_model(torch):
             x = x + self.down(F.gelu(self.up(x)))
             return self.head(x)
 
-    torch.manual_seed(1234)
-    return Tiny().double().eval()
+    # weights from NumPy as well (torch's init draws can change between releases), near the
+    # scales torch would use: embedding N(0, 1), linear U(+-lim) with lim the power of two at or
+    # below 1/sqrt(fan_in), LayerNorm 1 and 0.  lim is a power of two so uniform()'s
+    # low + (high - low) * u is exact: a fused multiply-add (Apple arm64) and a separate
+    # multiply and add (x86) then give the same bits
+    m = Tiny().double().eval()
+    rng = np.random.default_rng(1234)
+    with torch.no_grad():
+        for name, p in m.named_parameters():            # the tied head is the embedding: set once
+            if name.startswith("emb."):
+                p.copy_(torch.from_numpy(rng.standard_normal(tuple(p.shape))))
+            elif name.startswith("ln."):
+                p.fill_(1.0 if name.endswith("weight") else 0.0)
+            else:
+                fan_in = getattr(m, name.split(".")[0]).in_features
+                lim = float(np.ldexp(1.0, -int(np.ceil(np.log2(fan_in) / 2))))
+                p.copy_(torch.from_numpy(rng.uniform(-lim, lim, tuple(p.shape))))
+    return m
 
 
 def main(argv):
