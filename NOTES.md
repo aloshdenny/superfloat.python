@@ -133,6 +133,21 @@ them. Each one is a single place to change if the team decides differently.
   automatically with an override, reported in `SFLayerStatus`; Alosh is
   computing golden values chip-side).
 
+## nn.MultiheadAttention (0.11.3)
+
+* `sft.convert` replaces `nn.MultiheadAttention` with `SFMultiheadAttention`
+  (in `torch/_attention.py`), keeping the parameter objects.  Projections are
+  SF linears (`{name}.q/.k/.v/.out`); in wide mode the attention is
+  `sft.attention` on MX (`{name}.scores/.pv`), in chain mode SDPA in float.
+* Same call and returns as PyTorch: `batch_first`, unbatched input,
+  `attn_mask` (bool True = masked, as MHA; or additive; 2-D or per head),
+  `key_padding_mask`, `need_weights` / `average_attn_weights`, `is_causal`,
+  dropout when training, separate `kdim` / `vdim`.  `sft.attention` gained
+  `need_weights=True` (returns P).
+* Not converted (reported): `bias_k` / `bias_v`, `add_zero_attn`.
+* Tests: 7 in `tests/test_torch_attention.py`; outputs and weights within
+  2e-4 of PyTorch in wide mode.
+
 ## Big layers in blocks (0.11.2)
 
 * Qwen2.5-0.5B's LM head (151,936 x 896) ran out of memory on a 7 GB

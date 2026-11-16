@@ -162,3 +162,63 @@ def _split(m, x):
     B, T, D = x.shape
     q, k, v = blk.qkv(x).split(D, -1)
     return tuple(t.reshape(B, T, blk.h, D // blk.h).transpose(1, 2) for t in (q, k, v))
+
+
+# --- nn.MultiheadAttention ------------------------------------------------------------------------
+
+@pytest.mark.parametrize("batch_first", [False, True])
+@pytest.mark.parametrize("acc", ["wide", "chain"])
+def test_multihead_attention_matches_pytorch(batch_first, acc):
+    torch.manual_seed(0)
+    m = torch.nn.MultiheadAttention(16, 4, batch_first=batch_first).eval()
+    x = torch.randn(2, 7, 16) if batch_first else torch.randn(7, 2, 16)
+    kp = torch.zeros(2, 7, dtype=torch.bool)
+    kp[0, 5:] = True
+    causal = torch.ones(7, 7, dtype=torch.bool).triu(1)
+    c = sft.convert(torch.nn.Sequential(m), accumulate=acc)
+    assert sft.conversion_report(c).converted == [("0", "MultiheadAttention")]
+    tol = 2e-4 if acc == "wide" else 2e-3
+    with torch.no_grad():
+        for kw in ({}, {"key_padding_mask": kp}, {"attn_mask": causal},
+                   {"attn_mask": causal, "key_padding_mask": kp, "average_attn_weights": False}):
+            (ro, rw), (so, sw) = m(x, x, x, **kw), c[0](x, x, x, **kw)
+            assert so.shape == ro.shape and sw.shape == rw.shape
+            assert (so - ro).abs().max() < tol and (sw - rw).abs().max() < tol
+        assert c[0](x, x, x, need_weights=False)[1] is None
+
+
+def test_multihead_attention_names_and_wide_status():
+    torch.manual_seed(1)
+    m = torch.nn.MultiheadAttention(16, 4).eval()
+    x = torch.randn(5, 2, 16)
+    c = sft.convert(torch.nn.Sequential(m), accumulate="wide")
+    sft.reset_status()
+    with torch.no_grad():
+        c[0](x, x, x)
+    assert sorted(sft.last_status()) == ["0.k", "0.out", "0.pv", "0.q", "0.scores", "0.v"]
+    assert all(s.accumulate == "wide" for s in sft.last_status().values())
+
+
+def test_multihead_attention_variants():
+    torch.manual_seed(2)
+    m = torch.nn.MultiheadAttention(16, 4, kdim=8, vdim=12).eval()          # separate projections
+    q, k, v = torch.randn(5, 2, 16), torch.randn(6, 2, 8), torch.randn(6, 2, 12)
+    c = sft.convert(torch.nn.Sequential(m), accumulate="wide")
+    with torch.no_grad():
+        assert (c[0](q, k, v)[0] - m(q, k, v)[0]).abs().max() < 2e-4
+        x1 = torch.randn(5, 16)                                              # unbatched
+        m1 = torch.nn.MultiheadAttention(16, 4).eval()
+        c1 = sft.convert(torch.nn.Sequential(m1), accumulate="wide")[0]
+        assert (c1(x1, x1, x1)[0] - m1(x1, x1, x1)[0]).abs().max() < 2e-4
+    skipped = sft.conversion_report(sft.convert(torch.nn.Sequential(
+        torch.nn.MultiheadAttention(16, 4, add_bias_kv=True)))).skipped
+    assert skipped == [("0", "MultiheadAttention", "bias_k / bias_v are not supported yet; runs in float")]
+
+
+def test_multihead_attention_trains():
+    torch.manual_seed(3)
+    m = torch.nn.MultiheadAttention(16, 4, dropout=0.1)
+    c = sft.convert(torch.nn.Sequential(m), accumulate="wide").train()
+    x = torch.randn(5, 2, 16, requires_grad=True)
+    c[0](x, x, x)[0].sum().backward()
+    assert x.grad is not None and c[0].in_proj_weight.grad is not None and c[0].out_proj.weight.grad is not None

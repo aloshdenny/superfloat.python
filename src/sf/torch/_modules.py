@@ -329,8 +329,16 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
                 report.converted.append((full, "Conv2d"))
             else:
                 report.skipped.append((full, "Conv2d", why))
+        elif isinstance(child, nn.MultiheadAttention):
+            from ._attention import SFMultiheadAttention, mha_unsupported
+            why = mha_unsupported(child)
+            if why:
+                report.skipped.append((full, "MultiheadAttention", why))
+            else:
+                rep = SFMultiheadAttention(child, full, cfg_for(child, full))
+                report.converted.append((full, "MultiheadAttention"))
         elif isinstance(child, (nn.Conv1d, nn.Conv3d, nn.ConvTranspose1d, nn.ConvTranspose2d,
-                                nn.ConvTranspose3d, nn.MultiheadAttention, nn.Bilinear,
+                                nn.ConvTranspose3d, nn.Bilinear,
                                 nn.LSTM, nn.GRU, nn.RNN)):
             report.skipped.append((full, type(child).__name__, "no SF version yet; runs in float"))
         else:

@@ -28,13 +28,15 @@ ATTENTION_BITS = 16
 
 
 def attention(query, key, value, attn_mask=None, dropout_p: float = 0.0, is_causal: bool = False,
-              scale: float | None = None, enable_gqa: bool = False, *, name: str = "attention"):
+              scale: float | None = None, enable_gqa: bool = False, *, name: str = "attention",
+              need_weights: bool = False):
     """``F.scaled_dot_product_attention`` with both matmuls on the MX engine.
 
     Statuses are recorded as ``{name}.scores`` and ``{name}.pv``.  Shapes
     follow PyTorch: query (..., L, E), key (..., S, E), value (..., S, Ev);
     with ``enable_gqa`` the key and value heads (dim -3) are repeated to the
     query's.  ``dropout_p`` applies to P in float (training only).
+    ``need_weights=True`` also returns P (after softmax, before dropout).
     """
     if query.dim() < 2:
         raise ValueError("sft.attention: query must have at least 2 dimensions")
@@ -59,9 +61,9 @@ def attention(query, key, value, attn_mask=None, dropout_p: float = 0.0, is_caus
         else:
             scores = scores + attn_mask
     p = torch.softmax(scores, dim=-1)
-    if dropout_p > 0.0:
-        p = F.dropout(p, dropout_p)
-    return torch.ops.sf.matmul_wide_pv(p, value, ATTENTION_BITS, f"{name}.pv")
+    pd = F.dropout(p, dropout_p) if dropout_p > 0.0 else p
+    out = torch.ops.sf.matmul_wide_pv(pd, value, ATTENTION_BITS, f"{name}.pv")
+    return (out, p) if need_weights else out
 
 
 _SDPA_KW = ("attn_mask", "dropout_p", "is_causal", "scale", "enable_gqa")
@@ -112,3 +114,105 @@ def install(model: torch.nn.Module) -> None:
 
     model._sf_attention_hooks = (model.register_forward_pre_hook(pre),
                                  model.register_forward_hook(post, always_call=True))
+
+
+def mha_unsupported(m: torch.nn.MultiheadAttention) -> str | None:
+    """Why ``m`` cannot be converted, or None."""
+    if m.bias_k is not None or m.bias_v is not None:
+        return "bias_k / bias_v are not supported yet; runs in float"
+    if m.add_zero_attn:
+        return "add_zero_attn is not supported yet; runs in float"
+    return None
+
+
+class SFMultiheadAttention(torch.nn.Module):
+    """``nn.MultiheadAttention`` with its projections as SF linears and, in
+    wide mode, its attention on the MX engine (``sft.attention``).  Keeps the
+    original parameter objects.  Same call and returns as PyTorch:
+    ``forward(query, key, value, key_padding_mask=None, need_weights=True,
+    attn_mask=None, average_attn_weights=True, is_causal=False)``.
+    Statuses: ``{name}.q``, ``.k``, ``.v``, ``.out``, and in wide mode
+    ``{name}.scores`` / ``.pv``."""
+
+    def __init__(self, m: torch.nn.MultiheadAttention, name: str, cfg):
+        super().__init__()
+        why = mha_unsupported(m)
+        if why:
+            raise ValueError(f"sft: cannot convert {name}: {why}")
+        self.embed_dim, self.num_heads, self.head_dim = m.embed_dim, m.num_heads, m.head_dim
+        self.batch_first, self.dropout = m.batch_first, m.dropout
+        self.same = m._qkv_same_embed_dim
+        if self.same:
+            self.in_proj_weight = m.in_proj_weight
+        else:
+            self.q_proj_weight, self.k_proj_weight, self.v_proj_weight = m.q_proj_weight, m.k_proj_weight, m.v_proj_weight
+        self.in_proj_bias = m.in_proj_bias
+        self.out_proj = m.out_proj
+        self.sf = cfg
+        self.sf_name = name
+
+    def _proj(self, x, i, part):
+        from ._ops import call_linear
+        E = self.embed_dim
+        if self.same:
+            w = self.in_proj_weight[i * E:(i + 1) * E]
+        else:
+            w = (self.q_proj_weight, self.k_proj_weight, self.v_proj_weight)[i]
+        b = None if self.in_proj_bias is None else self.in_proj_bias[i * E:(i + 1) * E]
+        return call_linear(x, w, b, self.sf, f"{self.sf_name}.{part}")
+
+    def forward(self, query, key, value, key_padding_mask=None, need_weights: bool = True, attn_mask=None,
+                average_attn_weights: bool = True, is_causal: bool = False):
+        from ._ops import call_linear
+        unbatched = query.dim() == 2
+        if unbatched:
+            query, key, value = query.unsqueeze(1), key.unsqueeze(1), value.unsqueeze(1)
+            if key_padding_mask is not None:
+                key_padding_mask = key_padding_mask.unsqueeze(0)
+        if self.batch_first and not unbatched:
+            query, key, value = (t.transpose(0, 1) for t in (query, key, value))
+        L, N, _ = query.shape                                      # (L, N, E) from here
+        S = key.shape[0]
+        H, hd = self.num_heads, self.head_dim
+        q, k, v = (self._proj(t, i, p) for i, (t, p) in enumerate(((query, "q"), (key, "k"), (value, "v"))))
+        q, k, v = (t.reshape(t.shape[0], N, H, hd).permute(1, 2, 0, 3) for t in (q, k, v))   # (N, H, len, hd)
+
+        mask = None                                                 # additive, broadcast to (N, H, L, S)
+        if attn_mask is None and is_causal:
+            attn_mask = torch.ones(L, S, dtype=torch.bool, device=q.device).triu(1)
+        if attn_mask is not None:
+            am = attn_mask
+            if am.dim() == 3:
+                am = am.reshape(N, H, L, S)
+            mask = (torch.zeros(am.shape, dtype=q.dtype).masked_fill(am, float("-inf"))
+                    if am.dtype == torch.bool else am.to(q.dtype))
+        if key_padding_mask is not None:
+            kp = key_padding_mask.reshape(N, 1, 1, S)
+            kp = (torch.zeros(kp.shape, dtype=q.dtype).masked_fill(kp, float("-inf"))
+                  if kp.dtype == torch.bool else kp.to(q.dtype))
+            mask = kp if mask is None else mask + kp
+
+        p_drop = self.dropout if self.training else 0.0
+        if self.sf.accumulate == "wide":
+            r = attention(q, k, v, attn_mask=mask, dropout_p=p_drop, name=self.sf_name, need_weights=need_weights)
+        else:
+            r = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=p_drop)
+            if need_weights:
+                s = (q @ k.transpose(-2, -1)) / math.sqrt(hd)
+                r = (r, torch.softmax(s if mask is None else s + mask, dim=-1))
+        out, w = r if need_weights else (r, None)
+        out = out.permute(2, 0, 1, 3).reshape(L, N, self.embed_dim)
+        out = call_linear(out, self.out_proj.weight, self.out_proj.bias, self.sf, f"{self.sf_name}.out")
+        if self.batch_first and not unbatched:
+            out = out.transpose(0, 1)
+        if unbatched:
+            out = out.squeeze(1)
+        if w is not None:
+            w = w.mean(dim=1) if average_attn_weights else w
+            if unbatched:
+                w = w.squeeze(0)
+        return out, w
+
+    def extra_repr(self) -> str:
+        return (f"embed_dim={self.embed_dim}, num_heads={self.num_heads}, batch_first={self.batch_first}, "
+                f"{self.sf.describe()}, name={self.sf_name!r}")
