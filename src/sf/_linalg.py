@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import _fastmx
+
 from . import _vectorized as vec
 from ._format import SFFormat
 
@@ -147,6 +149,7 @@ MX_DEFAULT = "v4.9.2"
 MX_UNITS = MX_TARGETS[MX_DEFAULT]            # the default chip's units
 SHIFT_MIN, SHIFT_MAX = -32, 31
 _WIDE_BLOCK_ELEMS = 1 << 22          # products held at once by matmul_wide_acc (memory, not bits)
+FAST_MX = True                     # use the compiled accumulator (sf._fastmx) when it builds; same bits
 
 
 def mx_version(mx) -> str | None:
@@ -271,6 +274,16 @@ def matmul_wide_acc(fmt: SFFormat, a: np.ndarray, b: np.ndarray, mx=None):
     lo, hi = -(1 << (W - 1)), (1 << (W - 1)) - 1
     am, bm = _mx_mags(fmt, a, blk), _mx_mags(fmt, b, blk)
     an, bn = a < 0, b < 0
+    if FAST_MX and _fastmx.available():
+        # compiled path: the same integers (tests/test_fastmx.py), much faster
+        A = np.broadcast_to(am, batch + am.shape[-2:]).reshape(-1, *am.shape[-2:])
+        As = np.broadcast_to(an, batch + an.shape[-2:]).reshape(-1, *an.shape[-2:])
+        B = np.broadcast_to(bm, batch + bm.shape[-2:]).reshape(-1, *bm.shape[-2:])
+        Bs = np.broadcast_to(bn, batch + bn.shape[-2:]).reshape(-1, *bn.shape[-2:])
+        outs = [_fastmx.acc2d(A[i], As[i], B[i], Bs[i], blk == 16, unit, lo, hi) for i in range(A.shape[0])]
+        acc = np.stack([o[0] for o in outs]).reshape(out_shape)
+        clipped = np.stack([o[1] for o in outs]).reshape(out_shape)
+        return acc, clipped, F
     acc = np.zeros(out_shape, dtype=np.int64)
     clipped = np.zeros(out_shape, dtype=bool)
     N = out_shape[-1]

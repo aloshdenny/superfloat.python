@@ -133,6 +133,23 @@ them. Each one is a single place to change if the team decides differently.
   automatically with an override, reported in `SFLayerStatus`; Alosh is
   computing golden values chip-side).
 
+## A compiled MX accumulator on the host (0.11.1)
+
+* `sf/_fastmx.py`: the MX accumulation in C (compiled once with `cc`,
+  cached on disk, published atomically), rows split across threads (ctypes
+  releases the GIL).  `_linalg.matmul_wide_acc` uses it when it builds
+  (`FAST_MX`); otherwise, or with `SF_FAST_MX=0`, the NumPy reference.
+* SF16 products in closed form: `t = (comp + a*w - C[a mod 2^tk][w mod
+  2^tk]) >> (30 - F)`, where `C` is the sum of the dropped columns (a 64 x 64
+  table on v4.9.2, 512 x 512 on v4.8.1).  No bit loop.  SF8: `a*w`.
+  The clip once per group of 8 and the clip mask as in the reference.
+* Bits: `tests/test_fastmx.py` (22) against the reference on every width,
+  both chips, clipping and edge codes, batches, and the emulator's 240
+  golden cases.  GPT-2 perplexity identical to every digit (60.70888535488952).
+* Speed (2 cores): a 128 x 768 x 3072 SF16 layer 0.36 s against 10.6 s (29x);
+  GPT-2 small about 30x faster per window.
+* `pyproject.toml` version was 0.4.0; now matches `sf.__version__` (tested).
+
 ## Golden vectors and docs for wide mode (spec 1.6.1)
 
 * Items 9 and 10 of Alosh's build order.
