@@ -250,11 +250,12 @@ def test_offload_threshold_for_reductions():
     assert launches() == n0 + 4
     assert all(r.device == DEV and r.status is not None for r in (s, d, m, v))
     assert s.codes.tolist() == sf.array([0.1, 0.1, 0.1], dtype=sf.sf16).sum().code
-    # a host op the default device cannot run at that width is not offloaded:
-    # it stays on the host with the same bits (0.9.1; it used to raise)
+    # every width offloads from 0.12.0 (the chip runs sfN as the masked sf16 op); a host op
+    # the default device has no instruction for stays on the host with the same bits
     with sf.config(offload_threshold=1):
         s8 = sf.array([0.1, 0.1], dtype=sf.sf8).sum()
         m8 = sf.zeros((2, 2), sf.sf8) @ sf.zeros((2, 2), sf.sf8)
-    assert m8.device == "host"                                    # s8 is a host scalar
-    assert s8.code == sf.array([0.1, 0.1], dtype=sf.sf8).sum().code
-    assert launches() == n0 + 4
+        q8 = sf.div(sf.array([0.25, 0.125], dtype=sf.sf8), sf.array([0.5, 0.5], dtype=sf.sf8))
+    assert m8.device == DEV and s8.device == DEV and q8.device == "host"
+    assert int(np.asarray(s8.codes)) == sf.array([0.1, 0.1], dtype=sf.sf8).sum().code
+    assert launches() == n0 + 6
