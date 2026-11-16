@@ -25,6 +25,13 @@ def dev():
     return sf.device(DEV)
 
 
+@pytest.fixture
+def dev_all_ops():
+    """Divide and square root have no Atreides instruction; their kernel semantics are
+    tested on the all-ops simulator (tests/conftest.py)."""
+    return sf.device("sim-all-ops")
+
+
 @pytest.fixture(params=BACKENDS)
 def backend(request):
     with sf.config(kernel_backend=request.param):
@@ -385,7 +392,38 @@ def test_out_of_bounds_is_a_device_fault(dev, backend):
         bad[(1,), (1,)](x)
 
 
-def test_status_follows_the_policy(dev, backend):
+def test_atreides_sim_refuses_divide_and_sqrt_in_kernels(dev, backend):
+    @sf.jit
+    def kdiv(x, out, BLOCK: sf.constexpr):
+        offs = sf.arange(0, BLOCK)
+        v = sf.load(x + offs)
+        sf.store(out + offs, v / (v + 0.5))
+
+    @sf.jit
+    def ksqrt(x, out, BLOCK: sf.constexpr):
+        offs = sf.arange(0, BLOCK)
+        sf.store(out + offs, sf.sqrt(sf.load(x + offs)))
+
+    @sf.jit
+    def kidx(x, out, BLOCK: sf.constexpr):                          # integer // stays allowed
+        offs = sf.arange(0, BLOCK)
+        sf.store(out + offs // 2, sf.load(x + offs))
+
+    x = dev.upload(np.full(4, 0.25))
+    out = dev.alloc(4)
+    before = out.codes.copy()
+    with pytest.raises(sf.SFUnsupportedError, match="SF divide"):
+        kdiv[(1,)](x, out, BLOCK=4)
+    with pytest.raises(sf.SFUnsupportedError, match="sf.sqrt"):
+        ksqrt[(1,)](x, out, BLOCK=4)
+    assert np.array_equal(out.codes, before)                          # refused before launch
+    kidx[(1,)](x, out, BLOCK=4)
+    for name in ("atreides-flags", "atreides-hw"):
+        assert "div" not in (sf.device(name).supported_ops or {"div"})
+
+
+def test_status_follows_the_policy(dev_all_ops, backend):
+    dev = dev_all_ops
     @sf.jit
     def k(x, out, BLOCK: sf.constexpr):
         offs = sf.arange(0, BLOCK)
@@ -465,7 +503,8 @@ def test_c_backend_is_bit_identical_to_the_interpreter(dev):
         assert results["interp"][1:] == results["c"][1:]
 
 
-def test_c_backend_emits_the_builtins(dev):
+def test_c_backend_emits_the_builtins(dev_all_ops):
+    dev = dev_all_ops
     @sf.jit
     def k(x, out, BLOCK: sf.constexpr):
         offs = sf.arange(0, BLOCK)
