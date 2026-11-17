@@ -83,6 +83,43 @@ def _pair(v):
     return tuple(v) if isinstance(v, (tuple, list)) else (v, v)
 
 
+def is_hf_conv1d(m: nn.Module) -> bool:
+    """True for Hugging Face's ``Conv1D`` (GPT-2 and relatives): a linear layer
+    whose weight is stored transposed, ``(in, out)``.  Recognised by its shape
+    and attributes, so ``transformers`` is never imported."""
+    w = getattr(m, "weight", None)
+    return (type(m).__name__ == "Conv1D" and isinstance(getattr(m, "nf", None), int)
+            and isinstance(getattr(m, "nx", None), int) and isinstance(w, torch.Tensor)
+            and tuple(w.shape) == (m.nx, m.nf))
+
+
+class SFHFConv1D(nn.Module):
+    """Hugging Face ``Conv1D`` with chip-exact SF arithmetic.
+
+    The same maths as ``SFLinear``; the weight keeps its ``(in, out)`` layout
+    and is the source layer's own parameter object, so tied weights, an
+    existing optimizer and ``requires_grad`` all carry over."""
+
+    def __init__(self, conv: nn.Module, name: str, cfg: SFConfig) -> None:
+        super().__init__()
+        if not is_hf_conv1d(conv):
+            raise ValueError("not a Hugging Face Conv1D")
+        self.nf, self.nx = conv.nf, conv.nx
+        self.sf = cfg
+        self.sf_name = name
+        self.weight = conv.weight
+        self.bias = conv.bias
+        self.train(conv.training)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.sf.linear(x, self.weight.t(), self.bias, self.sf.bits, self.sf.scale,
+                                   self.sf.headroom, self.sf_name)
+
+    def extra_repr(self) -> str:
+        return (f"nf={self.nf}, nx={self.nx}, dtype={self.sf.dtype_name}, scale={self.sf.scale}, "
+                f"headroom={self.sf.headroom}, name={self.sf_name!r}")
+
+
 class SFConv2d(nn.Module):
     """``nn.Conv2d`` (groups=1, zero padding) as unfold + SF linear: the patch
     extraction is data movement on the host, the reduction is the SF chain."""
@@ -143,7 +180,8 @@ class ConversionReport:
 
 def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom: str = "bound",
             inplace: bool = False) -> nn.Module:
-    """Swap ``nn.Linear`` and ``nn.Conv2d`` for SF versions with a scale policy.
+    """Swap ``nn.Linear``, ``nn.Conv2d`` and Hugging Face's ``Conv1D`` (GPT-2's
+    layers) for SF versions with a scale policy.
 
     Other modules (activations, normalisation, pooling, softmax, ...) stay as
     they are and run in float on the host; ``sft.conversion_report(model)``
@@ -166,11 +204,14 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
                 report.shared.append((full, name))
             return rep, True
         rep = None
-        if isinstance(child, (SFLinear, SFConv2d)):
+        if isinstance(child, (SFLinear, SFConv2d, SFHFConv1D)):
             report.converted.append((full, type(child).__name__ + " (already SF)"))
         elif isinstance(child, nn.Linear):
             rep = SFLinear.from_float(child, full, cfg)
             report.converted.append((full, "Linear"))
+        elif is_hf_conv1d(child):
+            rep = SFHFConv1D(child, full, cfg)
+            report.converted.append((full, "Conv1D (Hugging Face)"))
         elif isinstance(child, nn.Conv2d):
             ok, why = convertible_conv(child)
             if ok:

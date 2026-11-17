@@ -53,7 +53,7 @@ chip. This is the rule the whole device path follows.
 ```python
 import sf.torch as sft
 
-model = sft.convert(model, dtype=sf.sf16)             # Linear and Conv2d now compute in sf16
+model = sft.convert(model, dtype=sf.sf16)             # Linear, Conv2d and Hugging Face Conv1D now compute in sf16
 fast = torch.compile(model, backend="superfloat")      # sends the SF layers to the device
 out = fast(x)
 sft.last_status(model)                                 # per-layer saturation report
@@ -145,3 +145,7 @@ Not done:
 | [NOTES.md](NOTES.md) | Design decisions, open hardware questions, review history. |
 | `examples/` | A runnable tour per stage. |
 | `website/` | The developer docs site at [docs.superfloat.si](https://docs.superfloat.si) (Mintlify, hand-written). |
+
+## License
+
+sf is free to use for developing and running software on Atreides hardware, under the [Superfloat SDK License Agreement](LICENSE). Copyright (c) 2026 Superfloat Private Limited ([superfloat.si](https://superfloat.si)).

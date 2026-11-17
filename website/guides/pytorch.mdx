@@ -8,7 +8,7 @@ description: "Stage 2: quantize, convert, compile"
 ```python
 import sf.torch as sft
 
-model = sft.convert(model, dtype=sf.sf16)             # Linear and Conv2d now compute in sf16
+model = sft.convert(model, dtype=sf.sf16)             # Linear, Conv2d and Hugging Face Conv1D now compute in sf16
 fast = torch.compile(model, backend="superfloat")      # sends the SF layers to the device
 out = fast(x)
 sft.last_status(model)                                 # per-layer saturation report
