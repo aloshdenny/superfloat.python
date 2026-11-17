@@ -45,7 +45,9 @@ them. Each one is a single place to change if the team decides differently.
 * Width per layer (`sf.torch._widths`): `cost_table_v0.json` packaged and
   read as given; `layer_sensitivity` (one layer at a time, rest float);
   `choose_widths` (greedy on loss saved per cost, from all-narrowest; widths
-  not measured are extrapolated at 4x less loss per bit and flagged);
+  not measured count as no better than the next narrower measured width, 0
+  at sf16, and are flagged: the 4x-per-bit rule was wrong on Qwen, where the
+  top three layers lose only 1.1-1.3x less at sf10 than at sf8);
   `fit_widths` measures the plan on the whole model and corrects the budget,
   since the sum of single-layer losses is off by up to 1.5x on Qwen2.5-0.5B.
   `convert(widths={name: dtype})` takes the plan.  Cycles and bus words use

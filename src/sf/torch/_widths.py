@@ -127,9 +127,12 @@ def layer_sensitivity(model: nn.Module, evaluate, dtype="sf8", names=None, *, ac
 
 
 def _curves(sensitivity: dict, widths) -> tuple[dict, set]:
-    """{name: {bits: loss}} for every width in ``widths``; a width not measured is estimated from the nearest
-    measured one as 4x less loss per extra bit (the quantization error's variance halves its step per bit).
-    Negative measurements (noise) count as 0.  Returns the curves and the estimated (name, bits) points."""
+    """{name: {bits: loss}} for every width in ``widths``.  A width not measured is estimated conservatively: the
+    loss of the nearest measured narrower width (widening is assumed to buy nothing until measured), and 0 at
+    sf16 and above (sf16 is the reference: the whole Qwen2.5-0.5B at sf16 is +0.006% perplexity).  The 4x-per-bit
+    rule (the error's variance per bit) was tried and is wrong where it matters: on Qwen2.5-0.5B the three most
+    sensitive layers lose 1.1 to 1.3x less at sf10 than at sf8, not 16x less.  Negative measurements (noise)
+    count as 0.  Returns the curves and the estimated (name, bits) points."""
     measured: dict = {}
     default_bits = sensitivity.get("_bits")
     for k, v in sensitivity.items():
@@ -147,10 +150,15 @@ def _curves(sensitivity: dict, widths) -> tuple[dict, set]:
         for w in widths:
             if w in pts:
                 c[w] = pts[w]
+                continue
+            narrower = [m for m in pts if m < w]
+            if w >= 16:
+                c[w] = 0.0
+            elif narrower:
+                c[w] = pts[max(narrower)]
             else:
-                b = min(pts, key=lambda m: (abs(m - w), -m))
-                c[w] = pts[b] * 4.0 ** (b - w)
-                est.add((nm, w))
+                c[w] = max(pts.values())
+            est.add((nm, w))
         for a, b in zip(widths, widths[1:]):            # wider is never worse
             c[b] = min(c[b], c[a])
         curves[nm] = c
@@ -168,7 +176,7 @@ class WidthPlan:
     phase: str
     table_version: str
     max_loss: float
-    estimated: list = field(default_factory=list)   # layers placed at a narrower width whose loss was extrapolated
+    estimated: list = field(default_factory=list)   # layers placed at a width not measured for them
     macs: dict = field(default_factory=dict)        # name -> MACs per token
     measured_loss: float | None = None              # set by fit_widths
 
@@ -198,8 +206,8 @@ class WidthPlan:
                  f"  loss: predicted {self.predicted_loss:.4g} (budget {self.max_loss:.4g})"
                  + (f", measured {self.measured_loss:.4g}" if self.measured_loss is not None else "")]
         if self.estimated:
-            lines.append(f"  {len(self.estimated)} layer(s) with an extrapolated width (measure more widths "
-                         f"to replace the 4x-per-bit estimate)")
+            lines.append(f"  {len(self.estimated)} layer(s) at a width not measured for them (assumed no better "
+                         f"than the next narrower measured width)")
         return "\n".join(lines)
 
 

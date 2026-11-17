@@ -52,8 +52,14 @@ def test_intermediate_widths_and_estimates():
     sens = {"0": {8: 0.02, 12: 0.001}, "2": {8: 0.02}, "4": {8: -0.003}}
     p = sft.choose_widths(m, sens, max_loss=0.01, widths=(8, 10, 12, 16), keep_sf16=False)
     assert p.widths["4"] == 8                                           # negative = noise = free
-    assert p.predicted_loss <= 0.01 and p.widths["2"] > 8
-    assert "2" in p.estimated                                          # its sf10/sf12 points are extrapolated
+    assert p.predicted_loss <= 0.01 and p.widths["0"] == 12             # measured: sf12 buys almost all of it
+    assert p.widths["2"] == 16 and p.estimated == []                    # sf10 / sf12 unmeasured: assumed no gain
+    p2 = sft.choose_widths(m, {"0": {8: 0.0}, "2": {8: 0.0}, "4": {8: 0.03}}, max_loss=0.01, widths=(8, 12),
+                           keep_sf16=False)
+    assert p2.widths["4"] == 8 and p2.predicted_loss > 0.01             # nothing measured buys it back
+    p3 = sft.choose_widths(m, {"0": {8: 0.0}, "2": {8: 0.0}, "4": {8: 0.03, 12: 0.001}}, max_loss=0.01,
+                           widths=(8, 10, 12), keep_sf16=False)
+    assert p3.widths["4"] == 12 and p3.estimated == []
     pd = sft.choose_widths(m, sens, max_loss=0.01, widths=(8, 10, 12, 16), phase="decode", metric="cycles",
                            keep_sf16=False)
     assert pd.phase == "decode" and pd.predicted_loss <= 0.01
