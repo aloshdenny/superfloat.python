@@ -100,6 +100,12 @@ def read_weight(m: torch.nn.Module):
     w = getattr(m, "weight", None)
     if not isinstance(w, torch.Tensor):
         return None, None, "no weight tensor"
+    from . import _mxfp4
+    if _mxfp4.is_mxfp4_linear(m):
+        try:
+            return _mxfp4.read_mxfp4_linear(m), "MXFP4 weights, read with their E8M0 scale per block of 32", None
+        except (TypeError, ValueError) as e:
+            return None, None, f"MXFP4 weights that could not be read: {e}"
     if w.dtype in _FP8:
         name, s = _scale_of(m)
         if s is None:
@@ -134,6 +140,9 @@ _QUANT_BUFFERS = re.compile(r"^(qweight|qzeros|g_idx|packed_weight|weight_packed
 def quantized_storage(m: torch.nn.Module):
     """Own integer tensors (2-D or more) of a module sf does not know, such as
     GPTQ / AWQ ``qweight``: the reason it stays as it was, or None."""
+    if "mxfp4" in type(m).__name__.lower():
+        return ("holds MXFP4 weights packed for GPU kernels; load the checkpoint into a float model first "
+                "(sft.load_mxfp4, or transformers' Mxfp4Config(dequantize=True)); runs as it was")
     for n, t in list(m.named_parameters(recurse=False)) + list(m.named_buffers(recurse=False)):
         if t is None:
             continue

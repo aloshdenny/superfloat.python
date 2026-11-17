@@ -3,6 +3,25 @@
 Decisions the spec left open or did not state, and how this code resolves
 them. Each one is a single place to change if the team decides differently.
 
+## MXFP4 (0.13.1)
+
+* Alosh (2026-11-18): add MXFP4, the format the real gpt-oss checkpoints ship
+  in; same pattern as FP8 (read exactly, then quantize to sf).  NVFP4 is
+  skipped (native to Blackwell GPUs only).
+* `sf.torch._mxfp4`: `dequantize_mxfp4` (E2M1 low nibble first, E8M0 bias
+  127, 255 = NaN; exact in float32), `quantize_mxfp4` (the OCP encoder, for
+  tests and writing checkpoints), `load_mxfp4` (every `*_blocks` /
+  `*_scales` pair of a dict, .safetensors file or folder into the model's
+  float parameter; 3-D pairs transposed as gpt-oss stores them: always, not
+  only when the shapes need it, since a square expert matrix fits either way).
+* `convert` reads an `nn.Linear` with uint8 (out, in/2) weights and a (out,
+  in/32) E8M0 scale; `Mxfp4GptOssExperts` (GPU-packed) is skipped with the way
+  out.
+* Checked: the decoder equals `transformers`' `_convert_moe_packed_tensors`;
+  a tiny gpt-oss checkpoint written in the real layout loads to the same
+  values through `sft.load_mxfp4` and through `transformers`
+  (`from_pretrained`, CPU, dequantize); `tests/test_mxfp4.py`.
+
 ## Every matmul on sf, or a reason (0.13.0, closing Stage 2)
 
 Alosh's questions (2026-11-17): does `convert` find every layer at the right

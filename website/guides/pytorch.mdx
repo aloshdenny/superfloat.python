@@ -78,8 +78,20 @@ Each call is reported as `attention.0.scores` and `attention.0.pv`, then `attent
 | Weight | What `sft.convert` does |
 | --- | --- |
 | FP8 with scales per block or per tensor (`weight_scale_inv`, DeepSeek-V3 style, `transformers`' `FP8Linear`) | Dequantizes it (each block times its scale), then converts it like any float weight |
-| int8, packed 4-bit, GPTQ / AWQ `qweight` | Skips it with the reason; the layer runs as it was |
+| MXFP4 (`nn.Linear` with packed E2M1 weights and an E8M0 scale per block of 32) | Dequantizes it exactly, then converts it like any float weight |
+| int8, packed 4-bit, GPTQ / AWQ `qweight`, NVFP4 | Skips it with the reason; the layer runs as it was |
 | A subclass of `nn.Linear` with its own `forward` | Skips it: sf cannot tell what it computes from the weight alone |
+
+**gpt-oss and other MXFP4 checkpoints.** The gpt-oss checkpoints keep their experts in MXFP4: `<name>_blocks` (two E2M1 values per byte) and `<name>_scales` (E8M0). Load them into a float model, then convert:
+
+```python
+model = AutoModelForCausalLM.from_config(config)          # float skeleton, no quantization_config
+model.load_state_dict(other_tensors, strict=False)        # everything that is not MXFP4
+sft.load_mxfp4(model, "path/to/checkpoint")               # every *_blocks / *_scales pair, exactly
+model = sft.convert(model, dtype="sf16", accumulate="wide")
+```
+
+`sft.load_mxfp4` gives the values `transformers` gives when it dequantizes, bit for bit (gpt-oss stores experts as (E, out, in) and they are transposed, as `transformers` does). Loading with `transformers` and `Mxfp4Config(dequantize=True)` reaches the same weights. `sft.dequantize_mxfp4(blocks, scales)` and `sft.quantize_mxfp4(w)` are the decoder and encoder (OCP Microscaling v1.0: nearest E2M1, ties to even, saturating at ±6; shared exponent floor(log2 max) − 2). A module packed for GPU kernels (`Mxfp4GptOssExperts`) is skipped with a pointer to these.
 
 **The report covers every weight.** Besides converted and skipped layers, `sft.conversion_report(model)` lists any module that holds a 2-D (or larger) weight no rule converted, so nothing runs in float without a line saying so. Embedding tables are lookups, not matmuls, and are not listed. `widths` gives each converted module's width, and the first line counts them (`widths: sf8 x 96, sf16 x 25`).
 
