@@ -98,3 +98,21 @@ def test_bias_saturated_counts_clamped_bias_codes():
     with sf.config(preflight="ignore"):
         r = _core.wide_linear(x, w, b, 16, shift=20)
     assert r.bias_saturated == 2
+
+
+def test_big_layers_in_blocks_give_the_one_shot_bits_with_a_bias(monkeypatch):
+    """PR 19's blocks (an LM head quantized a block of output channels at a time) with 0.12.0's
+    on-chip bias: each block adds its own slice of the bias, and the result and every status field
+    equal the one-shot run."""
+    rng = np.random.default_rng(19)
+    x, w = rng.normal(size=(5, 40)), rng.normal(size=(23, 40)) * 0.1
+    x[1] *= 1e-3                                   # a token whose bias dominates: redone
+    b = rng.normal(size=23) * 0.5
+    with sf.config(preflight="ignore"):
+        one = _core.wide_linear(x, w, b, 16)
+        monkeypatch.setattr(_core, "WIDE_BLOCK", 40 * 4)          # 4 output channels per block
+        blk = _core.wide_linear(x, w, b, 16)
+    assert np.array_equal(one.y, blk.y)
+    for f in ("saturated", "redone", "bias_saturated", "outputs", "exact", "guard_raised", "shift_min", "shift_max"):
+        assert getattr(one, f) == getattr(blk, f), f
+    assert one.redone > 0

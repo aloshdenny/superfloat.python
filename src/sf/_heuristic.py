@@ -72,7 +72,17 @@ def _norms(fmt: SFFormat, codes: np.ndarray, axis: int) -> np.ndarray:
     return np.sqrt(np.einsum("...i,...i->...", np.moveaxis(c, axis, -1), np.moveaxis(c, axis, -1)))
 
 
-def acc_guard(fmt: SFFormat, x: np.ndarray, qa: np.ndarray, ea: np.ndarray, qb: np.ndarray, mx=None):
+def col_norm_max(fmt: SFFormat, qb: np.ndarray):
+    """The largest column norm of ``qb`` (..., K, N), as the block reads the
+    magnitudes: (..., 1).  What ``acc_guard`` bounds every token against."""
+    blk = _linalg.mx_block(fmt)
+    bmag = _linalg._mx_mags(fmt, qb, blk).astype(np.float64)
+    if not bmag.size:
+        return np.zeros(qb.shape[:-2] + (1,))
+    return np.sqrt((bmag * bmag).sum(axis=-2)).max(axis=-1, keepdims=True)
+
+
+def acc_guard(fmt: SFFormat, x: np.ndarray, qa: np.ndarray, ea: np.ndarray, qb, mx=None, bmax=None):
     """Raise per-token exponents until no accumulator can reach the unit's
     limit (+-512 on v4.9.2's SF16 block): the chip cannot report that clip.
 
@@ -85,13 +95,15 @@ def acc_guard(fmt: SFFormat, x: np.ndarray, qa: np.ndarray, ea: np.ndarray, qb: 
     (+-32) it does.
 
     ``qa``: (..., M, K) codes, ``ea``: (..., M), ``qb``: (..., K, N) codes.
+    ``bmax``: the largest column norm (``col_norm_max``), when ``qb`` comes in
+    blocks of columns; ``qb`` is then not read.
     Returns (qa, ea, raised): ``raised`` counts tokens whose exponent went up."""
     blk = _linalg.mx_block(fmt)
     unit = _linalg.mx_units(mx)[blk]
     hi = (1 << (unit["W"] - 1)) - 1
     K = qa.shape[-1]
-    bmag = _linalg._mx_mags(fmt, qb, blk).astype(np.float64)
-    bmax = np.sqrt((bmag * bmag).sum(axis=-2)).max(axis=-1, keepdims=True) if bmag.size else 0.0
+    if bmax is None:
+        bmax = col_norm_max(fmt, qb)
     P, M = fmt.bits - 1, fmt.max_code
     raised = np.zeros(ea.shape, dtype=bool)
     for _ in range(64):

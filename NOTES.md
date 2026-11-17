@@ -133,6 +133,34 @@ them. Each one is a single place to change if the team decides differently.
   automatically with an override, reported in `SFLayerStatus`; Alosh is
   computing golden values chip-side).
 
+## nn.MultiheadAttention (0.11.3)
+
+* `sft.convert` replaces `nn.MultiheadAttention` with `SFMultiheadAttention`
+  (in `torch/_attention.py`), keeping the parameter objects.  Projections are
+  SF linears (`{name}.q/.k/.v/.out`); in wide mode the attention is
+  `sft.attention` on MX (`{name}.scores/.pv`), in chain mode SDPA in float.
+* Same call and returns as PyTorch: `batch_first`, unbatched input,
+  `attn_mask` (bool True = masked, as MHA; or additive; 2-D or per head),
+  `key_padding_mask`, `need_weights` / `average_attn_weights`, `is_causal`,
+  dropout when training, separate `kdim` / `vdim`.  `sft.attention` gained
+  `need_weights=True` (returns P).
+* Not converted (reported): `bias_k` / `bias_v`, `add_zero_attn`.
+* Tests: 7 in `tests/test_torch_attention.py`; outputs and weights within
+  2e-4 of PyTorch in wide mode.
+
+## Big layers in blocks (0.11.2)
+
+* Qwen2.5-0.5B's LM head (151,936 x 896) ran out of memory on a 7 GB
+  machine: the weight was quantized at once, with several full-size copies.
+* `_core.wide_linear` now takes a weight bigger than `WIDE_BLOCK` (8M
+  elements) a block of output channels at a time.  Each channel's exponent
+  depends only on its row; the guard needs the whole layer's largest column
+  norm, so pass 1 finds it (`_heuristic.col_norm_max`, `acc_guard(bmax=)`)
+  and pass 2 computes.  Same bits and the same status
+  (`test_big_layers_in_blocks_give_the_same_bits_and_status`).
+* Qwen2.5-0.5B, first 256 tokens: float 17.40, sf16 wide with attention on
+  MX 17.42.  About 2 minutes per 256 tokens on 2 cores.
+
 ## A compiled MX accumulator on the host (0.11.1)
 
 * `sf/_fastmx.py`: the MX accumulation in C (compiled once with `cc`,
@@ -263,9 +291,9 @@ them. Each one is a single place to change if the team decides differently.
   `redone`, `flushed`, `acc_clipped`, `guard_raised` (defaults keep chain
   statuses as before).  On a device `flushed` is `None` (the chip cannot
   report it) and `saturated` after the redo is an upper bound.
-* Decision to confirm with Alosh: the bias is added in float after POP on
-  the host, as in the GPT-2 prototype.  On the chip it would be an ADD at
-  each output's exponent.
+* The bias was added in float after POP on the host, as in the GPT-2
+  prototype.  Decided (Alosh, 2026-11-17): from 0.12.0 it is added on the
+  chip at each output's exponent (see "Bias on the chip" below).
 * `_linalg.matmul_wide_acc` computes in blocks of columns (bounded memory,
   the same bits), so a 50,257-column LM head no longer runs out of memory.
 * Tests: `tests/test_torch_wide.py` (43): the `h` table, the 13 golden cases

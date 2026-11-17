@@ -34,6 +34,6 @@ raw scale.
 Wide mode (`accumulate="wide"`): power-of-two exponents, one per token for
 activations and one per output channel for weights. Every shift comes from
 `sf._heuristic` (`h_for`, `plan`), with a redo at `l2` for outputs at
-±max. `scale` and `headroom` do not apply. The bias is added in float after POP.
+±max. `scale` and `headroom` do not apply. The bias is added on the chip after POP, in SF arithmetic at each output's exponent (0.12.0).
 
 ---
