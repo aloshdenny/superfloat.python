@@ -46,6 +46,14 @@ The rule has no state, so an output depends only on its inputs. Its numbers live
 
 **Read the status, because a wrong shift raises no error.** `sft.last_status(model)` gives each layer's `shift_min`, `shift_max`, `h`, `redone` (outputs popped again), `flushed` (nonzero totals that rounded to 0, unknown on the chip) and `acc_clipped` (always 0: before launch, `sft` raises a token's exponent if its total could reach the accumulator's ±512, and counts it in `guard_raised`).
 
+**sf8 layers, sf16 head.** `sft.convert(model, dtype="sf8", accumulate="wide")` runs the layers at sf8 but keeps the LM head at sf16 by itself, because an sf8 head costs accuracy for little speed. The head is found from the model, not from names:
+
+1. The model's own `get_output_embeddings()` (Hugging Face models).
+2. Otherwise a linear layer whose weight is tied to an `nn.Embedding`.
+3. Otherwise the last linear layer whose output size is an embedding's vocabulary.
+
+A model with no embedding (a classifier) has no LM head, so nothing is kept. `sft.conversion_report(model).kept_sf16` lists what was kept and why. `keep_sf16=False` turns this off; `keep_sf16=["fc"]` keeps exactly the layers you name.
+
 - In wide mode `scale=` and `headroom=` are not used: weights are always per channel, and partial sums cannot clip at ±1.
 - The bias is added in float after POP, on the host.
 - A target without an MX engine keeps wide layers on the host, and `sft.compile_report()` says so.

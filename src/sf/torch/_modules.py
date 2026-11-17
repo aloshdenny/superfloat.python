@@ -190,25 +190,73 @@ class ConversionReport:
     converted: list = field(default_factory=list)     # (name, kind)
     skipped: list = field(default_factory=list)       # (name, kind, reason)
     shared: list = field(default_factory=list)        # (alias name, converted name): same module
+    kept_sf16: list = field(default_factory=list)     # (name, why): converted at sf16, not the narrower dtype
 
     def __repr__(self) -> str:
         lines = [f"ConversionReport: {len(self.converted)} converted, {len(self.skipped)} skipped"
-                 + (f", {len(self.shared)} shared alias(es)" if self.shared else "")]
+                 + (f", {len(self.shared)} shared alias(es)" if self.shared else "")
+                 + (f", {len(self.kept_sf16)} kept at sf16" if self.kept_sf16 else "")]
         lines += [f"  + {n} ({k})" for n, k in self.converted]
+        lines += [f"  ^ {n} kept at sf16: {w}" for n, w in self.kept_sf16]
         lines += [f"  = {a} is {n} (shared module, converted once)" for a, n in self.shared]
         lines += [f"  - {n} ({k}): {r}" for n, k, r in self.skipped]
         return "\n".join(lines)
 
 
+def _linear_like(m: nn.Module) -> bool:
+    return isinstance(m, (nn.Linear, SFLinear, SFHFConv1D)) or is_hf_conv1d(m)
+
+
+def _out_features(m: nn.Module):
+    return getattr(m, "out_features", None) or getattr(m, "nf", None)
+
+
+def find_lm_heads(model: nn.Module) -> dict[int, str]:
+    """The LM head(s) of ``model``, as {id(module): why}.  Rules, in order:
+    the model's own ``get_output_embeddings()`` (Hugging Face models); else a
+    linear layer whose weight is tied to an ``nn.Embedding``'s; else the last
+    linear layer whose output size is an embedding's vocabulary.  A model with
+    no embedding has no LM head (a classifier's last layer is not one)."""
+    get = getattr(model, "get_output_embeddings", None)
+    if callable(get):
+        try:
+            head = get()
+        except Exception:                                   # noqa: BLE001  (a model's own hook may raise)
+            head = None
+        if isinstance(head, nn.Module) and _linear_like(head):
+            return {id(head): "LM head (the model's get_output_embeddings())"}
+    embs = [m for m in model.modules() if isinstance(m, nn.Embedding)]
+    if not embs:
+        return {}
+    lins = [m for m in model.modules() if _linear_like(m)]
+    tied = {}
+    for m in lins:
+        w = getattr(m, "weight", None)
+        for e in embs:
+            if w is e.weight or (w is not None and w.data_ptr() == e.weight.data_ptr()
+                                 and w.numel() == e.weight.numel()):
+                tied[id(m)] = "LM head (weight tied to the embeddings)"
+    if tied:
+        return tied
+    vocab = {e.num_embeddings for e in embs}
+    last = [m for m in lins if _out_features(m) in vocab]
+    return {id(last[-1]): "LM head (last layer with the vocabulary's output size)"} if last else {}
+
+
 def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom: str = "bound",
             inplace: bool = False, *, accumulate: str = "chain", shift: int | None = None,
-            calibration: str = "heuristic") -> nn.Module:
+            calibration: str = "heuristic", keep_sf16="auto") -> nn.Module:
     """Swap ``nn.Linear``, ``nn.Conv2d`` and Hugging Face's ``Conv1D`` (GPT-2's
     layers) for SF versions with a scale policy.
 
     ``accumulate="wide"`` runs every converted layer on the MX engine and
     chooses every shift with the wide-mode rule (no calibration data);
     ``sft.last_status()`` reports the shifts and redos per layer.
+
+    ``keep_sf16``: with a dtype narrower than sf16, which layers still run
+    at sf16.  ``"auto"`` (default) keeps the LM head (``find_lm_heads``),
+    which costs accuracy at sf8 and little time; ``False`` keeps none; a list
+    of module names keeps exactly those.  The report lists them.
 
     Other modules (activations, normalisation, pooling, softmax, ...) stay as
     they are and run in float on the host; ``sft.conversion_report(model)``
@@ -218,6 +266,32 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
     if not inplace:
         model = copy.deepcopy(model)
     report = ConversionReport()
+    cfg16 = SFConfig(16, scale, headroom, accumulate, shift, calibration)
+    keep_ids: dict[int, str] = {}
+    keep_names: set[str] = set()
+    if keep_sf16 == "auto":
+        if cfg.bits < 16:
+            keep_ids = find_lm_heads(model)
+    elif keep_sf16 in (False, None):
+        pass
+    elif isinstance(keep_sf16, str) or not hasattr(keep_sf16, "__iter__"):
+        raise ValueError(f"keep_sf16 must be \"auto\", False or a list of module names, got {keep_sf16!r}")
+    else:
+        keep_names = set(keep_sf16)
+        if cfg.bits < 16:
+            known = {n for n, _ in model.named_modules(remove_duplicate=False)}
+            missing = sorted(keep_names - known)
+            if missing:
+                raise ValueError(f"keep_sf16: no module named {', '.join(map(repr, missing))}")
+
+    def cfg_for(child, full):
+        if cfg.bits >= 16:
+            return cfg
+        why = keep_ids.get(id(child)) or ("named in keep_sf16" if full in keep_names else None)
+        if why is None:
+            return cfg
+        report.kept_sf16.append((full, why))
+        return cfg16
     done: dict[int, tuple[str, nn.Module | None]] = {}     # id(source) -> (name, replacement)
     seen: set[int] = set()                                  # containers already visited
 
@@ -234,15 +308,15 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
         if isinstance(child, (SFLinear, SFConv2d, SFHFConv1D)):
             report.converted.append((full, type(child).__name__ + " (already SF)"))
         elif isinstance(child, nn.Linear):
-            rep = SFLinear.from_float(child, full, cfg)
+            rep = SFLinear.from_float(child, full, cfg_for(child, full))
             report.converted.append((full, "Linear"))
         elif is_hf_conv1d(child):
-            rep = SFHFConv1D(child, full, cfg)
+            rep = SFHFConv1D(child, full, cfg_for(child, full))
             report.converted.append((full, "Conv1D (Hugging Face)"))
         elif isinstance(child, nn.Conv2d):
             ok, why = convertible_conv(child)
             if ok:
-                rep = SFConv2d(child, full, cfg)
+                rep = SFConv2d(child, full, cfg_for(child, full))
                 report.converted.append((full, "Conv2d"))
             else:
                 report.skipped.append((full, "Conv2d", why))

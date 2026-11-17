@@ -9,7 +9,7 @@ Build an array by quantizing `obj`. Always copies.
 
 <ParamField path="obj" type="list | nested list | numpy array | SF scalar | SFArray">The data. A 0-d input returns a scalar.</ParamField>
 <ParamField path="dtype" type="dtype spec" default="None">Required unless `obj` already holds SF values, in which case it defaults to theirs.</ParamField>
-<ParamField path="device" type="str" default='"host"'>Where to place the result. Only sf16 is accepted on Atreides.</ParamField>
+<ParamField path="device" type="str" default='"host"'>Where to place the result. On Atreides: sf4 to sf16; only wide matmuls run below sf16.</ParamField>
 
 **Events:** overflow, underflow and invalid per element, reported with counts (`overflow in 2 of 100 element(s)`), in catalogue order.
 

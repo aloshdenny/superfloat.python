@@ -152,7 +152,7 @@ def superfloat(gm: torch.fx.GraphModule, example_inputs, **kwargs):
             layer = _arg(node, iname, "name")
             if op.endswith("_wide") and not dev.mx:
                 report.host_emulated.append((node.name, op, layer, f"{dev.name} has no MX engine"))
-            elif bits in dev.supported_bits:
+            elif bits in dev.widths_for("matmul_wide" if op.endswith("_wide") else op):
                 node.target = impl[op]
                 report.on_device.append((node.name, op, layer, dev.name))
             else:

@@ -31,7 +31,7 @@ The chip is for work whose answer the host does not know. Before any heavy opera
 
 <Steps>
   <Step title="Static checks">
-    Shapes, dtype (only sf16 on Atreides), size limits. A mismatch raises `SFShapeError` or `SFTypeError`; nothing is launched.
+    Shapes, dtype (on Atreides: sf16 for every op, sf4 to sf16 for wide matmuls), size limits. A mismatch raises `SFShapeError` or `SFTypeError`; nothing is launched.
   </Step>
   <Step title="Known answers">
     A divisor array that contains a zero, a divide where every `|a| >= |b|`, a NaN: these are events the host can see in the inputs. They are reported through the policy *before* the launch, and the chip never sees them.

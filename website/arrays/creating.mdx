@@ -53,7 +53,7 @@ Codes are validated against the width; an out-of-range code raises `SFTypeError`
 
 ## On a device
 
-Pass `device=` to place the array on a target. Only sf16 is accepted on Atreides.
+Pass `device=` to place the array on a target. sf4 to sf16 arrays can live on Atreides, but only wide matmuls (`accumulate="wide"`) run below sf16; every other op needs sf16.
 
 ```python
 h = sf.asarray(x, device="atreides")
