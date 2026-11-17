@@ -59,8 +59,9 @@ def _trunc_div(num, den):
 
 
 class Interpreter:
-    def __init__(self, ir: KernelIR, buffers: dict, scalars: dict, grid: tuple, limits) -> None:
+    def __init__(self, ir: KernelIR, buffers: dict, scalars: dict, grid: tuple, limits, mx=None) -> None:
         self.ir = ir
+        self.mx = mx                  # the target's MX version, for dot_wide
         self.buffers = buffers        # param name -> int64 numpy array (device memory)
         self.scalars = scalars        # param name -> int (sf code or int)
         self.grid = grid
@@ -216,7 +217,7 @@ class Interpreter:
         if n == "min":
             return np.min(a[0], axis=op.attrs["axis"])
         if n == "dot_wide":
-            r, ev = _linalg.matmul_wide_codes(fmt, a[0], a[1], op.attrs["shift"])
+            r, ev = _linalg.matmul_wide_codes(fmt, a[0], a[1], op.attrs["shift"], self.mx)
             self._events(ev, pred, shape)
             self.counters.macs += int(a[0].shape[0] * a[0].shape[1] * a[1].shape[1])
             return r

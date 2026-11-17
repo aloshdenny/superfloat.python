@@ -45,7 +45,7 @@ class Device:
     sticky_flags: bool = False               # per-tile SAT / DIV0 / INVALID flags
     max_elements: int | None = None          # launch limit, None = unbounded
     supported_ops: frozenset[str] | None = None  # heavy ops the target has instructions for; None = all
-    mx: bool = False                         # has the v4.8.1 MX engine (wide accumulation)
+    mx: str | bool = False                   # MX engine version ("v4.9.2", "v4.8.1"), or False: none
 
     def check(self, fmt: SFFormat, n_elements: int) -> None:
         if fmt.bits not in self.supported_bits:
@@ -88,12 +88,20 @@ class MockAtreides(Device):
     accumulator_bits = None
     sticky_flags = False
     max_elements = 1 << 28
-    mx = True                                # v4.8.1 has the MX engine
-    # v4.8.1 has no SF divide and no square root (ISA s5).  ``pow`` stays: it is a chain of mul.
+    mx = "v4.9.2"                            # the MX engine this target models; "v4.8.1" also exists
+    # v4.8.1 and v4.9.2 have no SF divide and no square root (ISA s5).  ``pow`` stays: it is a chain of mul.
     supported_ops = frozenset({"add", "sub", "mul", "fma", "neg", "abs", "pow", "sum",
                                "matmul", "matmul_wide"})
 
-    def __init__(self) -> None:
+    def __init__(self, *, mx: str | None = None, name: str | None = None) -> None:
+        """``mx`` selects the chip's MX version (default v4.9.2) and ``name``
+        the registry name, so the signed-off v4.8.1 chip stays reachable:
+        ``sf.register_device(sf.MockAtreides(mx="v4.8.1", name="atreides-v4.8.1"))``."""
+        from ._linalg import mx_version
+        if mx is not None:
+            self.mx = mx_version(mx)
+        if name is not None:
+            self.name = name
         self.launches = 0                    # for tests: proves pre-flight skipped a launch
 
     def run(self, op: str, fmt: SFFormat, *operands: np.ndarray, **kw):
@@ -123,9 +131,9 @@ def _matmul_kernel(fmt: SFFormat, a: np.ndarray, b: np.ndarray):
     return matmul_codes(fmt, a, b, order="sequential")
 
 
-def _matmul_wide_kernel(fmt: SFFormat, a: np.ndarray, b: np.ndarray, shift: int = 0):
+def _matmul_wide_kernel(fmt: SFFormat, a: np.ndarray, b: np.ndarray, shift: int = 0, mx=None):
     from ._linalg import matmul_wide_codes
-    return matmul_wide_codes(fmt, a, b, shift)
+    return matmul_wide_codes(fmt, a, b, shift, mx)
 
 
 def _sum_kernel(fmt: SFFormat, a: np.ndarray, axis: int):

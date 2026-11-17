@@ -1,6 +1,6 @@
 ---
 title: "Wide mode (MX)"
-description: "Run matrix multiplies on the v4.8.1 MX engine: a wide accumulator, one rounding at the end, and a power-of-two shift."
+description: "Run matrix multiplies on the Atreides MX engine: a wide accumulator, one rounding at the end, and a power-of-two shift."
 ---
 
 ## Two ways to accumulate
@@ -9,8 +9,8 @@ description: "Run matrix multiplies on the v4.8.1 MX engine: a wide accumulator,
 
 |  | Default: `"chain"` (FMA) | `"wide"` (MX) |
 | --- | --- | --- |
-| Running total | Same width as the data | Q6.19 for sf9 to sf16, Q6.14 for sf4 to sf8 |
-| Range of the total | ±1, saturates at every step | ±32, saturates once per 8 terms |
+| Running total | Same width as the data | 32 bits: Q10.22 for sf9 to sf16, Q18.14 for sf4 to sf8 |
+| Range of the total | ±1, saturates at every step | ±512 for sf9 to sf16, ±131,072 for sf4 to sf8; saturates once per 8 terms |
 | Rounding | Truncates every product | Rounds once at the end, half to even |
 | Best for | Reproducing today's bits, small kernels | LLM inference and other batched matmuls |
 
@@ -29,6 +29,8 @@ sf.dot(a, b, accumulate="wide")
 ```
 
 In the chain, 0.675 + 0.675 passes 1 and saturates, so the default policy raises; with `over="ignore"` it returns 0.32498169. In wide mode the total reaches 1.35 without clipping, and the answer comes back whole.
+
+The numbers on this page are for Atreides v4.9.2, the default chip. The signed-off v4.8.1 chip has the same instructions with a narrower accumulator: see [Chips](#chips).
 
 Rounding once also shows on small values. In the [matrix multiply](/arrays/matmul) example, the bottom-left output is 0.09997559 in the chain, because two products are each truncated. Wide mode keeps them exactly and rounds the total once:
 
@@ -112,7 +114,7 @@ A kernel traced inside `sf.accumulate("wide")` is cached separately from one tra
 
 ## Shift
 
-**The total can reach ±32, but the result must fit below ±1, so you choose a power-of-two `shift`.** The result is the total × 2^shift, rounded half to even and saturated at the format's largest value.
+**The total can reach ±512, but the result must fit below ±1, so you choose a power-of-two `shift`.** The result is the total × 2^shift, rounded half to even and saturated at the format's largest value.
 
 ```python
 a = sf.array([0.5] * 4, dtype=sf.sf16)
@@ -134,12 +136,12 @@ sf.dot(a, b, accumulate="wide", shift=-2)
 
 | Data | Block | Accumulator | Products |
 | --- | --- | --- | --- |
-| sf9 to sf16 | SF16 | Q6.19, 25 bits | Partial-product bits below column 9 dropped, then cut to 19 fraction bits |
-| sf4 to sf8 | SF8 | Q6.14, 20 bits | Exact |
+| sf9 to sf16 | SF16 | Q10.22, 32 bits | Partial-product bits below column 6 dropped, then cut to 22 fraction bits |
+| sf4 to sf8 | SF8 | Q18.14, 32 bits | Exact |
 
 - The result has the width of the widest input, and is never negative zero.
-- The total saturates at ±32 once per group of 8 terms. Up to 32 terms of values below 1 can never reach it.
-- The order of terms does not change the result unless the total reaches ±32.
+- The total saturates once per group of 8 terms, at ±512 on the SF16 block. Up to 512 terms of values below 1 can never reach it.
+- The order of terms does not change the result unless the total reaches the limit.
 - On the SF16 block, a product smaller than the engine resolves (for example 2⁻¹⁵ × 2⁻¹⁵) adds nothing. If every product vanishes this way, the total is exactly 0 and no event is raised.
 
 ## Errors and status
@@ -148,7 +150,7 @@ sf.dot(a, b, accumulate="wide", shift=-2)
 
 | Event | In wide mode |
 | --- | --- |
-| overflow | The total reached ±32, or the shifted result did not fit and saturated at ±max |
+| overflow | The total reached the accumulator's limit, or the shifted result did not fit and saturated at ±max |
 | underflow | A nonzero total rounded to 0 |
 | divide, invalid | Never raised by a dot product |
 
@@ -156,17 +158,39 @@ On the host the reference counts both events exactly, so `"raise"` works as usua
 
 On a device, the chip has no flags, so the status says what the host can know:
 
-- **overflow:** when the host proves the total cannot reach ±32, the outputs at ±max are an upper bound (`saturated<=n`, and a warning). Otherwise the count is unknown.
+- **overflow:** when the host proves the total cannot reach the accumulator's limit, the outputs at ±max are an upper bound (`saturated<=n`, and a warning). Otherwise the count is unknown.
 - **underflow:** always unknown, because a total that rounds to 0 leaves no trace.
 - `sf.config(status="replay")` recomputes both on the host, exactly.
 
 ## Devices
 
-**Wide mode runs on every Atreides target, because v4.8.1 has the MX engine.** That covers `atreides`, `atreides-flags`, `atreides-sim` and `atreides-hw`. On a device it gives the same bits as the host reference, so you can test without hardware.
+**Wide mode runs on every Atreides target, because the chip has the MX engine.** That covers `atreides`, `atreides-flags`, `atreides-sim` and `atreides-hw`. On a device it gives the same bits as the host reference, so you can test without hardware.
 
 A custom target without MX (`Device.mx` is `False`) refuses before launching. It never falls back to the chain silently:
 
 ```python
 sf.matmul(a_on_old, b_on_old, accumulate="wide")
-# SFUnsupportedError: sf16 @ (wide): wide accumulation needs the MX engine (Atreides v4.8.1) and old-target has none; use accumulate="chain" or a target with MX. Nothing was launched
+# SFUnsupportedError: sf16 @ (wide): wide accumulation needs the MX engine (Atreides v4.8.1 or later) and old-target has none; use accumulate="chain" or a target with MX. Nothing was launched
 ```
+
+## Chips
+
+**Each Atreides target names the MX engine it models: v4.9.2 by default, the flagship for benchmarking from 15 November 2026.** v4.9.2 is v4.8.1 with 32-bit accumulators. The instructions are the same, so only the numbers differ.
+
+| | v4.9.2 (default) | v4.8.1 |
+| --- | --- | --- |
+| SF16 block (sf9 to sf16) | Q10.22, 32 bits, ±512 | Q6.19, 25 bits, ±32 |
+| SF16 products | Columns below 6 dropped, +80, 22 fraction bits | Columns below 9 dropped, +1024, 19 fraction bits |
+| SF8 block (sf4 to sf8) | Q18.14, 32 bits, ±131,072 | Q6.14, 20 bits, ±32 |
+
+The two give different bits only when a total passes ±32 or the SF16 product cut matters. On the 240 golden inputs they differ in 8 cases.
+
+```python
+sf.get_device("atreides").mx                 # 'v4.9.2'
+
+# the signed-off v4.8.1 chip, under its own name
+sf.register_device(sf.MockAtreides(mx="v4.8.1", name="atreides-v4.8.1"))
+```
+
+Host arrays compute with the default device's engine, so a host result has the same bits as the same call on that device.
+

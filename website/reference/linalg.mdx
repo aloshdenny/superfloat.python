@@ -32,7 +32,7 @@ sf.dot(x, x)              # sf16(0.322479248046875)
 NumPy's rules: 1-D operands are promoted and the extra axis dropped; leading dimensions broadcast as a batch. Each output is `dot` of a row and a column. Shape mismatches raise `SFShapeError` on the host before any launch.
 
 <ParamField path="accumulate" type="'chain' | 'wide' | None" default="None">
-  `None` uses the `sf.accumulate` setting (default `"chain"`). `"wide"` runs on the MX engine: a ±32 accumulator and one rounding at the end. `@` always uses the setting. [Wide mode →](/arrays/wide-mode)
+  `None` uses the `sf.accumulate` setting (default `"chain"`). `"wide"` runs on the MX engine: a wide accumulator (±512 on v4.9.2) and one rounding at the end. `@` always uses the setting. [Wide mode →](/arrays/wide-mode)
 </ParamField>
 
 <ParamField path="shift" type="int | None" default="None">

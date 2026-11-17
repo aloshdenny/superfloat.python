@@ -109,8 +109,8 @@ def golden_for(name: str) -> dict | None:
         mx = json.loads((ROOT / "tests" / "data" / "mx_golden.json").read_text())
         for c in mx["cases"]:
             cases.append({"bits": c["bits"], "shift": c["shift"], "in": [c["a"], c["b"]], "out": c["out"]})
-        return {"op": name, "spec_version": SPEC_VERSION,
-                "source": mx["source"], "mxref_sha256": mx["mxref_sha256"],
+        return {"op": name, "spec_version": SPEC_VERSION, "target": mx["target"],
+                "source": mx["source"], "from": mx["from"],
                 "format": "in: [a (m x k codes), b (k x 8 codes)], out: m x 8 codes after POP at shift. Computed "
                           "by the chip repo's mxref.Engine, not by sf.",
                 "cases": cases}

@@ -133,6 +133,36 @@ them. Each one is a single place to change if the team decides differently.
   automatically with an override, reported in `SFLayerStatus`; Alosh is
   computing golden values chip-side).
 
+## Wide mode on v4.9.2 (0.7.0, spec 1.2.0)
+
+* Alosh's `sf wide mode (MX).md` (2026-11-16) makes v4.9.2 the flagship for
+  all benchmarking: v4.8.1 with 32-bit MX accumulators.  SF16 block Q10.22
+  (about +-512), products keep columns 6 and up, +80, cut to 22 fraction bits;
+  SF8 block Q18.14 (about +-131,072), exact.  The ISA is unchanged.
+* The model is now per chip.  `_linalg.MX_TARGETS` holds each chip's units
+  (`W`, `F`, `tk`, `comp`, the same names as `mxref.UNITS`);
+  `matmul_wide_codes`, `matmul_wide_acc_safe` and `_mx_products16` take them
+  from an `mx` version.  `MX_DEFAULT = "v4.9.2"`.
+* A target names its engine: `Device.mx` is a version string (`True` means the
+  default, `False` no MX).  Every Atreides target is v4.9.2;
+  `MockAtreides(mx="v4.8.1", name=...)` keeps the signed-off chip reachable.
+  Device launches, the host replay of their status, the kernel interpreter
+  and the C back end all use the target's version.  Host arrays use the
+  default device's, so offloading never changes bits.
+* The C back end's `__sf16_dot_wide` takes the unit's numbers as arguments,
+  emitted from the target; the build cache keys on the emitted source, so a
+  v4.8.1 build is never reused for v4.9.2.
+* Golden vectors: `tests/data/sf_golden_v4.9.2.json` is Alosh's file as sent
+  (its `heuristic` section is for the coming sft wide-mode work).
+  `tests/data/mx_golden.json` is its `mx` section, 240 cases, and
+  `tests/data/mx_golden_v4.8.1.json` keeps the old v4.8.1 outputs of the same
+  inputs.  Both pass 240 of 240; the chips differ on 8 of them, the sums near
+  +-32 and the SF16 product cut.  Spec golden vectors for `dot_wide` are now
+  v4.9.2's.
+* Not in this change: the heuristic, shift arrays and `sft` wide mode
+  (items 1 to 11 of the doc, separate PRs).  PR 9's target guide still
+  describes v4.8.1.
+
 ## Ops the chip does not have (0.6.1)
 
 * Atreides v4.8.1 has no SF divide and no square root (ISA section 5). Before

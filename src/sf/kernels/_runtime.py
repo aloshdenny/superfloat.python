@@ -152,10 +152,10 @@ class SimulatorAtreides(KernelDevice):
         self.kernel_launches += 1
         backend = _config.get("kernel_backend")
         if backend == "interp":
-            return Interpreter(ir, buffers, scalars, grid, self.limits).run()
+            return Interpreter(ir, buffers, scalars, grid, self.limits, self.mx).run()
         if backend == "c":
             from ._cgen import run_c
-            return run_c(ir, buffers, scalars, grid)
+            return run_c(ir, buffers, scalars, grid, self.mx)
         raise SFUnsupportedError(f"unknown kernel backend {backend!r}")
 
 
@@ -408,7 +408,7 @@ def _kernel_status(k, ir, grid, buffers, scalars, before, counters, dev) -> SFSt
     complete = exact and all(v is not None for v in got.values())
     if before is not None and not complete:
         ref_bufs = {n: b.copy() for n, b in before.items()}
-        ref = Interpreter(ir, ref_bufs, scalars, grid, dev.limits).run()
+        ref = Interpreter(ir, ref_bufs, scalars, grid, dev.limits, getattr(dev, "mx", None)).run()
         for n, b in ref_bufs.items():
             if not np.array_equal(b, buffers[n]):
                 bad = int(np.count_nonzero(b != buffers[n]))

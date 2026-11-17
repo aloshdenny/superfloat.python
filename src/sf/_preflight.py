@@ -174,7 +174,7 @@ def host_events(op: str, fmt: SFFormat, *operands, **kw):
     if op == "matmul":
         return _linalg.matmul_codes(fmt, operands[0], operands[1])
     if op == "matmul_wide":
-        return _linalg.matmul_wide_codes(fmt, operands[0], operands[1], kw.get("shift", 0))
+        return _linalg.matmul_wide_codes(fmt, operands[0], operands[1], kw.get("shift", 0), kw.get("mx"))
     if op == "sum":
         return _linalg.sum_codes(fmt, operands[0], kw.get("axis", 0))
     fn = {"abs": vec.abs_, "pow": vec.pow_int}.get(op) or getattr(vec, op)
