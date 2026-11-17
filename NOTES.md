@@ -132,6 +132,35 @@ them. Each one is a single place to change if the team decides differently.
   automatically with an override, reported in `SFLayerStatus`; Alosh is
   computing golden values chip-side).
 
+## Ops the chip does not have (0.6.1)
+
+* Atreides v4.8.1 has no SF divide and no square root (ISA section 5). Before
+  0.6.1 the four Atreides targets left `supported_ops` unset, so `a / b` and
+  `sf.sqrt(a)` on a device array ran on the mock and looked supported.
+* `MockAtreides.supported_ops` is now the v4.8.1 set: `add`, `sub`, `mul`,
+  `fma`, `neg`, `abs`, `pow`, `sum`, `matmul`, `matmul_wide`. `atreides-flags`,
+  `atreides-sim` and `atreides-hw` inherit it. `pow` stays because it is a
+  chain of `mul`.
+* Refuse, never fall back: a device `/` or `sqrt` raises `SFUnsupportedError`
+  before launch. The user moves the operands with `.to("host")`. A silent host
+  fallback would hide that a model cannot run on the chip.
+* Known answers still come first: a divide by zero or a square root of a
+  negative is reported as that, because it is read off the inputs.
+* Offloading is different, because the runtime chooses it and the user did not
+  ask for the device. `_should_offload(total, op)` keeps a host op on the host
+  when `default_device` lacks the op (or lacks MX for a wide matmul). Same
+  bits either way.
+* Tests that exercise the device rules for divide and square root (exact div0
+  and invalid, masked divide) run on a test-only target with every op,
+  `mock-all-ops` in `tests/conftest.py`.
+* Kernels too (decided by Alosh, 2026-11-17): `@sf.jit` code that uses SF `/`
+  or `sf.sqrt` is refused on `atreides-sim` and `atreides-hw` with
+  `SFUnsupportedError` before launch (`KernelDevice.check_launch` reads the
+  traced IR against `supported_ops`). Otherwise a kernel could pass in the
+  simulator and fail on the chip. Integer `//` and `%` for index arithmetic
+  are separate ops and stay allowed. Their kernel semantics (events, the C
+  builtins) are tested on `sim-all-ops` in `tests/conftest.py`.
+
 ## Immutability
 
 `SFScalar.__setattr__` allows `_code` to be set once (construction) and

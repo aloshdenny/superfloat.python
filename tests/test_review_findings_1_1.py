@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 import sf
+from conftest import ALL_OPS
 
 DEV = "atreides"
 
@@ -214,12 +215,15 @@ def test_config_reuse_nesting_async_threads():
 # P2: masked division is a heavy op on device arrays ---------------------------------------------
 
 def test_masked_div_goes_through_the_device_path():
-    x = sf.array([0.5, 0.25, 0.1], dtype=sf.sf16, device=DEV)
-    y = sf.array([0.25, 0, 0.5], dtype=sf.sf16, device=DEV)
+    # on a target that has a divide; Atreides v4.8.1 does not
+    dev = sf.get_device(ALL_OPS)
+    launches = lambda: dev.launches                                  # noqa: E731
+    x = sf.array([0.5, 0.25, 0.1], dtype=sf.sf16, device=ALL_OPS)
+    y = sf.array([0.25, 0, 0.5], dtype=sf.sf16, device=ALL_OPS)
     n0 = launches()
     mask = np.array([False, False, True])
     r = sf.div(x, y, where=mask)
-    assert launches() == n0 + 1 and r.device == DEV and r.status is not None
+    assert launches() == n0 + 1 and r.device == ALL_OPS and r.status is not None
     assert r.codes.tolist() == [0, 0, (x[2] / y[2]).code] and r.status.ok
     # live elements still carry their events, masked ones never do
     with pytest.raises(sf.SFZeroDivisionError, match="status.div0"):
@@ -230,8 +234,8 @@ def test_masked_div_goes_through_the_device_path():
     # host form unchanged
     h = sf.div(x.to("host"), y.to("host"), where=mask)
     assert h.device == "host" and h.status is None and h.codes.tolist() == r.codes.tolist()
-    with sf.config(offload_threshold=1):
-        assert sf.div(x.to("host"), y.to("host"), where=mask).device == DEV
+    with sf.config(offload_threshold=1, default_device=ALL_OPS):
+        assert sf.div(x.to("host"), y.to("host"), where=mask).device == ALL_OPS
 
 
 # P2: offloading host sum / dot / matmul uses the default device ---------------------------------

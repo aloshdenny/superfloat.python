@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 import sf
-from conftest import dtype_of
+from conftest import ALL_OPS, dtype_of
 
 DEV = "atreides"
 
@@ -116,18 +116,22 @@ def test_heavy_ops_bit_identical_to_host():
         kb = rng.integers(-32767, 32768, shape)
         kb.reshape(-1)[0] = 0
         a_h, b_h = sf.from_codes(ka, sf.sf16), sf.from_codes(kb, sf.sf16)
-        a_d, b_d = a_h.to(DEV), b_h.to(DEV)
+        # Atreides v4.8.1 has no divide or square root: those two run on the all-ops target
+        on_chip = (lambda a, b: a + b, lambda a, b: a - b, lambda a, b: a * b,
+                   lambda a, b: sf.fma(a, b, b), lambda a, b: -a, lambda a, b: abs(a),
+                   lambda a, b: a ** 3, lambda a, b: a.sum(),
+                   lambda a, b: a.sum(axis=0), lambda a, b: a + 0.25, lambda a, b: 0.5 * a)
+        not_on_chip = (lambda a, b: a / b, lambda a, b: sf.sqrt(a))
         with sf.errstate(all="ignore"), sf.config(preflight="ignore"):
-            for fn in (lambda a, b: a + b, lambda a, b: a - b, lambda a, b: a * b, lambda a, b: a / b,
-                       lambda a, b: sf.fma(a, b, b), lambda a, b: -a, lambda a, b: abs(a),
-                       lambda a, b: sf.sqrt(a), lambda a, b: a ** 3, lambda a, b: a.sum(),
-                       lambda a, b: a.sum(axis=0), lambda a, b: a + 0.25, lambda a, b: 0.5 * a):
-                h = fn(a_h, b_h)
-                d = fn(a_d, b_d)
-                hc = h.codes if isinstance(h, sf.SFArray) else np.asarray(h.code)
-                dc = d.codes if isinstance(d, sf.SFArray) else np.asarray(d.code)
-                assert np.array_equal(hc, dc)
-                assert isinstance(d, sf.SFArray) and d.device == DEV and d.status is not None
+            for dev, fns in ((DEV, on_chip), (ALL_OPS, on_chip + not_on_chip)):
+                a_d, b_d = a_h.to(dev), b_h.to(dev)
+                for fn in fns:
+                    h = fn(a_h, b_h)
+                    d = fn(a_d, b_d)
+                    hc = h.codes if isinstance(h, sf.SFArray) else np.asarray(h.code)
+                    dc = d.codes if isinstance(d, sf.SFArray) else np.asarray(d.code)
+                    assert np.array_equal(hc, dc)
+                    assert isinstance(d, sf.SFArray) and d.device == dev and d.status is not None
     for (M, K, N) in [(4, 4, 4), (16, 64, 8), (1, 300, 1)]:
         a = rand((M, K), -0.9, 0.9, M)
         b = rand((K, N), -0.9, 0.9, N + 10)
@@ -172,20 +176,24 @@ def test_status_fields_and_policy():
     assert s.codes.tolist() == [32767, -16384 + 100]
     # an exact ±max from a non-saturating add is still counted (upper bound)
     assert s.status.saturated == 1 and not s.status.exact
-    # div0 and invalid are exact, read off the inputs, and honour the policy fully
+    # div0 and invalid are exact, read off the inputs, and honour the policy fully.
+    # Atreides has no divide or square root, so the full path runs on the all-ops target.
     b = sf.array([0.5, 0, 0.25, 0], dtype=sf.sf16, device=DEV)
     n0 = launches()
     with pytest.raises(sf.SFZeroDivisionError, match="status.div0"):
         a / b                                                      # known on the host, before launch
     assert launches() == n0
-    a2 = sf.array([0.75, 0.25, -0.1, 0.5], dtype=sf.sf16, device=DEV)
+    full = sf.get_device(ALL_OPS)
+    a2 = sf.array([0.75, 0.25, -0.1, 0.5], dtype=sf.sf16, device=ALL_OPS)
     with sf.errstate(divide="ignore"):
         with pytest.warns(sf.SFDeviceOverflowWarning):            # 0.75 / 0.5 saturates
-            q = a2 / b
+            q = a2 / b.to(ALL_OPS)
     assert q.status.div0 == 2 and q.codes.tolist()[1] == 32767 and q.codes.tolist()[3] == 32767
-    n = sf.array([0.25, -0.25], dtype=sf.sf16, device=DEV)
+    n = sf.array([0.25, -0.25], dtype=sf.sf16, device=ALL_OPS)
+    m0 = full.launches
     with pytest.raises(sf.SFInvalidError, match="status.invalid"):
         sf.sqrt(n)
+    assert full.launches == m0
     with sf.errstate(invalid="ignore"):
         r = sf.sqrt(n)
     assert r.status == sf.SFStatus(saturated=0, div0=0, invalid=1, exact=True)

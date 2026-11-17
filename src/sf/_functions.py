@@ -261,7 +261,7 @@ def div(a: Any, b: Any, where: Any = None):
     safe_b = np.where(mask, kb, 1)
     device = _device_of_any(a, b)
     from ._array import _run_heavy, _should_offload
-    if device == _device.HOST and not _should_offload(int(np.prod(shape)) if shape else 1):
+    if device == _device.HOST and not _should_offload(int(np.prod(shape)) if shape else 1, "div"):
         k, events = vec.div(fmt, safe_a, safe_b)
         _handle_events(events, fmt, "/", int(np.count_nonzero(mask)))
         if k.ndim == 0:

@@ -39,9 +39,9 @@ upper bound, set `exact=False` and the runtime warns with the bound. Under
 reference, takes the exact counts from there, and raises `SFDeviceError` if the
 target's output bits differ.
 
-To declare which built-in ops a target can run (v1 has no divide or square
-root), set `supported_ops` on the `Device`; other ops are refused on the host
-before launch.
+To declare which built-in ops a target can run, set `supported_ops` on the
+`Device`; other ops are refused on the host before launch. The Atreides
+targets already do this: v4.8.1 has no divide or square root.
 
 To get the generated C for the compiler (sf16 only):
 

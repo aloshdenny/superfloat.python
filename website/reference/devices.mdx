@@ -15,7 +15,7 @@ sf.devices()
 | Name | Class | What it is |
 |---|---|---|
 | `host` | | The reference implementation in NumPy. |
-| `atreides` | `sf.MockAtreides` | Mock of the v1 chip: the same reference, no flags. The default device. |
+| `atreides` | `sf.MockAtreides` | Mock of the v4.8.1 chip: the same reference, no flags. The default device. |
 | `atreides-flags` | | The mock with sticky event flags, so statuses are exact. |
 | `atreides-sim` | `sf.SimulatorAtreides` | The Stage 3 simulator; runs the built-ins and user kernels. |
 | `atreides-hw` | `sf.HardwareAtreides` | Reserved for the chip. Raises `SFDeviceError` until a driver is attached. |
@@ -37,7 +37,7 @@ Subclass `sf.Device` and set:
 <ResponseField name="sticky_flags" type="bool">`True` if `run` returns per-element event flags. With flags, statuses are exact and `over="raise"` applies to heavy ops.</ResponseField>
 <ResponseField name="accumulation_order, accumulator_bits" type="str, int">What the target does in reductions; the reference assumes sequential at data width.</ResponseField>
 <ResponseField name="max_elements" type="int">Largest buffer the target takes; checked before launch.</ResponseField>
-<ResponseField name="supported_ops" type="frozenset[str] | None">The heavy ops the target has instructions for; `None` means all. Any other op is refused on the host with `SFUnsupportedError` before `run` is called, after the known-answer checks (a divide by zero is still reported as one). Atreides v1, for example, has no divide or square root.</ResponseField>
+<ResponseField name="supported_ops" type="frozenset[str] | None">The heavy ops the target has instructions for; `None` means all. Any other op is refused on the host with `SFUnsupportedError` before `run` is called, after the known-answer checks (a divide by zero is still reported as one). Every Atreides target sets it to the v4.8.1 ops, which have no divide and no square root: `add`, `sub`, `mul`, `fma`, `neg`, `abs`, `pow`, `sum`, `matmul` and `matmul_wide`. A host op is never offloaded to a target that lacks it.</ResponseField>
 <ResponseField name="mx" type="bool">`True` if the target has the v4.8.1 MX engine, so it runs [wide mode](/arrays/wide-mode) (`op="matmul_wide"`, with a `shift` keyword). Every Atreides target has it. A target without it refuses wide mode before launch.</ResponseField>
 
 and implement:

@@ -68,6 +68,9 @@ class LaunchResult:
 
 # --- targets -----------------------------------------------------------------------------------
 
+_SF_HEAVY = {"div": "SF divide ('/')", "sqrt": "sf.sqrt"}   # kernel IR op -> what the user wrote
+
+
 class KernelDevice(_device.MockAtreides):
     """A target that runs user kernels (spec 3.0) as well as the built-ins."""
 
@@ -88,6 +91,15 @@ class KernelDevice(_device.MockAtreides):
                                                    for k, v in events.items() if k != "first"}
 
     def check_launch(self, ir: KernelIR, grid, block, buffers) -> None:
+        # the same rule as device arrays: an SF op the target has no instruction for is refused
+        # before launch, never run on the host behind the user's back (Atreides has no SF divide
+        # and no square root).  Integer '//' for index arithmetic is a separate op ("idiv")
+        if self.supported_ops is not None:
+            for op in ir.ops:
+                if op.name in _SF_HEAVY and op.name not in self.supported_ops:
+                    raise SFUnsupportedError(
+                        f"kernel {ir.name!r} uses {_SF_HEAVY[op.name]}, which {self.name} has no instruction "
+                        f"for: compute it on the host (x.to('host')), e.g. a reciprocal to multiply by")
         L = self.limits
         for g in grid:
             if not (1 <= g <= L.max_grid):

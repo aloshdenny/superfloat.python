@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 import sf
-from conftest import dtype_of, run
+from conftest import ALL_OPS, dtype_of, run
 
 
 @pytest.mark.parametrize("bits", [4, 8, 16])
@@ -109,10 +109,11 @@ def test_div_where_and_where():
 
 def test_functions_on_device_arrays():
     x = sf.array([0.5, -0.5, 0.25], dtype=sf.sf16, device="atreides")
-    assert sf.sqrt(abs(x)).device == "atreides" and sf.sqrt(abs(x)).status.exact
+    full = x.to(ALL_OPS)                     # Atreides has no divide or square root
+    assert sf.sqrt(abs(full)).device == ALL_OPS and sf.sqrt(abs(full)).status.exact
     assert (x ** 2).device == "atreides" and (x ** 2).codes.tolist() == [8192, 8192, 2048]
     assert sf.clip(x, -0.2, 0.2).device == "atreides"
     assert sf.maximum(x, 0).device == "atreides" and sf.where(x > 0, x, 0).device == "atreides"
-    assert sf.div(x, x, where=np.array([False, False, False])).device == "atreides"
+    assert sf.div(full, full, where=np.array([False, False, False])).device == ALL_OPS
     with pytest.raises(sf.SFInvalidError):
         sf.sqrt(x)
