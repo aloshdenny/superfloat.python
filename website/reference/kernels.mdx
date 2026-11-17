@@ -23,8 +23,11 @@ description: "6. Stage 3: kernels"
 | `@sf.autotune(configs=[{...}, ...], key=["n"])` on top of `@sf.jit` / `@sf.kernel` | Runs each config once per distinct value of the `key` arguments, keeps the one with the fewest simulated cycles. Config constexprs are not passed at launch. The grid may be a function of the config: `k[lambda cfg: (sf.cdiv(n, cfg["BLOCK"]),)](...)`. |
 | `BLOCK: sf.constexpr` | Annotation for an argument fixed at trace time (a Python int). Kernels are traced once per distinct (argument kinds, constexpr values, block) and cached in `k.cache`; `k.tuned` holds autotune choices. |
 
-Argument rules: device arrays become pointers; `sf.sf16(...)` scalars and
-Python ints become scalar arguments; host arrays, raw floats, bools, and
+Argument rules: device arrays become pointers; NumPy integer arrays become
+read-only int buffers (`ptr<int>`: `sf.load` gives ints, a store is refused,
+every value must fit 16 bits; they carry tables such as per-output shifts);
+`sf.sf16(...)` scalars and Python ints become scalar arguments; host sf arrays,
+raw floats, bools, and
 non-contiguous views (a transpose or strided slice) are rejected before
 launch; all arrays must be on one device; sf16 only in kernels on the simulator (sf4 to sf16 arrays can still live there for wide matmuls). A
 kernel must not return a value.
@@ -45,7 +48,7 @@ kernel must not return a value.
 | `with sf.predicate(mask):` | Stores and event counts inside are masked by `mask` (and any enclosing predicate). Values are still computed on every lane. Nested predicates AND. |
 | `sf.where(cond, x, y)` | Select per lane. |
 | `sf.fma(a, b, c)`, `sf.sqrt(a)`, `sf.maximum(a, b)`, `sf.minimum(a, b)`, `sf.clip(x, lo, hi)`, `sf.cast(x, dtype)` | Same semantics as the host versions. `sf.sqrt` is refused on the Atreides targets (no instruction). |
-| `sf.dot(a, b, accumulate=None, shift=None)` | 2-D tile matmul. Default: a sequential fma chain per output (op `dot`). `accumulate="wide"`: the MX engine, one rounding at `2^shift` (op `dot_wide`). `None` uses the `sf.accumulate` setting when the kernel is traced; `a @ b` does the same. [Wide mode →](/arrays/wide-mode) |
+| `sf.dot(a, b, accumulate=None, shift=None)` | 2-D tile matmul. Default: a sequential fma chain per output (op `dot`). `accumulate="wide"`: the MX engine, one rounding at `2^shift` (op `dot_wide`); `shift` is one int or an int block broadcastable to the output (one per output; outside -32..31 faults). `None` uses the `sf.accumulate` setting when the kernel is traced; `a @ b` does the same. [Wide mode →](/arrays/wide-mode) |
 | `sf.sum(x, axis=None)`, `sf.max(x, axis=None)`, `sf.min(x, axis=None)` | Tile reductions; `sum` is the sequential saturating chain. |
 | `sf.zeros(shape, dtype="sf16")`, `sf.full(shape, value, dtype="sf16")` | Tile constants. |
 | `v.reshape(...)`, `v[:, None]`, `v[None, :]` | Reshape and expand dims on tile values; NumPy broadcasting applies. |

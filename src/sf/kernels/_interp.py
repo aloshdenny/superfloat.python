@@ -217,7 +217,15 @@ class Interpreter:
         if n == "min":
             return np.min(a[0], axis=op.attrs["axis"])
         if n == "dot_wide":
-            r, ev = _linalg.matmul_wide_codes(fmt, a[0], a[1], op.attrs["shift"], self.mx)
+            sh = op.attrs["shift"]
+            if len(a) == 3:                                 # a shift per output (POP's Rs per token and column)
+                sh = np.broadcast_to(np.asarray(a[2], dtype=np.int64), shape)
+                live = np.ones(shape, bool) if pred is None else np.broadcast_to(pred, shape)
+                bad = live & ((sh < _linalg.SHIFT_MIN) | (sh > _linalg.SHIFT_MAX))
+                if bad.any():
+                    self._fault(f"dot_wide shift {int(sh[bad][0])} outside {_linalg.SHIFT_MIN}..{_linalg.SHIFT_MAX}")
+                sh = np.where(live, sh, 0)
+            r, ev = _linalg.matmul_wide_codes(fmt, a[0], a[1], sh, self.mx)
             self._events(ev, pred, shape)
             self.counters.macs += int(a[0].shape[0] * a[0].shape[1] * a[1].shape[1])
             return r

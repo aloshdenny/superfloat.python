@@ -243,6 +243,10 @@ class Kernel:
                     v = b.emit("param", [], {"param": name, "kind": "ptr"}, PtrType(arg.dtype._fmt.bits), ())
                     b.ir.params.append(Param(name, "ptr", PtrType(arg.dtype._fmt.bits), vid=v.id))
                     call_args.append(Ptr(v, None, arg.dtype._fmt.bits))
+                elif _is_int_buffer(arg):
+                    v = b.emit("param", [], {"param": name, "kind": "ptr"}, PtrType(0), ())
+                    b.ir.params.append(Param(name, "ptr", PtrType(0), vid=v.id))
+                    call_args.append(Ptr(v, None, 0))
                 elif isinstance(arg, SFScalar):
                     v = b.emit("param", [], {"param": name, "kind": "sf"}, SFType(arg._fmt.bits), ())
                     b.ir.params.append(Param(name, "sf", SFType(arg._fmt.bits), vid=v.id))
@@ -284,9 +288,20 @@ def _is_constexpr_annotation(ann) -> bool:
     return isinstance(ann, str) and ann.split(".")[-1].strip("'\"") == "constexpr"
 
 
+INT_BUFFER_MIN, INT_BUFFER_MAX = -(1 << 15), (1 << 15) - 1      # one 16-bit word each on the chip
+
+
+def _is_int_buffer(a) -> bool:
+    """A NumPy integer array passed to a kernel: a read-only int buffer
+    (per-output shifts, index tables), copied to the device with the launch."""
+    return isinstance(a, np.ndarray) and np.issubdtype(a.dtype, np.integer)
+
+
 def _arg_kind(a):
     if isinstance(a, SFArray):
         return ("ptr", a.dtype._fmt.bits)
+    if _is_int_buffer(a):
+        return ("ptr", 0)
     if isinstance(a, SFScalar):
         return ("sf", a._fmt.bits)
     return ("int",)
@@ -355,6 +370,9 @@ def _bind(k: Kernel, args, kwargs):
 def _resolve_device(bound):
     arrays = [v for _, v in bound if isinstance(v, SFArray)]
     for _, v in bound:
+        if isinstance(v, np.ndarray) and not _is_int_buffer(v):
+            raise SFTypeError(f"a NumPy array kernel argument must hold integers (an int buffer), got {v.dtype}; "
+                              "pass sf values as sf arrays on the device")
         if isinstance(v, (float, bool)):
             raise SFTypeError("kernel arguments must be device arrays, SF scalars or Python ints "
                               f"(got {type(v).__name__}); quantize floats with sf.sf16(x)")
@@ -375,11 +393,17 @@ def _launch(k: Kernel, grid, block, bound, constexpr, config_tag=None) -> Launch
     dev = _resolve_device(bound)
     ir = k.compiled(bound, constexpr, block)
     for p in ir.params:
-        if p.kind in ("ptr", "sf") and p.type.bits not in dev.kernel_bits:
+        if p.kind in ("ptr", "sf") and p.type.bits and p.type.bits not in dev.kernel_bits:
             raise SFUnsupportedError(f"sf{p.type.bits} is not supported on {dev.name}")
     buffers = {n: v._codes for n, v in bound if isinstance(v, SFArray)}
+    for n, v in bound:
+        if _is_int_buffer(v):
+            if v.size and (v.min() < INT_BUFFER_MIN or v.max() > INT_BUFFER_MAX):
+                raise SFLaunchError(f"int buffer {n!r} holds values outside -32768..32767; the chip keeps "
+                                    "one 16-bit word per element")
+            buffers[n] = np.array(v, dtype=np.int64, order="C")   # a copy: kernels only read it
     scalars = {n: (v._code if isinstance(v, SFScalar) else int(v)) for n, v in bound
-               if not isinstance(v, SFArray) and n not in constexpr}
+               if not isinstance(v, SFArray) and not _is_int_buffer(v) and n not in constexpr}
     dev.check_launch(ir, grid, block, buffers)                 # before launch (3.0 gate)
     replay = _config.get("status") == "replay"
     before = {n: b.copy() for n, b in buffers.items()} if replay else None

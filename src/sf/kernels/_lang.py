@@ -114,6 +114,10 @@ def load(ptr: Ptr, mask=None, other: Any = 0) -> Sym:
     offs = ptr.offs if ptr.offs is not None else const_int(0)
     m = as_bool(mask) if mask is not None else const_bool(True)
     shape = broadcast_shapes(offs.shape, m.shape)
+    if ptr.bits == 0:                                       # an int buffer: integers, e.g. per-output shifts
+        oth = as_int(other)
+        shape = broadcast_shapes(shape, oth.shape)
+        return Sym(b.emit("load", [ptr.base, offs.v, m.v, oth.v], {}, INT, shape))
     oth = as_sf(other, ptr.bits)
     shape = broadcast_shapes(shape, oth.shape)
     return Sym(b.emit("load", [ptr.base, offs.v, m.v, oth.v], {}, SFType(ptr.bits), shape))
@@ -125,6 +129,9 @@ def store(ptr: Ptr, value, mask=None) -> None:
     whichever lane the target writes last (the simulator: the highest lane)."""
     if not isinstance(ptr, Ptr):
         raise SFTypeError("sf.store expects a pointer (a device array argument plus offsets)")
+    if ptr.bits == 0:
+        raise SFCompileError("int buffer arguments are read-only in kernels (they carry tables such as "
+                             "per-output shifts); write results to an sf array")
     b = builder()
     offs = ptr.offs if ptr.offs is not None else const_int(0)
     v = as_sf(value, ptr.bits)
@@ -245,17 +252,29 @@ def minimum(a, b) -> Sym:
 def dot(a, b, *, accumulate=None, shift=None) -> Sym:
     """Block matmul.  ``accumulate="chain"`` (default): the Stage 1.1 chain
     (per-product truncation, per-step saturation, sequential over K), op
-    ``dot``.  ``accumulate="wide"``: the v4.8.1 MX engine (one rounding at
+    ``dot``.  ``accumulate="wide"``: the MX engine (one rounding at
     ``2^shift``), op ``dot_wide``.  ``None`` uses the ``sf.accumulate``
-    setting in force when the kernel is traced."""
+    setting in force when the kernel is traced.
+
+    ``shift`` (wide only): one int for the whole block, or a traced int
+    block broadcastable to the output (M, N): a shift per output, as POP's
+    Rs gives one per token and column on the chip.  Pass the shifts as an
+    int buffer argument (a NumPy int array) and ``sf.load`` them, or compute
+    them in the kernel.  Each must lie in -32..31; one outside is a device
+    fault at run time."""
     from .. import _accumulate, _linalg
     mode = _accumulate.resolve(accumulate)
     if mode == "chain" and shift is not None:
         raise ValueError("sf.dot: shift= only applies to accumulate=\"wide\"")
-    if mode == "wide" and shift is not None and not isinstance(shift, (int, np.integer)):
-        raise SFCompileError("sf.dot in a kernel: shift must be one int for the block; "
-                             "a shift per output works on arrays (sf.matmul), not in kernels yet")
-    sh = _linalg.check_shift(shift) if mode == "wide" else 0
+    traced = None
+    if mode == "wide" and isinstance(shift, Sym):
+        if shift.type is not INT:
+            raise SFTypeError(f"sf.dot: a traced shift must be int, got {shift.type}")
+        traced = shift
+    elif mode == "wide" and shift is not None and not isinstance(shift, (int, np.integer)):
+        raise SFCompileError("sf.dot in a kernel: shift is one int, or a traced int block (load per-output "
+                             "shifts from an int buffer argument with sf.load); a NumPy array is not traced")
+    sh = None if traced is not None else (_linalg.check_shift(shift) if mode == "wide" else 0)
     bb = builder()
     bits = _sf_bits(a, b)
     if bits is None:
@@ -266,8 +285,16 @@ def dot(a, b, *, accumulate=None, shift=None) -> Sym:
     if x.shape[1] != y.shape[0]:
         raise SFCompileError(f"sf.dot: shapes {x.shape} and {y.shape} are not aligned")
     if mode == "wide":
-        return Sym(bb.emit("dot_wide", [x.v, y.v], {"shift": sh}, SFType(bits),
-                           (x.shape[0], y.shape[1])))
+        out = (x.shape[0], y.shape[1])
+        if traced is not None:
+            try:
+                if broadcast_shapes(traced.shape, out) != out:
+                    raise ValueError
+            except Exception:                               # noqa: BLE001
+                raise SFCompileError(f"sf.dot: a shift block of shape {traced.shape} does not broadcast to "
+                                     f"the output {out}") from None
+            return Sym(bb.emit("dot_wide", [x.v, y.v, traced.v], {"shift": None}, SFType(bits), out))
+        return Sym(bb.emit("dot_wide", [x.v, y.v], {"shift": sh}, SFType(bits), out))
     return Sym(bb.emit("dot", [x.v, y.v], {}, SFType(bits), (x.shape[0], y.shape[1])))
 
 

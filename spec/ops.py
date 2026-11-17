@@ -20,9 +20,10 @@ Versioning (see website/compiler/versioning.mdx):
     example a move to the v4.8.1 wide accumulator).
 """
 
-SPEC_VERSION = "1.7.0"
+SPEC_VERSION = "1.8.0"
 
 CHANGELOG = [
+    ("1.8.0", "2026-11-18", "dot_wide takes an optional third operand: an int block broadcastable to (m, n), one shift per output, as POP takes one Rs per token and column; in kernels sf.dot(a, b, accumulate=\"wide\", shift=s) with s a traced int block, usually loaded from an int buffer argument. A shift outside -32..31 on a live lane faults the launch. Kernels take read-only int buffers (ptr<int>, a NumPy int array argument, one 16-bit word per element on the chip): load gives int, store is refused at trace time. DSL 0.14.0."),
     ("1.7.0", "2026-11-17", "Wide mode adds a linear layer's bias on the chip after POP: the bias is quantized to each output's exponent (round half to even, clamped; SFLayerStatus.bias_saturated counts clamps) and added with the saturating sfN add (ACT f=00); an output whose POP or add reaches +-max is redone at the exponent of |x||w| + |b|. Atreides targets run every op except divide and sqrt at sf4 to sf16 (below sf16: the sf16 op plus a mask of the low bits, measured bit-exact on the chip). sft_wide.json regenerated; its status now includes bias_saturated."),
     ("1.6.1", "2026-11-16", "Golden vectors: spec/golden/wide/dot_wide_shift.json (dot_wide with shift arrays, sf4 to sf16, v4.9.2 and v4.8.1, 144 cases) and spec/golden/wide/sft_wide.json (sft wide layers with every SFLayerStatus field, attention, one small model end to end), from sf's host model; to confirm on the RTL. Docs: wide-mode status, events, rounding, policy, kernels, hardware; v1 wording removed."),
     ("1.6.0", "2026-11-16", "Attention on the MX engine: sft.attention (F.scaled_dot_product_attention's arguments, GQA included) runs Q K^T with the wide-mode rule and P V with the output exponent per channel from max|V| (rows of P sum to 1; new op sf::matmul_wide_pv), both at sf16; softmax in float. sft.autocast / sft.convert(accumulate=\"wide\") catch SDPA calls (convert: attention=\"auto\"). DSL 0.11.0."),
@@ -295,10 +296,11 @@ OPS = [
        notes=["sf.addmm(a, b, d) is NOT dot with the accumulator starting at d. It is the dot chain from 0, then ONE "
               "saturating add of d: add(dot(a, b), d). The two differ when a partial sum saturates."]),
 
-    _e(name="dot_wide", version="1.3", category="contraction", signature="%r:sfN[m,n] = dot_wide %a, %b {shift}",
-       operands=["a: sfN[m, k]", "b: sfN[k, n]"], attrs={"shift": "int from -32 to 31: the result is the total times 2^shift (POP's s). On arrays (sf.matmul) it can "
-                 "also be an int array broadcastable to the result (..., m, n): one shift per output, as POP takes one Rs per "
-                 "token and column. In the IR it is one int per block for now"},
+    _e(name="dot_wide", version="1.8", category="contraction", signature="%r:sfN[m,n] = dot_wide %a, %b [, %shift] {shift}",
+       operands=["a: sfN[m, k]", "b: sfN[k, n]", "shift (optional): int, broadcastable to (m, n): one shift per output, "
+                 "from -32 to 31, as POP takes one Rs per token and column; when present the attribute is unused"],
+       attrs={"shift": "int from -32 to 31, for the whole block when there is no shift operand: the result is the total "
+                 "times 2^shift (POP's s). On arrays (sf.matmul) it can also be an int array broadcastable to the result"},
        result="sfN", shape="(m, n)",
        semantics="The MX engine of the target chip; v4.9.2 is the default. Block: sf9..sf16 use the SF16 block, "
                  "sf4..sf8 the SF8 block. Units: v4.9.2 SF16 W = 32 bits, F = 22 fraction bits (Q10.22, about +-512), "
@@ -311,6 +313,8 @@ OPS = [
                  "complement). Result (POP): q = round_half_to_even(|acc| * 2^(shift - F + N - 1)), clamped to M, with the "
                  "sign of acc; never -0.",
        events=["overflow", "underflow"], predication="events",
+       faults=["with a shift operand: a live lane whose shift is outside -32..31 faults the launch (masked lanes never "
+               "fault and use shift 0)"],
        hw_v1="MX engine, one per tile (ISA section 3.4 of compiler_v4.9.2.md; the instructions are the same on v4.8.1): CFG (block, N) from thread 0, CLR; per chunk of 8 k: WL "
              "rows 7..0 then SWAP; MAC per token into slot t (up to 8 tokens per weight tile); then POP with Rs(c) = "
              "t << 8 | (shift & 63). 8 output columns per weight tile, 64 MACs per instruction. The engine has no flags.",
@@ -340,15 +344,17 @@ OPS = [
 
     # ---- memory -------------------------------------------------------------------------------
     _e(name="load", category="memory", signature="%r:sfN = load %ptr, %offs, %mask, %other",
-       operands=["ptr: ptr<sfN> param", "offs: int", "mask: bool", "other: sfN (value for masked lanes)"],
-       result="sfN", shape="broadcast(offs, mask, other)",
+       operands=["ptr: ptr<sfN> param, or ptr<int> (a read-only int buffer)", "offs: int", "mask: bool",
+                 "other: sfN, or int for ptr<int> (value for masked lanes)"],
+       result="sfN, or int from ptr<int>", shape="broadcast(offs, mask, other)",
        semantics="live = mask AND predicate. Live lanes: ptr[offs]. Others: other. Offsets are element indices, not bytes.",
        memory="READ global buffer ptr at offs on live lanes only", predication="memory",
        faults=["any live lane with offs < 0 or offs >= buffer size faults the launch. Masked lanes never fault."],
        hw_v1="global load (64K-word data window)", mlir={"name": "sf.load (masked, like triton.load)", "traits": ["MemRead"]},
        python=["sf.load(ptr + offs, mask=, other=)"]),
     _e(name="store", category="memory", signature="store %ptr, %offs, %val, %mask",
-       operands=["ptr: ptr<sfN>", "offs: int", "val: sfN", "mask: bool"], result="none",
+       operands=["ptr: ptr<sfN> (int buffers are read-only: a store to one is refused at trace time)", "offs: int",
+                 "val: sfN", "mask: bool"], result="none",
        shape="lanes = broadcast(offs, val, mask)",
        semantics="live = mask AND predicate. ptr[offs] = val on live lanes. If two live lanes hit the same offset, "
                  "the reference keeps the last lane in row-major order; kernels should not rely on this.",

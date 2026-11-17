@@ -27,4 +27,4 @@ Each stage went through an independent review and every finding is fixed with a 
 - **State-space models**: Mamba's depthwise Conv1d and selective scan stay in float (reported).
 - **Stage 1.2 diagnostics** (`sf.explain`): optional in the plan, deferred.
 - **Stage 2.3** (Atreides as a PyTorch device): deferred until the real transfer cost exists.
-- **Stage 3 at narrow widths and with wide mode**: user kernels run sf16 only, and `dot_wide` with a shift per output is not in the kernel language yet.
+- **Stage 3 at narrow widths**: user kernels run sf16 only. (`dot_wide` with a shift per output is in the kernel language since 0.14.0.)

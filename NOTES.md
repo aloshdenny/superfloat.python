@@ -3,6 +3,27 @@
 Decisions the spec left open or did not state, and how this code resolves
 them. Each one is a single place to change if the team decides differently.
 
+## dot_wide with a shift per output in kernels (0.14.0, spec 1.8.0)
+
+* Alosh (2026-11-18): the chip already takes a shift per output (POP's Rs per
+  token and column); `@sf.jit` did not expose it.  Kartik follows on the
+  compiler side.
+* IR: `dot_wide` takes an optional third operand, an int value broadcastable
+  to (m, n); the `shift` attribute is then None.  Interpreter: the host's
+  `matmul_wide_codes` with the broadcast block; C: `sh` read per output and
+  passed to `__sf16_dot_wide`.  A live lane outside -32..31 faults (C fault
+  code 6); masked lanes use 0 and never fault.
+* Int buffers: a NumPy integer array argument is a `ptr<int>` (`PtrType(0)`,
+  same plumbing as sf pointers), copied in with the launch, read-only (a
+  store is refused at trace time, so nothing has to be copied back), every
+  value within int16 (one word on the chip) or `SFLaunchError`.
+* `sf.dot` dispatches to the kernel version before checking the shift, so a
+  traced shift reaches it.
+* Spec 1.8.0 (a contract change: a new operand); golden files only change
+  their version field.  `tests/test_kernel_dot_wide_shift.py`: every v4.9.2
+  sf16 case of `dot_wide_shift.json` through a kernel on both backends, codes
+  and saturation counts.
+
 ## MXFP4 (0.13.1)
 
 * Alosh (2026-11-18): add MXFP4, the format the real gpt-oss checkpoints ship

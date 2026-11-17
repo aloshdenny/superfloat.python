@@ -27,6 +27,7 @@ from .. import _cache
 from .._errors import SFCompileError, SFDeviceError, SFUnsupportedError
 from ._interp import Counters
 from ._ir import BOOL, INT, KernelIR, PtrType, SFType
+from .._linalg import SHIFT_MAX as _SHIFT_MAX, SHIFT_MIN as _SHIFT_MIN
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _CACHE_DIR: str | None = None        # None: the private per-user folder of sf._cache; tests may set it
@@ -119,7 +120,7 @@ class Emitter:
         ptrs = [p for p in ir.params if p.kind == "ptr"]
         scalars = [p for p in ir.params if p.kind in ("sf", "int")]
         for p in ir.params:
-            if p.kind in ("ptr", "sf") and p.type.bits != 16:
+            if p.kind in ("ptr", "sf") and p.type.bits not in (0, 16):    # 0: an int buffer
                 raise SFUnsupportedError("the C backend emits sf16 only")
         for v in ir.values:
             if isinstance(v.type, SFType) and v.type.bits != 16:
@@ -279,16 +280,24 @@ class Emitter:
             self.reduce(op, n)
             return
         if n == "dot_wide":
-            x, y = op.args
+            x, y = op.args[:2]
             M, K = x.shape
             N = y.shape[1]
+            ij = lambda expr: expr.replace('[e]', '[i * ' + str(N) + ' + j]')   # noqa: E731
             pe = ('&E' if op.pred is None else
-                  f'(v{op.pred.id}[{_index(op.pred.shape, r.shape)}] ? &E : (sf16_events*)0)'
-                  .replace('[e]', '[i * ' + str(N) + ' + j]'))
-            w(f"    for (int64_t i = 0; i < {M}; i++) for (int64_t j = 0; j < {N}; j++) {{"
+                  ij(f'(v{op.pred.id}[{_index(op.pred.shape, r.shape)}] ? &E : (sf16_events*)0)'))
+            if len(op.args) == 3:                            # a shift per output, checked like an address
+                s = op.args[2]
+                live = "1" if op.pred is None else ij(f"v{op.pred.id}[{_index(op.pred.shape, r.shape)}]")
+                shift = "sh"
+                pre = (f" const int64_t e = i * {N} + j; int64_t sh = v{s.id}[{_index(s.shape, r.shape)}];" +
+                       f" if (!({live})) sh = 0; else if (sh < {_SHIFT_MIN} || sh > {_SHIFT_MAX}) {{ C->fault = 6; return; }}")
+            else:
+                shift, pre = str(op.attrs['shift']), ""
+            w(f"    for (int64_t i = 0; i < {M}; i++) for (int64_t j = 0; j < {N}; j++) {{{pre}"
               f" sf16_events *pe = {pe}; sf16_events le = {{0, 0, 0, 0}};"
               f" v{r.id}[i * {N} + j] = __sf16_dot_wide(&v{x.id}[i * {K}], 1, &v{y.id}[j], {N}, {K},"
-              f" {op.attrs['shift']}, {self.mx_unit['W']}, {self.mx_unit['F']}, {self.mx_unit['tk']},"
+              f" {shift}, {self.mx_unit['W']}, {self.mx_unit['F']}, {self.mx_unit['tk']},"
               f" {self.mx_unit['comp']}, &le); sf16_fold(pe, &le); }} C->macs += {M * K * N};")
             return
         if n == "dot":
@@ -467,7 +476,8 @@ def run_c(ir: KernelIR, buffers: dict, scalars: dict, grid, mx=None) -> Counters
     if cnt.fault:
         raise SFDeviceError(f"device fault in kernel {ir.name!r}: "
                             + {1: "integer division by zero", 2: "load out of bounds", 3: "store out of bounds",
-                               4: "shared memory load out of bounds", 5: "shared memory store out of bounds"}[cnt.fault])
+                               4: "shared memory load out of bounds", 5: "shared memory store out of bounds",
+                               6: f"dot_wide shift outside {_SHIFT_MIN}..{_SHIFT_MAX}"}[cnt.fault])
     return Counters(programs=cnt.programs, ops=cnt.ops, lane_ops=cnt.lane_ops, loads=cnt.loads,
                     stores=cnt.stores, macs=cnt.macs, saturated=cnt.sat, underflow=cnt.under,
                     div0=cnt.div0, invalid=cnt.invalid, barriers=cnt.barriers)

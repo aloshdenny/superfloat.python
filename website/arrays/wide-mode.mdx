@@ -146,7 +146,7 @@ y = sf.matmul(a, w, accumulate="wide", shift=s)   # a: (T, K), w: (K, N)
 - Every element must be from -32 to 31. One element outside it raises `ValueError` and nothing runs.
 - A shape that does not broadcast to the result raises `SFShapeError`.
 - For 1-D operands the shift broadcasts against the result as you see it: `sf.matmul(x, w)` with `x` of shape `(K,)` takes a shift of shape `(N,)`.
-- In `@sf.jit` and `@sf.kernel` code, `sf.dot` still takes one int per block. An array there raises `SFCompileError`.
+- In `@sf.jit` and `@sf.kernel` code, `sf.dot` takes one int, or a traced int block broadcastable to the output, usually loaded from an int buffer argument (a NumPy int array). A shift outside -32 to 31 there is a device fault at run time. A NumPy array passed as `shift=` directly raises `SFCompileError`: pass it as an argument and load it.
 
 ## Widths
 

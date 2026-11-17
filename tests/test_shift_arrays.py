@@ -146,7 +146,9 @@ def test_check_shift():
         _linalg.check_shift([1], allow_array=False)
 
 
-def test_kernels_take_one_shift_for_the_block():
+def test_kernels_take_a_shift_block_only_as_a_traced_value():
+    # since 0.14.0 kernels take a shift per output (tests/test_kernel_dot_wide_shift.py), but
+    # only as a traced int block: a NumPy array is not traced, so it must come in as an argument
     from sf.kernels import _lang
-    with pytest.raises(sf.SFCompileError, match="not in kernels yet"):
+    with pytest.raises(sf.SFCompileError, match="int buffer argument"):
         _lang.dot(None, None, accumulate="wide", shift=np.array([1, 2]))
