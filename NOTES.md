@@ -21,9 +21,16 @@ them. Each one is a single place to change if the team decides differently.
   exponent `(t, ep)`, not shifted to scale 1.  His row: worst error 0.0037 to
   under 0.0003.  Left as defined: `mul` truncation (up to 1 ulp low per
   nonzero P, as v0) and scores above 64 saturating under k <= 6.
-* Float rows on the host (`softmax_rows`): k = 4, redone at 5, 6 if max
-  |score| would saturate; a score at or below -10^4 is a mask (models mask
-  with `finfo.min` as well as -inf; such a key would otherwise force k = 6).
+* Float rows on the host (`softmax_rows`): **the row max is subtracted before
+  quantizing** (d = s - max, k = 4, or 5 when a visible key is more than 16
+  below the max; anything 32 below is under 2^-46 and may saturate).  Alosh's
+  convention quantized raw scores (k = 4, redo at 5, 6; kept as
+  `softmax_rows_raw`): Qwen2.5-0.5B's attention scores reach 1728 (its sink
+  token), 6% of rows saturate at 64, keys above 64 collapse, and perplexity
+  doubles (17.40 to 36.9 on one window; with the max first, 17.41).  On the
+  chip this needs one max over the wide Q·Kᵀ output before narrowing
+  (question to Alosh).  A score at or below -10^4 is a mask (models mask
+  with `finfo.min` as well as -inf).
   GELU / SiLU rows: one exponent from max |x|, clamped to 0..6 (his tables),
   so |x| above 64 saturates.
 * `convert(nonlinear="integer")`: softmax in `sft.attention` (wide mode) and

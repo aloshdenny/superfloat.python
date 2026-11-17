@@ -18,7 +18,7 @@ description: "The chip's definitions of the nonlinear ops, on SF16 codes, bit fo
 | `softmax_row(s, k, visible=None)` | sf's softmax: returns `(t, ep)`, P = t · 2^(ep-15). Masked keys (`visible` False) give 0 and are not summed. |
 | `softmax(s, k, visible=None)` | `softmax_row` for a batch of rows (one k per row). |
 | `norm_row(x, gamma, beta, ...)` | LayerNorm / RMSNorm, for reference only: norms stay on the host in float. |
-| `softmax_rows(x)`, `xsig_rows(x, cubic)` | Float rows through the integer definitions, for models on the host: one exponent per row (scores: k = 4, redone at 5 or 6 if they would saturate; GELU / SiLU: from max \|x\|, 0..6). |
+| `softmax_rows(x)`, `xsig_rows(x, cubic)` | Float rows through the integer definitions, for models on the host. Scores: the row max subtracted first, then k = 4, or 5 if a key is more than 16 below the max (`softmax_rows_raw`: Alosh's raw-score convention, k = 4 redone at 5, 6). GELU / SiLU: one exponent per row from max \|x\|, 0..6. |
 
 ## sf's softmax: three changes to v0 (pending Alosh's sign-off)
 
@@ -28,7 +28,9 @@ Alosh's v0 loses mass on long causal rows: in his example row (942 visible keys)
 2. **q below 2^14.** When normalising leaves q under the reciprocal's domain, the sum is popped once more one step higher (up to 154 ulps off in v0).
 3. **P keeps the row's exponent.** P is returned as `(t, ep)` instead of shifted to scale 1, so a long flat row keeps its bits (v0 shifts log2(n) bits out of every P).
 
-On his row: worst error 0.0037 to under 0.0003; P·V error 4x smaller or better. What remains: `mul` truncates, so each nonzero P can be up to 1 ulp low (as in v0), and a score above 64 saturates under the k ≤ 6 rule.
+On his row: worst error 0.0037 to under 0.0003; P·V error 4x smaller or better. What remains: `mul` truncates, so each nonzero P can be up to 1 ulp low (as in v0).
+
+**Scores enter with their row max subtracted.** Quantizing raw scores (k ≤ 6) saturates any score above 64. Qwen2.5-0.5B's attention scores reach 1728 (the first-token sink): 6% of rows saturate, keys above 64 collapse onto one value, and perplexity doubles. Softmax does not change when a row's max is subtracted, and a key more than 32 below the max is under 2^-46, so with the max taken first k = 4 or 5 always suffices. On the chip this is one max over the wide Q·Kᵀ output before it is narrowed.
 
 ## In PyTorch
 

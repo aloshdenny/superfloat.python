@@ -173,9 +173,14 @@ def test_softmax_rows_on_floats():
     x3 = x.copy()
     x3[3, 10:] = -np.inf
     assert np.array_equal(p2, I.softmax_rows(x3))
-    # a score beyond 2^6 = 64 saturates (Alosh's k <= 6): the limit of the convention, kept as defined
-    y = np.array([[70.0, 66.0, 0.0]])
-    assert I.softmax_rows(y)[0, 0] == I.softmax_rows(y)[0, 1]
+    # raw scores (Alosh's v0 convention): beyond 2^6 = 64 they saturate and collapse onto one value; with the
+    # row max taken first (sf's convention) only the gap to the max matters
+    y = np.array([[1728.0, 70.0, 66.0, 0.0], [70.0, 66.0, 0.0, -1e9]])
+    raw = I.softmax_rows_raw(y)
+    assert raw[1, 0] == raw[1, 1] and abs(raw[0, 0] - 1) > 0.3                     # sink no longer dominates
+    f = np.exp(y - y.max(-1, keepdims=True))
+    f /= f.sum(-1, keepdims=True)
+    assert np.abs(I.softmax_rows(y) - f).max() < 1e-3
 
 
 # --- golden vectors ------------------------------------------------------------------------------------------------

@@ -527,21 +527,44 @@ def xsig_rows(x: np.ndarray, cubic: bool) -> np.ndarray:
 MASKED = -1e4
 
 
-def softmax_rows(x: np.ndarray, k_min: int = 4, k_max: int = 6) -> np.ndarray:
-    """Softmax of float score rows (last axis) through the integer definition, as Alosh's convention has it:
-    scores quantized at scale 2^k with k = 4, and a row whose scores would saturate (max |score| >= 2^k) redone
-    at k = 5, then 6.  Masked keys get P = 0 and are not summed: -inf, and any score at or below ``MASKED``
-    (-10^4), as models mask with the dtype's lowest finite value (``torch.finfo(dtype).min``) as well as -inf;
-    such a key would otherwise force the whole row to k = 6 and then saturate at -64."""
+def softmax_rows(x: np.ndarray, k_min: int = 4, k_max: int = 5) -> np.ndarray:
+    """Softmax of float score rows (last axis) through the integer definition.
+
+    The scores enter with their row's max already subtracted (exact: softmax does not change), d = s - max, in
+    [-2^k, 0] at scale 2^k: k = 4, or 5 when some visible key is more than 16 below the max.  A key more than 32
+    below gets exp(d) < 2^-46, below anything the sum keeps (2^-30), so saturating it at -2^k changes nothing.
+
+    Alosh's v0 convention quantized the raw scores (k = 4, redone at 5, 6): Qwen2.5-0.5B has attention scores up
+    to 1728 (its first-token sink), so 6% of its rows saturate at 64 and keys above 64 collapse onto one value;
+    perplexity doubles (22.4 to 45.3).  Taking the max first needs one max reduction over the wide scores
+    before narrowing them (``raw=True`` keeps the v0 convention).
+
+    Masked keys get P = 0 and are not summed: -inf, and any score at or below ``MASKED`` (-10^4), as models mask
+    with the dtype's lowest finite value (``torch.finfo(dtype).min``) as well as -inf."""
+    return _softmax_rows(x, k_min, k_max, raw=False)
+
+
+def softmax_rows_raw(x: np.ndarray, k_min: int = 4, k_max: int = 6) -> np.ndarray:
+    """Alosh's v0 convention: raw scores at k = 4, redone at 5, 6 if max |score| would saturate."""
+    return _softmax_rows(x, k_min, k_max, raw=True)
+
+
+def _softmax_rows(x, k_min, k_max, raw):
     x = np.asarray(x, np.float64)
     shp = x.shape
     x2 = x.reshape(-1, shp[-1])
     vis = np.isfinite(x2) & (x2 > MASKED)
-    amax = np.where(vis, np.abs(x2), 0.0).max(axis=-1)
+    if raw:
+        x2 = np.where(vis, x2, 0.0)
+        amax = np.abs(x2).max(axis=-1)
+    else:
+        m = np.where(vis, x2, -np.inf).max(axis=-1)
+        x2 = np.where(vis, x2 - np.where(np.isfinite(m), m, 0.0)[:, None], 0.0)
+        amax = (-x2).max(axis=-1)
     k = np.full(len(x2), k_min, np.int64)
     for kv in range(k_min, k_max):
         k = np.where((k == kv) & (amax * 32768 / 2.0 ** kv >= MAXC + 0.5), kv + 1, k)
-    codes = np.clip(np.round(np.where(vis, x2, 0.0) / np.exp2(k)[:, None] * 32768), -MAXC, MAXC).astype(np.int64)
+    codes = np.clip(np.round(x2 / np.exp2(k)[:, None] * 32768), -MAXC, MAXC).astype(np.int64)
     t, ep = softmax(codes, k, vis)
     p = t / 32768 * np.exp2(ep)[:, None]
     return np.where(vis, p, 0.0).reshape(shp)
