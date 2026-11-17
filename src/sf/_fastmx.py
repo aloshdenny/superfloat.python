@@ -44,7 +44,7 @@ _SRC = r"""
    am / bm: magnitudes as the block reads them; an / bn: 0 or -1 (negative).
    Products are at most 2^30 - 1, so they fit int32; totals are int64. */
 void mx_acc(int64_t r0, int64_t r1, int64_t K, int64_t N,
-            const int32_t *am, const int32_t *an, const int32_t *bm, const int32_t *bn,
+            const int32_t *am, const int32_t *an, const uint16_t *bm, const int8_t *bn,
             int32_t blk16, int32_t comp, int32_t sh, int32_t tk, const int32_t *C,
             int64_t lo, int64_t hi, int64_t *acc, uint8_t *clip) {
     const int32_t msk = (1 << tk) - 1;
@@ -52,7 +52,8 @@ void mx_acc(int64_t r0, int64_t r1, int64_t K, int64_t N,
     for (int64_t m = r0; m < r1; m++) {
         const int32_t *ar = am + m * K, *as = an + m * K;
         for (int64_t n = 0; n < N; n++) {
-            const int32_t *br = bm + n * K, *bs = bn + n * K;
+            const uint16_t *br = bm + n * K;
+            const int8_t *bs = bn + n * K;
             int64_t s = 0;
             uint8_t c = 0;
             for (int64_t k0 = 0; k0 < K; k0 += 8) {
@@ -164,15 +165,21 @@ def _threads() -> int:
     return max(1, min(8, os.cpu_count() or 1))
 
 
-def acc2d(am, an, bm, bn, blk16: bool, unit: dict, lo: int, hi: int):
-    """(M, K) @ (K, N) magnitudes and sign masks -> (acc int64, clip bool), 2-D only."""
+def prep_b(bm, bn):
+    """B's magnitudes (K, N) and negative mask, as the C loop reads them:
+    (N, K) uint16 magnitudes (< 2^15) and int8 signs (0 or -1).  3 bytes per
+    element, so a whole model's weights can be kept prepared."""
+    return (np.ascontiguousarray(bm.T, dtype=np.uint16),
+            np.negative(np.ascontiguousarray(bn.T, dtype=np.int8)))
+
+
+def acc2d(am, an, B, Bs, blk16: bool, unit: dict, lo: int, hi: int):
+    """(M, K) magnitudes and sign mask @ B prepared by ``prep_b`` -> (acc int64, clip bool), 2-D only."""
     lib = _load()
     M, K = am.shape
-    N = bm.shape[1]
+    N = B.shape[0]
     A = np.ascontiguousarray(am, dtype=np.int32)
     As = -np.ascontiguousarray(an, dtype=np.int32)              # 0 or -1
-    B = np.ascontiguousarray(bm.T, dtype=np.int32)              # (N, K): each column contiguous
-    Bs = -np.ascontiguousarray(bn.T, dtype=np.int32)
     acc = np.empty((M, N), dtype=np.int64)
     clip = np.empty((M, N), dtype=np.uint8)
     tk = int(unit["tk"]) if blk16 else 1

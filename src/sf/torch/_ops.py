@@ -80,13 +80,85 @@ def linear_impl(x, weight, bias, bits, wscale, headroom, name, runner):
     return torch.from_numpy(r.y.reshape(*lead, N)).to(out_dtype(x.dtype))
 
 
+class WeightCache:
+    """Weights prepared once for the host's wide path (``_core.PreparedWeight``).
+
+    A model's weights do not change between forwards, but preparing them
+    (quantize per channel, norms, compact codes) cost most of the time of a
+    forward: about 20 s of each generated token on Qwen2.5-0.5B.  Entries
+    are keyed by the tensor's storage, shape, strides and version counter,
+    so a weight changed in place (an optimizer step) is prepared again, and
+    each entry holds a weak reference to the tensor that owns the memory: a
+    new weight allocated where a freed one was is never mistaken for it.
+    Least recently used entries go first once the budget is reached:
+    ``SF_WEIGHT_CACHE_MB`` (default 4096; 0 turns the cache off).  3 bytes
+    per weight, so 4 GB holds a 1.3B-parameter model."""
+
+    def __init__(self):
+        import os
+        from collections import OrderedDict
+        self.budget = int(float(os.environ.get("SF_WEIGHT_CACHE_MB", "4096")) * 2 ** 20)
+        self.items = OrderedDict()
+        self.bytes = 0
+        self.hits = self.misses = 0
+
+    @staticmethod
+    def key(w, bits, mx):
+        return (w.untyped_storage().data_ptr(), w.storage_offset(), tuple(w.shape), tuple(w.stride()),
+                w._version, w.dtype, bits, mx)
+
+    @staticmethod
+    def owner(w):
+        """The tensor that owns ``w``'s memory (a parameter, for the slices
+        and transposes layers pass in)."""
+        while w._base is not None:
+            w = w._base
+        return w
+
+    def get(self, w, bits, mx):
+        import weakref
+        if self.budget <= 0 or w.device.type != "cpu":
+            return None
+        k = self.key(w, bits, mx)
+        own = self.owner(w)
+        hit = self.items.get(k)
+        if hit is not None:
+            pw, ref = hit
+            if ref() is own:
+                self.items.move_to_end(k)
+                self.hits += 1
+                return pw
+            self.items.pop(k)                                   # same address, different tensor
+            self.bytes -= pw.nbytes
+        self.misses += 1
+        pw = _core.prepare_weight(_np(w), bits)
+        if pw is None or pw.nbytes > self.budget:
+            return None
+        while self.items and self.bytes + pw.nbytes > self.budget:
+            _, (old, _) = self.items.popitem(last=False)
+            self.bytes -= old.nbytes
+        self.items[k] = (pw, weakref.ref(own))
+        self.bytes += pw.nbytes
+        return pw
+
+    def clear(self):
+        self.items.clear()
+        self.bytes = 0
+        self.hits = self.misses = 0
+
+
+weight_cache = WeightCache()
+
+
 def linear_wide_impl(x, weight, bias, bits, shift, name, runner):
     K, N = weight.shape[1], weight.shape[0]
     if x.shape[-1] != K:
         raise ValueError(f"sf.linear: input has {x.shape[-1]} features, weight expects {K}")
     lead = x.shape[:-1]
-    r = _core.wide_linear(_np(x).reshape(-1, K), _np(weight), None if bias is None else _np(bias),
-                          bits, shift, runner, _mx_of(runner))
+    mx = _mx_of(runner)
+    pw = weight_cache.get(weight, bits, mx) if isinstance(runner, _core.HostRunner) else None
+    r = _core.wide_linear(_np(x).reshape(-1, K), None if pw is not None else _np(weight),
+                          None if bias is None else _np(bias), bits, shift, runner, mx, prepared=pw)
     _record(name, "linear", runner, bits, r)
     return torch.from_numpy(r.y.reshape(*lead, N)).to(out_dtype(x.dtype))
 

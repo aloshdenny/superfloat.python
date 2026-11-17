@@ -66,6 +66,8 @@ Each call is reported as `attention.0.scores` and `attention.0.pv`, then `attent
 
 **Speed on the host.** Wide mode emulates the chip bit for bit, which costs time on a CPU. sf compiles a small C accumulator the first time it is used (with `cc`, `gcc` or `clang`), keeps it in a private per-user cache folder (`~/.cache/sf`, or `$SF_CACHE_DIR`), and splits rows across cores; GPT-2 small runs about 30 times faster than the plain NumPy model, with the same bits. With no C compiler sf uses the NumPy model; `SF_FAST_MX=0` forces it.
 
+**Weights are prepared once.** On the first call of each wide layer, sf quantizes its weight per channel and keeps it in a compact form (3 bytes per weight) with its norms; later calls reuse it, so a chat model spends its time on the chip arithmetic, not on preparing weights. Qwen2.5-0.5B: about 1 second per generated token instead of 20, with identical outputs. A weight changed in place (a training step) is prepared again. The cache holds up to `SF_WEIGHT_CACHE_MB` (default 4096); `0` turns it off. To try it: `python examples/chat_wide.py`.
+
 - In wide mode `scale=` and `headroom=` are not used: weights are always per channel, and partial sums cannot clip at ±1.
 - The bias is added on the chip after POP, in SF arithmetic: quantized to each output's exponent and added with the saturating add (one `ACT` per output). An output whose sum reaches the limit, or whose bias did not fit that exponent, is recomputed at a larger exponent; `bias_saturated` in the layer status counts any bias that still did not fit.
 - A target without an MX engine keeps wide layers on the host, and `sft.compile_report()` says so.

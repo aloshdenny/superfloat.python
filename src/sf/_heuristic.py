@@ -120,7 +120,7 @@ def acc_guard(fmt: SFFormat, x: np.ndarray, qa: np.ndarray, ea: np.ndarray, qb, 
     raise RuntimeError("sf: accumulator guard did not converge")    # pragma: no cover
 
 
-def plan(fmt: SFFormat, qa, ea, qb, eb, eo=None, bias_abs=None):
+def plan(fmt: SFFormat, qa, ea, qb, eb, eo=None, bias_abs=None, nb=None):
     """The rule for (..., M, K) @ (..., K, N) with token exponents ``ea``
     (..., M) and column exponents ``eb`` (..., N).
 
@@ -133,13 +133,18 @@ def plan(fmt: SFFormat, qa, ea, qb, eb, eo=None, bias_abs=None):
     exponent bounds the dot product plus the bias, pow2_exp(|a||w| + |b|),
     so a redone output can never clip in the POP or in the bias add.
 
+    ``nb``: the dequantized column norms of ``qb`` (N,), when they were
+    computed once ahead (a prepared weight); ``qb`` is then not read.  The
+    sums are of integers below 2^53, so both ways give the same floats.
+
     Returns (shift, shift_l2, h): POP's shift per output, the shift at the
     safe l2 exponent for redos, and the table value used (None with ``eo``)."""
     P = fmt.bits - 1
     K = qa.shape[-1]
     h = h_for(K) if eo is None else None
     na = _norms(fmt, qa, -1) * np.ldexp(1.0, (ea - P).astype(np.int64))       # dequantized norms
-    nb = _norms(fmt, qb, -2) * np.ldexp(1.0, (eb - P).astype(np.int64))
+    if nb is None:
+        nb = _norms(fmt, qb, -2) * np.ldexp(1.0, (eb - P).astype(np.int64))
     prod = na[..., :, None] * nb[..., None, :]
     l2 = pow2_exp(prod)
     base = ea[..., :, None] + eb[..., None, :]

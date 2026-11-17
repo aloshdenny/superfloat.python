@@ -280,7 +280,8 @@ def matmul_wide_acc(fmt: SFFormat, a: np.ndarray, b: np.ndarray, mx=None):
         As = np.broadcast_to(an, batch + an.shape[-2:]).reshape(-1, *an.shape[-2:])
         B = np.broadcast_to(bm, batch + bm.shape[-2:]).reshape(-1, *bm.shape[-2:])
         Bs = np.broadcast_to(bn, batch + bn.shape[-2:]).reshape(-1, *bn.shape[-2:])
-        outs = [_fastmx.acc2d(A[i], As[i], B[i], Bs[i], blk == 16, unit, lo, hi) for i in range(A.shape[0])]
+        outs = [_fastmx.acc2d(A[i], As[i], *_fastmx.prep_b(B[i], Bs[i]), blk == 16, unit, lo, hi)
+                for i in range(A.shape[0])]
         acc = np.stack([o[0] for o in outs]).reshape(out_shape)
         clipped = np.stack([o[1] for o in outs]).reshape(out_shape)
         return acc, clipped, F
@@ -304,6 +305,19 @@ def matmul_wide_acc(fmt: SFFormat, a: np.ndarray, b: np.ndarray, mx=None):
             acc_c = np.clip(s_, lo, hi)
         acc[..., cols] = acc_c
         clipped[..., cols] = clip_c
+    return acc, clipped, F
+
+
+def matmul_wide_acc_prepared(fmt: SFFormat, a: np.ndarray, b_prep, mx=None):
+    """``matmul_wide_acc`` for a 2-D ``a`` (M, K) and a B already prepared
+    for the compiled loop (``_fastmx.prep_b``: (N, K) uint16 magnitudes and
+    int8 signs).  The same integers; B is not re-read from codes."""
+    blk = mx_block(fmt)
+    unit = mx_units(mx)[blk]
+    W, F = unit["W"], unit["F"]
+    lo, hi = -(1 << (W - 1)), (1 << (W - 1)) - 1
+    a = np.asarray(a, dtype=np.int64)
+    acc, clipped = _fastmx.acc2d(_mx_mags(fmt, a, blk), a < 0, b_prep[0], b_prep[1], blk == 16, unit, lo, hi)
     return acc, clipped, F
 
 
