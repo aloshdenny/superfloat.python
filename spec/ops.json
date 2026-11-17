@@ -4,7 +4,7 @@
   [
    "1.9.0",
    "2026-11-18",
-   "Attention's P @ V takes each output's exponent from max |V| over only the keys that row uses (P != 0), not over every key, so masked keys never change a row's output exponent (sft_wide.json regenerated: its causal cases change). Integer definitions of exp, softmax, GELU, SiLU, reciprocal and rsqrt (Alosh's sf_intops_ref.py, ported bit for bit as sf.intops) with golden vectors in spec/golden/intops/. sf's softmax_row is Alosh's sequence with three changes, pending his sign-off: e_i flushed by the main exp are summed with 15 more fraction bits (a second exp at d + 15 ln2 / 2^k, a third MX slot popped 15 lower), q below 2^14 after normalising is popped once more one step higher, and P keeps the row's own exponent instead of being shifted to scale 1. DSL 0.15.0."
+   "Attention's P @ V takes each output's exponent from the exact bound of the quantized product, (sum of the row's P) times max |V| over only the keys that row uses (P != 0), with POP's rounding margin: masked keys never change a row's output exponent and no P @ V output is ever redone (sft_wide.json regenerated: its causal cases change). Integer definitions of exp, softmax, GELU, SiLU, reciprocal and rsqrt (Alosh's sf_intops_ref.py, ported bit for bit as sf.intops) with golden vectors in spec/golden/intops/. sf's softmax_row is Alosh's sequence with three changes, pending his sign-off: e_i flushed by the main exp are summed with 15 more fraction bits (a second exp at d + 15 ln2 / 2^k, a third MX slot popped 15 lower), q below 2^14 after normalising is popped once more one step higher, and P keeps the row's own exponent instead of being shifted to scale 1. DSL 0.15.0."
   ],
   [
    "1.8.0",

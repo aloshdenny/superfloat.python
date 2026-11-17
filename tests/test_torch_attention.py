@@ -245,7 +245,7 @@ def test_pv_rows_do_not_see_the_exponent_of_masked_keys():
     from sf.torch import _core
     calls = []
     real = _core.visible_max_exp
-    _core.visible_max_exp = lambda p, b, chunk=1 << 24: calls.append(real(p, b)) or calls[-1]
+    _core.visible_max_exp = lambda *a, **kw: calls.append(real(*a, **kw)) or calls[-1]
     try:
         sft.attention(q, k, v, is_causal=True, name="vis")
     finally:
@@ -253,3 +253,19 @@ def test_pv_rows_do_not_see_the_exponent_of_masked_keys():
     eo = calls[-1]
     allkeys = np.ceil(np.log2(np.abs(v.numpy()).max(axis=-2)))           # what the old rule took for every row
     assert (eo[..., :12, :] < allkeys[..., None, :]).any()               # early rows keep finer exponents
+
+
+def test_pv_is_never_redone():
+    """P @ V's exponent bounds the quantized product exactly (sum of P times max visible |V|, with POP's rounding
+    margin): no output can saturate, so nothing is redone, even when a row sees one key whose V is just under a
+    power of two (the case the plain max |V| rule redid)."""
+    torch.manual_seed(3)
+    q, k = torch.randn(2, 4, 64, 16), torch.randn(2, 4, 64, 16)
+    v = torch.randn(2, 4, 64, 16)
+    v[..., 0, :] = 0.99999                                               # row 0 sees only key 0: out = v[0]
+    sft.reset_status()
+    out = sft.attention(q, k, v, is_causal=True, name="nored")
+    st = sft.last_status()["nored.pv"]
+    assert st.redone == 0 and (st.saturated or 0) == 0
+    ref = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+    assert (out - ref).abs().max() < 2e-3

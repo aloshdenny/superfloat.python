@@ -38,8 +38,12 @@ them. Each one is a single place to change if the team decides differently.
   `IntGELU` / `IntSiLU` (MoE `act_fn` too).  erf GELU has no integer form:
   stays float, reported.  Norms stay float (Alosh: up to 4% off with squares
   in sf16).  Numpy round trip: no gradient, graph break under compile.
-* P·V (`out_rule="max_b"`): each output's exponent is max |V| over the keys
-  the row uses (P != 0).  V's own per-channel quantization exponent still
+* P·V (`out_rule="max_b"`): each output's exponent is the exact bound of the
+  quantized product, (sum of the row's quantized P) x max |quantized V| over
+  the keys the row uses (P != 0), times 32768/32767 for POP's rounding.  No
+  P·V output can saturate, so none is redone: max |V| alone left rows that
+  see one key with V just under a power of two at the top code (Qwen sf16:
+  301k redos against 85k with the all-keys rule).  V's own per-channel quantization exponent still
   spans every key: a row is not yet fully invariant to masked keys appended
   after it (question to Alosh).
 * Width per layer (`sf.torch._widths`): `cost_table_v0.json` packaged and
