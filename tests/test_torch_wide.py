@@ -237,3 +237,30 @@ def test_bad_settings_are_refused():
         sft.convert(m, shift=-2)
     with pytest.raises(ValueError, match="between -32 and 31"):
         sft.convert(m, accumulate="wide", shift=40)
+
+
+# --- big layers in blocks of output channels -----------------------------------------------------
+
+@pytest.mark.parametrize("bits,mx", [(16, None), (8, None), (16, "v4.8.1")])
+def test_big_layers_in_blocks_give_the_same_bits_and_status(bits, mx, monkeypatch):
+    """An LM head of 150,000 rows is quantized and run a block of rows at a
+    time; the outputs and every status field match the one-shot result,
+    including the guard (it needs the whole layer's largest column) and redos."""
+    rng = np.random.default_rng(bits)
+    x = rng.normal(size=(5, 512))
+    x[1] = 0.9
+    x[3, :] = 0.0
+    x[3, 7] = 3.0                                              # one large term: outputs near max, redos
+    w = rng.normal(size=(301, 512)) * 0.1
+    w[200] = 0.9                                               # the largest column sits in a late block
+    b = rng.normal(size=301)
+    fields = ("saturated", "underflow", "flushed", "acc_clipped", "redone", "outputs", "exact",
+              "shift_min", "shift_max", "h", "guard_raised", "weight_underflow", "input_underflow")
+    monkeypatch.setattr(_core, "WIDE_BLOCK", 1 << 30)
+    one = _core.wide_linear(x, w, b, bits, mx=mx)
+    monkeypatch.setattr(_core, "WIDE_BLOCK", 512 * 23)         # 23 rows per block, a short last block
+    blocked = _core.wide_linear(x, w, b, bits, mx=mx)
+    assert np.array_equal(one.y, blocked.y)
+    assert {f: getattr(one, f) for f in fields} == {f: getattr(blocked, f) for f in fields}
+    if mx == "v4.8.1":
+        assert one.guard_raised > 0                            # the guard ran, and agreed across blocks

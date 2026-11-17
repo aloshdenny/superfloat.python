@@ -416,9 +416,17 @@ def fake_quantize(x: np.ndarray, bits: int, mode: str, scale: float):
 
 # --- wide mode (the MX engine) ---------------------------------------------------------------
 
+WIDE_BLOCK = 1 << 23            # weight elements quantized at once by wide_linear (memory, not bits)
+
+
 def _wide(fmt, x_rows, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo=None):
     """The common wide step for (..., M, K) codes @ (..., K, N) codes."""
     qa, ea, raised = _heuristic.acc_guard(fmt, x_rows, qa, ea, qb, mx)
+    return _wide_cols(fmt, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo, raised)
+
+
+def _wide_cols(fmt, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo=None, raised=0):
+    """The wide step after the guard: plan, launch, redo, dequantize."""
     if shift is None:
         sh, sh_redo, h = _heuristic.plan(fmt, qa, ea, qb, eb, eo)
     else:                                          # an explicit shift overrides the rule
@@ -452,8 +460,13 @@ def wide_linear(x: np.ndarray, w: np.ndarray, b: np.ndarray | None, bits: int,
     x = sanitize(x, fmt, "linear input")
     w = sanitize(w, fmt, "linear weight")
     qa, ea, in_under = _heuristic.quantize_pow2(fmt, x, -1)
-    qw, ew, w_under = _heuristic.quantize_pow2(fmt, w, -1)
-    y, info = _wide(fmt, x, qa, ea, np.ascontiguousarray(qw.T), ew, in_under, w_under, shift, runner, mx)
+    N, K = w.shape
+    rows = max(1, WIDE_BLOCK // max(1, K))
+    if N <= rows:
+        qw, ew, w_under = _heuristic.quantize_pow2(fmt, w, -1)
+        y, info = _wide(fmt, x, qa, ea, np.ascontiguousarray(qw.T), ew, in_under, w_under, shift, runner, mx)
+    else:
+        y, info = _wide_linear_blocks(fmt, x, qa, ea, in_under, w, rows, shift, runner, mx)
     if b is not None:
         y = y + sanitize(b, fmt, "linear bias")[None, :]
     return CoreResult(y=y, **info)
@@ -479,3 +492,36 @@ def wide_matmul(a_val: np.ndarray, b_val: np.ndarray, bits: int, shift: int | No
     eo = eb[..., None, :] if out_rule == "max_b" else None
     y, info = _wide(fmt, a_val, qa, ea, qb, eb, ua + ub, 0, shift, runner, mx, eo)
     return CoreResult(y=y, **info)
+
+
+def _wide_linear_blocks(fmt, x, qa, ea, in_under, w, rows, shift, runner, mx):
+    """``wide_linear`` for a weight too big to quantize at once (an LM head of
+    150,000 rows): the same bits, ``rows`` output channels at a time.  Each
+    channel's exponent depends only on its own row, and the guard needs only
+    the largest column norm, so pass 1 finds that and pass 2 computes."""
+    N = w.shape[0]
+    blocks = [slice(i, min(N, i + rows)) for i in range(0, N, rows)]
+    bmax, w_under = 0.0, 0
+    for s in blocks:
+        qw, _, wu = _heuristic.quantize_pow2(fmt, w[s], -1)
+        bmax = max(bmax, float(_heuristic.col_norm_max(fmt, qw.T)[0]))
+        w_under += wu
+    qa, ea, raised = _heuristic.acc_guard(fmt, x, qa, ea, None, mx, bmax=np.array([bmax]))
+    ys, infos = [], []
+    for s in blocks:
+        qw, ew, _ = _heuristic.quantize_pow2(fmt, w[s], -1)
+        yb, ib = _wide_cols(fmt, qa, ea, np.ascontiguousarray(qw.T), ew, in_under, w_under, shift, runner, mx,
+                            None, raised)
+        ys.append(yb)
+        infos.append(ib)
+
+    def total(key):
+        vals = [i[key] for i in infos]
+        return None if any(v is None for v in vals) else sum(vals)
+
+    info = dict(infos[0])
+    info.update(saturated=total("saturated"), underflow=total("underflow"), flushed=total("flushed"),
+                acc_clipped=total("acc_clipped"), redone=sum(i["redone"] for i in infos),
+                outputs=sum(i["outputs"] for i in infos), exact=all(i["exact"] for i in infos),
+                shift_min=min(i["shift_min"] for i in infos), shift_max=max(i["shift_max"] for i in infos))
+    return np.concatenate(ys, axis=1), info
