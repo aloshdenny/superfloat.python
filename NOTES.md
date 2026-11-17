@@ -90,7 +90,7 @@ them. Each one is a single place to change if the team decides differently.
 | Before launch | limits (1024 lanes, 16384-value tiles, 65535 per grid axis, 32 KiB of shared memory in device-format bytes, 2^28 elements), argument placement (one device, no host arrays, no non-contiguous views: a transpose or strided slice must be copied first), widths; any failure is `SFLaunchError` with nothing launched. The Stage 1.1 pre-flight (range bound, probe) does not run for user kernels: the kernel body is opaque to it | `kernels/_runtime.KernelDevice.check_launch` |
 | Device faults | out-of-bounds load / store / shared access and integer division by zero stop the launch with `SFDeviceError`. Contract: the faulting op writes nothing; writes by earlier ops and by earlier programs stay visible; nothing after the fault runs. Both backends are tested to leave the same buffer state | both backends |
 | Cycle model | `ceil(lane_ops / 256) + ceil(macs / 4096) + loads + stores + barriers`. A placeholder for autotune ordering, not a performance claim; replace the constants when the hardware team publishes them | `kernels/_interp.Counters.cycles` |
-| C backend | sf16 only (the device format); every value a fixed-size `int64_t` array, every op a loop, events through the `sf16_events` block of `sf16_builtins.h`; user parameter names never appear in the C (`arg<i>`); compiled with `cc -O2 -std=c99` into a cache in the temp directory keyed on the emitted C, the header, the compiler banner and the flags. The header is the stand-in for the custom Clang's builtins: when the real ones arrive, the emitted C is what to hand them | `kernels/_cgen.py` |
+| C backend | sf16 only (the device format); every value a fixed-size `int64_t` array, every op a loop, events through the `sf16_events` block of `sf16_builtins.h`; user parameter names never appear in the C (`arg<i>`); compiled with `cc -O2 -std=c99` into a private per-user cache (`sf/_cache.py`, see below) keyed on the emitted C, the header, the compiler banner and the flags. The header is the stand-in for the custom Clang's builtins: when the real ones arrive, the emitted C is what to hand them | `kernels/_cgen.py` |
 | Hardware target | `atreides-hw` registered now so code can be written against it; raises `SFDeviceError` until `HardwareAtreides.attach(driver)` is given an object with `launch(ir, grid, block, buffers, scalars) -> Counters` | `kernels/_runtime.HardwareAtreides` |
 | Autotune | by simulated cycles, ties by wall time, one tuning run per distinct key; configs supply constexpr names the launch does not pass; the grid may be a function of the chosen config | `kernels/_runtime.autotune` |
 | `from __future__ import annotations` | `BLOCK: sf.constexpr` arrives as a string in such modules; the kernel accepts both the object and the string | `kernels/_runtime._is_constexpr_annotation` |
@@ -176,6 +176,18 @@ them. Each one is a single place to change if the team decides differently.
   golden cases.  GPT-2 perplexity identical to every digit (60.70888535488952).
 * Speed (2 cores): a 128 x 768 x 3072 SF16 layer 0.36 s against 10.6 s (29x);
   GPT-2 small about 30x faster per window.
+* Where the libraries live (`sf/_cache.py`).  Both compiled paths (this one
+  and the kernel C backend) load a `.so` with ctypes, which runs its code, so
+  the cache must be writable by this user only.  The first version used
+  `/tmp/sf-fastmx-<uid>` (and the kernel backend `/tmp/sf-kernels-c`) with
+  `makedirs(exist_ok=True)`: on a shared machine another user could create
+  that folder first and plant a library under the predictable name.  Now the
+  cache is `$SF_CACHE_DIR/<name>`, else `$XDG_CACHE_HOME/sf/<name>`, else
+  `~/.cache/sf/<name>`, created 0700; on POSIX the folder and each library
+  are checked (ours, not a link, not group/other-writable) before loading.
+  A failed check means the NumPy reference (`_fastmx`) or "C backend
+  unavailable" (`_cgen`), never a load.  No home folder: a per-process
+  `mkdtemp` folder.  Tests: `tests/test_cache.py`.
 * `pyproject.toml` version was 0.4.0; now matches `sf.__version__` (tested).
 
 ## Golden vectors and docs for wide mode (spec 1.6.1)
@@ -365,9 +377,13 @@ them. Each one is a single place to change if the team decides differently.
 * Tests that exercise the device rules for divide and square root (exact div0
   and invalid, masked divide) run on a test-only target with every op,
   `mock-all-ops` in `tests/conftest.py`.
-* Not changed: kernels. `@sf.jit` code can still use divide and square root on
-  `atreides-sim`. The v4.8.1 target guide marks both as host-only, so whether
-  the simulator should refuse them is an open question for Alosh and Kartik.
+* Kernels too (decided by Alosh, 2026-11-17): `@sf.jit` code that uses SF `/`
+  or `sf.sqrt` is refused on `atreides-sim` and `atreides-hw` with
+  `SFUnsupportedError` before launch (`KernelDevice.check_launch` reads the
+  traced IR against `supported_ops`). Otherwise a kernel could pass in the
+  simulator and fail on the chip. Integer `//` and `%` for index arithmetic
+  are separate ops and stay allowed. Their kernel semantics (events, the C
+  builtins) are tested on `sim-all-ops` in `tests/conftest.py`.
 
 ## Immutability
 

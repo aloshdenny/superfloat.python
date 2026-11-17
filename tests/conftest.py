@@ -56,6 +56,21 @@ ALL_OPS = AllOpsMock.name
 sf.register_device(AllOpsMock())
 
 
+from sf.kernels._runtime import SimulatorAtreides  # noqa: E402
+
+
+class AllOpsSimulator(SimulatorAtreides):
+    """The kernel simulator with divide and square root, for tests of their
+    kernel semantics (events, C builtins).  ``atreides-sim`` refuses both."""
+
+    name = "sim-all-ops"
+    supported_ops = None
+
+
+SIM_ALL_OPS = AllOpsSimulator.name
+sf.register_device(AllOpsSimulator())
+
+
 def run(fn, *args):
     """Call ``fn(*args)`` with every event set to raise.
 

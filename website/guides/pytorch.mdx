@@ -64,7 +64,7 @@ Each call is reported as `attention.0.scores` and `attention.0.pv`, then `attent
 
 `nn.MultiheadAttention` is converted too: its four projections become SF linears (`{name}.q`, `.k`, `.v`, `.out`), and in wide mode its attention runs on the MX engine (`{name}.scores`, `.pv`). Same call and returns as PyTorch, including `batch_first`, masks, `key_padding_mask`, `need_weights` and separate `kdim` / `vdim`. Layers with `bias_k` / `bias_v` or `add_zero_attn` stay in float, and the report says why.
 
-**Speed on the host.** Wide mode emulates the chip bit for bit, which costs time on a CPU. sf compiles a small C accumulator the first time it is used (with `cc`, `gcc` or `clang`) and splits rows across cores; GPT-2 small runs about 30 times faster than the plain NumPy model, with the same bits. With no C compiler sf uses the NumPy model; `SF_FAST_MX=0` forces it.
+**Speed on the host.** Wide mode emulates the chip bit for bit, which costs time on a CPU. sf compiles a small C accumulator the first time it is used (with `cc`, `gcc` or `clang`), keeps it in a private per-user cache folder (`~/.cache/sf`, or `$SF_CACHE_DIR`), and splits rows across cores; GPT-2 small runs about 30 times faster than the plain NumPy model, with the same bits. With no C compiler sf uses the NumPy model; `SF_FAST_MX=0` forces it.
 
 - In wide mode `scale=` and `headroom=` are not used: weights are always per channel, and partial sums cannot clip at ±1.
 - The bias is added in float after POP, on the host.
