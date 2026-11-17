@@ -3,6 +3,47 @@
 Decisions the spec left open or did not state, and how this code resolves
 them. Each one is a single place to change if the team decides differently.
 
+## Integer nonlinears, P·V over visible keys, a width per layer (0.15.0, spec 1.9.0)
+
+* Alosh (2026-11-18): port his `sf_intops_ref.py` (exp, softmax, GELU, SiLU,
+  reciprocal, rsqrt, norms) bit for bit as sf's reference, with golden
+  vectors; fix the causal-masked softmax rows; take P·V's exponent over the
+  visible keys only; build width per layer from the cost table, read as
+  input.
+* `sf._intops` (`sf.intops`): his file verbatim (his `softmax_row` renamed
+  `softmax_row_v0`), compared on every input code (`tests/test_intops.py`);
+  the original sits unchanged in `tests/data/sf_intops_ref_v0.py`.  Golden
+  vectors: `spec/golden/intops/` from `tools/gen_golden_intops.py`.
+* sf's `softmax_row` = v0 with three changes, **pending Alosh's sign-off**:
+  (1) e_i flushed by the main exp get a second exp at d + 15 ln2 / 2^k and
+  are summed in a third MX slot popped 15 lower; (2) q < 2^14 after
+  normalising: pop once more one step higher; (3) P returned with the row's
+  exponent `(t, ep)`, not shifted to scale 1.  His row: worst error 0.0037 to
+  under 0.0003.  Left as defined: `mul` truncation (up to 1 ulp low per
+  nonzero P, as v0) and scores above 64 saturating under k <= 6.
+* Float rows on the host (`softmax_rows`): k = 4, redone at 5, 6 if max
+  |score| would saturate; a score at or below -10^4 is a mask (models mask
+  with `finfo.min` as well as -inf; such a key would otherwise force k = 6).
+  GELU / SiLU rows: one exponent from max |x|, clamped to 0..6 (his tables),
+  so |x| above 64 saturates.
+* `convert(nonlinear="integer")`: softmax in `sft.attention` (wide mode) and
+  in eager attention scopes; tanh-GELU and SiLU modules swapped for
+  `IntGELU` / `IntSiLU` (MoE `act_fn` too).  erf GELU has no integer form:
+  stays float, reported.  Norms stay float (Alosh: up to 4% off with squares
+  in sf16).  Numpy round trip: no gradient, graph break under compile.
+* P·V (`out_rule="max_b"`): each output's exponent is max |V| over the keys
+  the row uses (P != 0).  V's own per-channel quantization exponent still
+  spans every key: a row is not yet fully invariant to masked keys appended
+  after it (question to Alosh).
+* Width per layer (`sf.torch._widths`): `cost_table_v0.json` packaged and
+  read as given; `layer_sensitivity` (one layer at a time, rest float);
+  `choose_widths` (greedy on loss saved per cost, from all-narrowest; widths
+  not measured are extrapolated at 4x less loss per bit and flagged);
+  `fit_widths` measures the plan on the whole model and corrects the budget,
+  since the sum of single-layer losses is off by up to 1.5x on Qwen2.5-0.5B.
+  `convert(widths={name: dtype})` takes the plan.  Cycles and bus words use
+  the better of plain and weights-packed (sf16 packed is slower than plain).
+
 ## dot_wide with a shift per output in kernels (0.14.0, spec 1.8.0)
 
 * Alosh (2026-11-18): the chip already takes a shift per output (POP's Rs per

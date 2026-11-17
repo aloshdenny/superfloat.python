@@ -29,6 +29,8 @@ from ._backend import GraphReport, compile_report, compile_reports, superfloat  
 from ._attention import attention
 from ._modules import ConversionReport, SFConfig, SFConv2d, SFHFConv1D, SFLinear, conversion_report, convert, find_lm_heads
 from ._mxfp4 import dequantize_mxfp4, load_mxfp4, quantize_mxfp4
+from ._intops import int_gelu, int_silu, int_softmax
+from ._widths import CostTable, WidthPlan, choose_widths, cost_table, fit_widths, layer_sensitivity, matmul_layers
 from ._status import SFLayerStatus, capture_status, last_status, reset_status
 
 
@@ -105,6 +107,7 @@ def from_sf(a, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     return torch.from_numpy(np.asarray(a.numpy())).to(dtype)
 
 
-__all__ = ["dequantize_mxfp4", "load_mxfp4", "quantize_mxfp4", "quantize", "linear", "matmul", "attention", "to_sf", "from_sf", "SFLinear", "SFConv2d", "SFHFConv1D", "SFConfig", "convert", "find_lm_heads",
+__all__ = ["CostTable", "WidthPlan", "choose_widths", "cost_table", "fit_widths", "layer_sensitivity",
+           "matmul_layers", "int_softmax", "int_gelu", "int_silu", "dequantize_mxfp4", "load_mxfp4", "quantize_mxfp4", "quantize", "linear", "matmul", "attention", "to_sf", "from_sf", "SFLinear", "SFConv2d", "SFHFConv1D", "SFConfig", "convert", "find_lm_heads",
            "conversion_report", "ConversionReport", "autocast", "last_status", "reset_status", "capture_status",
            "SFLayerStatus", "compile_report", "compile_reports", "GraphReport"]

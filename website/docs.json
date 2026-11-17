@@ -99,7 +99,8 @@
           {
             "group": "Hardware",
             "pages": [
-              "reference/hardware"
+              "reference/hardware",
+              "reference/intops"
             ]
           }
         ]

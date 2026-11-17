@@ -539,10 +539,12 @@ def wide_matmul(a_val: np.ndarray, b_val: np.ndarray, bits: int, shift: int | No
     """(..., M, K) @ (..., K, N) of two activations on the MX engine: one
     exponent per row of ``a`` and per column of ``b``, shifts from the rule.
 
-    ``out_rule="max_b"``: the output exponent of column c is ``b``'s own
-    exponent there, pow2_exp(max |b[:, c]|): exact bound when every row of
-    ``a`` is nonnegative and sums to at most 1 (attention's P @ V).  The
-    redo at l2 stays as a guard for the rounding of P."""
+    ``out_rule="max_b"``: the output exponent of row t, column c is
+    pow2_exp(max |b[k, c]|) over the k where ``a[t, k] != 0``: an exact bound
+    when every row of ``a`` is nonnegative and sums to at most 1 (attention's
+    P @ V), taken over only the keys the row can see, so masked keys (P = 0)
+    never change a row's result.  The redo at l2 stays as a guard for the
+    rounding of P."""
     fmt = _check(bits)
     runner = runner or HostRunner()
     a_val = sanitize(a_val, fmt, "matmul left operand")
@@ -551,9 +553,27 @@ def wide_matmul(a_val: np.ndarray, b_val: np.ndarray, bits: int, shift: int | No
     qb, eb, ub = _heuristic.quantize_pow2(fmt, b_val, -2)
     if out_rule not in ("heuristic", "max_b"):
         raise ValueError(f"out_rule must be 'heuristic' or 'max_b', got {out_rule!r}")
-    eo = eb[..., None, :] if out_rule == "max_b" else None
+    eo = visible_max_exp(a_val, b_val) if out_rule == "max_b" else None
     y, info = _wide(fmt, a_val, qa, ea, qb, eb, ua + ub, 0, shift, runner, mx, eo)
     return CoreResult(y=y, **info)
+
+
+def visible_max_exp(p: np.ndarray, v: np.ndarray, chunk: int = 1 << 24) -> np.ndarray:
+    """pow2_exp of max |v[k, c]| over the k with p[t, k] != 0, for every (t, c):
+    (..., M, S) and (..., S, N) -> (..., M, N).  Rows are done in chunks so
+    the (..., rows, S, N) intermediate stays below ``chunk`` elements."""
+    vis = np.asarray(p) != 0
+    av = np.abs(np.asarray(v, dtype=np.float64))
+    lead = np.broadcast_shapes(vis.shape[:-2], av.shape[:-2])
+    vis = np.broadcast_to(vis, lead + vis.shape[-2:])
+    av = np.broadcast_to(av, lead + av.shape[-2:])
+    M, S, N = vis.shape[-2], vis.shape[-1], av.shape[-1]
+    out = np.zeros(lead + (M, N))
+    step = max(1, chunk // max(1, int(np.prod(lead, dtype=np.int64)) * S * N))
+    for i in range(0, M, step):
+        sl = slice(i, min(M, i + step))
+        out[..., sl, :] = np.where(vis[..., sl, :, None], av[..., None, :, :], 0.0).max(axis=-2) if S else 0.0
+    return _heuristic.pow2_exp(out)
 
 
 def _wide_linear_blocks(fmt, x, qa, ea, in_under, w, rows, shift, runner, mx, bias=None):

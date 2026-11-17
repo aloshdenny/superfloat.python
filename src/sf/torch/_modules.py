@@ -223,6 +223,7 @@ class ConversionReport:
     kept_sf16: list = field(default_factory=list)     # (name, why): converted at sf16, not the narrower dtype
     attention: str = "float (not converted)"          # where F.scaled_dot_product_attention runs
     widths: dict = field(default_factory=dict)        # name -> bits, for every converted module
+    nonlinear: list = field(default_factory=list)     # (name, what): activations on sf's integer definitions
     eager_attention: list = field(default_factory=list)  # attention modules whose torch.matmul calls run on MX
 
     def __repr__(self) -> str:
@@ -237,12 +238,18 @@ class ConversionReport:
         lines += [f"  + {n} ({k})" for n, k in self.converted]
         lines += [f"  ^ {n} kept at sf16: {w}" for n, w in self.kept_sf16]
         lines += [f"  attention: {self.attention}"]
+        lines += [f"  ~ {n}: {w}" for n, w in self.nonlinear]
         if self.eager_attention:
             lines += [f"  attention written with torch.matmul (no SDPA): caught on the MX engine at sf16 in "
                       f"{len(self.eager_attention)} attention module(s), when they use it"]
         lines += [f"  = {a} is {n} (shared module, converted once)" for a, n in self.shared]
         lines += [f"  - {n} ({k}): {r}" for n, k, r in self.skipped]
         return "\n".join(lines)
+
+
+def _int_act(m: nn.Module):
+    from ._intops import integer_activation
+    return integer_activation(m)
 
 
 def _linear_like(m: nn.Module) -> bool:
@@ -287,7 +294,8 @@ def find_lm_heads(model: nn.Module) -> dict[int, str]:
 
 def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom: str = "bound",
             inplace: bool = False, *, accumulate: str = "chain", shift: int | None = None,
-            calibration: str = "heuristic", keep_sf16="auto", attention="auto") -> nn.Module:
+            calibration: str = "heuristic", keep_sf16="auto", attention="auto",
+            nonlinear: str = "float", widths: dict | None = None) -> nn.Module:
     """Swap ``nn.Linear``, ``nn.Conv2d`` and Hugging Face's ``Conv1D`` (GPT-2's
     layers) for SF versions with a scale policy.
 
@@ -317,7 +325,19 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
     subclass of ``nn.Linear`` with its own ``forward``, so those layers run
     as they were instead of giving a wrong answer.
 
-    Other modules (activations, normalisation, pooling, softmax, ...) stay as
+    ``widths``: {module name: dtype} for layers that run at another width
+    than ``dtype`` (a width per layer); it wins over ``keep_sf16``.
+    ``sft.choose_widths`` makes one from measured sensitivity and the chip's
+    cost table (``plan.convert_kwargs()``).
+
+    ``nonlinear``: ``"float"`` (default) keeps softmax and activations in
+    float on the host.  ``"integer"`` runs them on sf's integer definitions
+    (``sf.intops``, Alosh's chip sequences): attention's softmax (wide mode
+    only, where attention runs on sf), GPT-2's tanh GELU and SiLU modules
+    (MoE experts' ``act_fn`` included).  GELU with erf has no integer form
+    and stays float.  Norms always stay on the host.  The report lists each.
+
+    Other modules (normalisation, pooling, ...) stay as
     they are and run in float on the host; ``sft.conversion_report(model)``
     lists what was converted and what was skipped, and why, including any
     module that holds weights no rule converted.
@@ -325,6 +345,8 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
     cfg = SFConfig(_bits_of(dtype), scale, headroom, accumulate, shift, calibration)
     if attention not in ("auto", False, None):
         raise ValueError(f"attention must be \"auto\" or False, got {attention!r}")
+    if nonlinear not in ("float", "integer"):
+        raise ValueError(f"nonlinear must be \"float\" or \"integer\", got {nonlinear!r}")
     if not inplace:
         model = copy.deepcopy(model)
     report = ConversionReport()
@@ -346,12 +368,23 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
             if missing:
                 raise ValueError(f"keep_sf16: no module named {', '.join(map(repr, missing))}")
 
+    per_layer: dict[str, SFConfig] = {}
+    if widths:
+        known = {n for n, _ in model.named_modules(remove_duplicate=False)}
+        missing = sorted(set(widths) - known)
+        if missing:
+            raise ValueError(f"widths: no module named {', '.join(map(repr, missing))}")
+        per_layer = {n: SFConfig(_bits_of(d), scale, headroom, accumulate, shift, calibration)
+                     for n, d in widths.items()}
+
     def cfg_for(child, full):
         c = _cfg_for(child, full)
         report.widths[full] = c.bits
         return c
 
     def _cfg_for(child, full):
+        if full in per_layer:
+            return per_layer[full]
         if cfg.bits >= 16:
             return cfg
         why = keep_ids.get(id(child)) or ("named in keep_sf16" if full in keep_names else None)
@@ -411,6 +444,12 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
             else:
                 rep = SFMultiheadAttention(child, full, cfg_for(child, full))
                 report.converted.append((full, "MultiheadAttention"))
+        elif nonlinear == "integer" and _int_act(child)[1] is not None:
+            rep, what = _int_act(child)
+            if rep is None:
+                report.skipped.append((full, type(child).__name__, what))
+            else:
+                report.nonlinear.append((full, what))
         elif isinstance(child, (nn.Conv1d, nn.Conv3d, nn.ConvTranspose1d, nn.ConvTranspose2d,
                                 nn.ConvTranspose3d, nn.Bilinear,
                                 nn.LSTM, nn.GRU, nn.RNN)):
@@ -451,6 +490,7 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
             return
         if wide_attention and _scopes.is_attention_scope(child):
             _scopes.add_scope(child, "attention", full, cfg16)
+            child._sf_softmax = nonlinear
             report.eager_attention.append(full)
         elif _scopes.is_rotary(child):
             _scopes.add_suspend(child)
@@ -486,8 +526,13 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
         visit(model, "")
     if wide_attention:
         from ._attention import install
-        install(model)
+        install(model, softmax="integer" if nonlinear == "integer" else "float")
         report.attention = "F.scaled_dot_product_attention on the MX engine at sf16 (attention.0, attention.1, ...)"
+        if nonlinear == "integer":
+            report.attention += "; softmax on sf's integer definition"
+            report.nonlinear.append(("attention", "softmax (integer)"))
+    elif nonlinear == "integer":
+        report.nonlinear.append(("attention", "softmax stays float: attention runs on sf only with accumulate='wide'"))
     model._sf_conversion_report = report
     return model
 

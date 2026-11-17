@@ -358,6 +358,12 @@ class ScopeMode(TorchFunctionMode):
         elif self.kind == "attention":
             if func in _SOFTMAX:
                 self.after_softmax = True
+                if getattr(self.module, "_sf_softmax", "float") == "integer":
+                    from ._intops import int_softmax
+                    x = args[0]
+                    dim = args[1] if len(args) > 1 else kwargs.get("dim", -1)
+                    dt = kwargs.get("dtype") or next((a for a in args[2:] if isinstance(a, torch.dtype)), None)
+                    return int_softmax(x if dt is None else x.to(dt), dim=dim)
             elif func in _MATMUL and len(args) == 2 and not kwargs:
                 a, b = args
                 if (isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor) and a.dim() >= 2 and b.dim() >= 2

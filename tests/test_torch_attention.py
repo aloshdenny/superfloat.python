@@ -222,3 +222,34 @@ def test_multihead_attention_trains():
     x = torch.randn(5, 2, 16, requires_grad=True)
     c[0](x, x, x)[0].sum().backward()
     assert x.grad is not None and c[0].in_proj_weight.grad is not None and c[0].out_proj.weight.grad is not None
+
+
+# --- P @ V's output exponent from the keys a row can see (spec 1.9.0) ------------------------------------------------
+
+def test_pv_output_exponent_counts_only_visible_keys():
+    import numpy as np
+    from sf.torch import _core
+    p = np.array([[1.0, 0, 0], [0.5, 0.5, 0], [0.2, 0.3, 0.5]])
+    v = np.array([[0.1, 2.0], [0.4, -3.0], [40.0, 0.25]])
+    e = _core.visible_max_exp(p, v)
+    assert e.tolist() == [[-3, 2], [-1, 2], [6, 2]]                       # row 0 sees key 0 only, ...
+    big = _core.visible_max_exp(np.broadcast_to(p, (2, 3, 3)), np.broadcast_to(v, (2, 3, 2)), chunk=4)
+    assert (big == e).all()
+
+
+def test_pv_rows_do_not_see_the_exponent_of_masked_keys():
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(1, 2, 16, 8) for _ in range(3))
+    v[..., 12:, :] *= 30                                                  # large values only in the last keys
+    import numpy as np
+    from sf.torch import _core
+    calls = []
+    real = _core.visible_max_exp
+    _core.visible_max_exp = lambda p, b, chunk=1 << 24: calls.append(real(p, b)) or calls[-1]
+    try:
+        sft.attention(q, k, v, is_causal=True, name="vis")
+    finally:
+        _core.visible_max_exp = real
+    eo = calls[-1]
+    allkeys = np.ceil(np.log2(np.abs(v.numpy()).max(axis=-2)))           # what the old rule took for every row
+    assert (eo[..., :12, :] < allkeys[..., None, :]).any()               # early rows keep finer exponents
