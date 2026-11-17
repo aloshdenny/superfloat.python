@@ -133,6 +133,48 @@ them. Each one is a single place to change if the team decides differently.
   automatically with an override, reported in `SFLayerStatus`; Alosh is
   computing golden values chip-side).
 
+## sf.torch wide mode (0.9.0, spec 1.4.0)
+
+* Items 2, 5 and 6 of Alosh's build order.  `accumulate="wide"` on
+  `sft.convert`, `sft.autocast`, `sft.linear`, `sft.matmul`, `SFLinear`,
+  `SFConv2d` and `SFHFConv1D`; default `"chain"`, which is unchanged bit for bit.
+* The rule is `sf/_heuristic.py`, torch-free and in one place: `h_for(K)`
+  (margin 2), `pow2_exp`, `quantize_pow2` (one exponent per slice, round
+  half to even, clamp), `plan` (shift and the l2 redo shift) and
+  `acc_guard`.  `calibration="heuristic"` is the only value.
+* Scale policy in wide mode: activations one power-of-two exponent per token,
+  weights one per output channel, no `headroom` (partial sums cannot clip
+  at 1).  `scale=` and `headroom=` are ignored in wide mode.
+* Accumulator guard: before launch, per token, Cauchy-Schwarz on the block's
+  magnitudes (|S| <= |a_t| max|w_c| / 2^(30-F) + K on SF16).  A token that
+  could reach the limit gets its exponent raised until it cannot, so
+  `acc_clipped` is 0 on the host and on the chip.  It triggers on v4.8.1
+  (+-32) and only past about 512 terms near 1 on v4.9.2.
+* Redo: an output whose code reaches +-max with a nonzero total is popped
+  again at l2 (the golden rule).  The host accumulates once and pops twice
+  (`_linalg.matmul_wide_acc` + `mx_pop`), the device relaunches at the l2
+  shifts; both give the same bits.
+* Separate custom ops `sf::linear_wide(x, w, b, bits, shift, name)` and
+  `sf::matmul_wide(a, b, bits, shift, name)`, so chain graphs and their
+  schemas do not change.  The compile backend sends them to the target's MX
+  engine, or keeps them on the host when the target has none.
+* Status: `SFLayerStatus` gains `accumulate`, `shift_min`, `shift_max`, `h`,
+  `redone`, `flushed`, `acc_clipped`, `guard_raised` (defaults keep chain
+  statuses as before).  On a device `flushed` is `None` (the chip cannot
+  report it) and `saturated` after the redo is an upper bound.
+* Decision to confirm with Alosh: the bias is added in float after POP on
+  the host, as in the GPT-2 prototype.  On the chip it would be an ADD at
+  each output's exponent.
+* `_linalg.matmul_wide_acc` computes in blocks of columns (bounded memory,
+  the same bits), so a 50,257-column LM head no longer runs out of memory.
+* Tests: `tests/test_torch_wide.py` (43): the `h` table, the 13 golden cases
+  step by step and end to end (`final_value` exact), a device redo, the
+  guard on both chips, convert / autocast / Conv2d / Conv1D, gradients, the
+  compile backend on `atreides` and `atreides-sim`, no-MX fallback, bad input.
+* Not in this change: attention (item 4, scores and values stay float), the
+  sf8 / sf16 split (item 3), device targets at sf8 (item 7), the per-matmul
+  configuration (item 11).
+
 ## A shift per output (0.8.0, spec 1.3.0)
 
 * Item 1 of Alosh's build order.  POP takes one shift per token and column

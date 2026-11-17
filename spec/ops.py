@@ -20,9 +20,10 @@ Versioning (see website/compiler/versioning.mdx):
     example a move to the v4.8.1 wide accumulator).
 """
 
-SPEC_VERSION = "1.3.0"
+SPEC_VERSION = "1.4.0"
 
 CHANGELOG = [
+    ("1.4.0", "2026-11-16", "Ships the wide-mode shift rule (sf._heuristic, margin 2): h = max(0, floor(log2 K) // 2 - 2), eo = l2 - h with l2 = pow2_exp(|a_t| |w_c|), shift = clamp(ea + ew - eo, -32, 31), and a redo at l2 for outputs at +-max. sf.torch runs Linear, Conv2d and Hugging Face Conv1D on dot_wide with it: sft.convert / autocast / linear / matmul / SFLinear take accumulate=\"wide\". Pinned by the 13 matmul cases and the h table of the heuristic section in sf_golden_v4.9.2.json. DSL 0.9.0."),
     ("1.3.0", "2026-11-16", "dot_wide's shift can be one per output: sf.matmul / sf.dot / sf.addmm (accumulate=\"wide\") take an int or an int array broadcastable to the result shape, every element from -32 to 31. This is what POP does: one Rs per token and column. In kernels and the IR the attribute stays one int per block for now. DSL 0.8.0. Checked against the 13 matmul cases of the heuristic section in sf_golden_v4.9.2.json."),
     ("1.2.0", "2026-11-15", "dot_wide models the chip's MX version; Atreides v4.9.2 (32-bit MX accumulators: SF16 Q10.22, products keep columns 6 and up, +80; SF8 Q18.14) is the default, v4.8.1 stays selectable. Golden vectors for dot_wide are v4.9.2's (240 cases). DSL 0.7.0."),
     ("1.1.1", "2026-11-07", "Adds the Atreides v4.8.1 target guide from the ISA doc: a verdict for every op (native, expand, limited, host, none) with its exact instruction sequence and cost, the machine limits, how kernel concepts map onto the chip, register constraints, the cost model and the known gaps. No op changes behaviour."),
@@ -400,6 +401,8 @@ PUBLIC = [
     ("sf.shared / sf.barrier", "trace", "shared_load / shared_store / barrier", ""),
     ("sf.predicate (with block)", "trace", "and (predicate combine), then every op inside carries pred", ""),
     ("sf.torch.convert / backend='superfloat'", "host + device", "dot (Linear/Conv2d as matmul) + add", "per-layer scale chosen on host"),
+    ("sf.torch.convert(accumulate='wide') / backend='superfloat'", "host + device", "dot_wide (Linear/Conv2d/Conv1D), shift per token and column",
+     "power-of-two exponents per token and channel; shifts from sf._heuristic, redo at l2; bias added on the host"),
 ]
 
 GLOBAL_RULES = [

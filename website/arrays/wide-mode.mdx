@@ -96,7 +96,7 @@ with sf.accumulate("wide"), sf.errstate(under="ignore"):
 Not affected: `+`, `-`, `*`, `/`, `sf.fma`, `sf.sqrt`, `sf.sum` (it stays a sequential chain), and the selection functions (`max`, `min`, `maximum`, `minimum`, `clip`, `where`, `cast`).
 
 <Note>
-The PyTorch integration (`sf.torch`) does not have wide mode yet.
+PyTorch models: `sft.convert(model, accumulate="wide")` picks every shift for you. See [PyTorch models](/guides/pytorch#wide-mode).
 </Note>
 
 In a kernel, the whole K of one `sf.dot` goes into one wide total and is rounded once. Splitting K across several `sf.dot` calls and adding the results rounds each part, so it gives different bits from one wide product:

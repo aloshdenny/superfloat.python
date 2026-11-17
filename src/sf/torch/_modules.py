@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from . import _core
+from ._ops import call_linear
 
 
 def _bits_of(dtype) -> int:
@@ -18,16 +19,40 @@ def _bits_of(dtype) -> int:
 
 @dataclass
 class SFConfig:
+    """How an SF layer computes.
+
+    ``accumulate="chain"`` (default): the FMA chain with the float scale
+    policy (``scale``, ``headroom``).  ``accumulate="wide"``: the MX engine
+    with the wide-mode rule; weights get one power-of-two exponent per
+    channel and activations one per token, so ``scale`` and ``headroom`` are
+    not used.  ``shift`` (an int) overrides the rule's shifts; ``calibration``
+    names the rule, and ``"heuristic"`` is the only one."""
+
     bits: int = 16
-    scale: str = "per_tensor"         # weight scale: "per_tensor" | "per_channel"
-    headroom: str = "bound"            # "bound" (no saturation, provable) | "none"
+    scale: str = "per_tensor"         # chain: weight scale "per_tensor" | "per_channel"
+    headroom: str = "bound"            # chain: "bound" (no saturation, provable) | "none"
+    accumulate: str = "chain"          # "chain" (FMA) | "wide" (MX)
+    shift: int | None = None           # wide: one shift for every output, overriding the rule
+    calibration: str = "heuristic"     # wide: the shift rule
 
     def __post_init__(self):
-        _core._check(self.bits, self.scale, self.headroom)
+        _core._check(self.bits, self.scale, self.headroom, self.accumulate)
+        from .. import _heuristic, _linalg
+        if self.calibration not in _heuristic.CALIBRATIONS:
+            raise ValueError(f"calibration must be one of {_heuristic.CALIBRATIONS}, got {self.calibration!r}")
+        if self.shift is not None:
+            if self.accumulate != "wide":
+                raise ValueError("shift= only applies to accumulate=\"wide\"")
+            self.shift = _linalg.check_shift(self.shift, allow_array=False)
 
     @property
     def dtype_name(self) -> str:
         return f"sf{self.bits}"
+
+    def describe(self) -> str:
+        if self.accumulate == "wide":
+            return f"dtype={self.dtype_name}, accumulate=wide" + ("" if self.shift is None else f", shift={self.shift}")
+        return f"dtype={self.dtype_name}, scale={self.scale}, headroom={self.headroom}"
 
 
 class SFLinear(nn.Module):
@@ -40,10 +65,11 @@ class SFLinear(nn.Module):
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True, *,
                  dtype="sf16", scale: str = "per_tensor", headroom: str = "bound",
+                 accumulate: str = "chain", shift: int | None = None,
                  name: str = "", device=None, param_dtype=None) -> None:
         super().__init__()
         self.in_features, self.out_features = in_features, out_features
-        self.sf = SFConfig(_bits_of(dtype), scale, headroom)
+        self.sf = SFConfig(_bits_of(dtype), scale, headroom, accumulate, shift)
         self.sf_name = name or f"linear_{id(self):x}"
         kw = {"device": device, "dtype": param_dtype}
         self.weight = nn.Parameter(torch.empty(out_features, in_features, **kw))
@@ -70,13 +96,11 @@ class SFLinear(nn.Module):
         return new
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.ops.sf.linear(x, self.weight, self.bias, self.sf.bits, self.sf.scale,
-                                   self.sf.headroom, self.sf_name)
+        return call_linear(x, self.weight, self.bias, self.sf, self.sf_name)
 
     def extra_repr(self) -> str:
         return (f"in_features={self.in_features}, out_features={self.out_features}, "
-                f"bias={self.bias is not None}, dtype={self.sf.dtype_name}, scale={self.sf.scale}, "
-                f"headroom={self.sf.headroom}, name={self.sf_name!r}")
+                f"bias={self.bias is not None}, {self.sf.describe()}, name={self.sf_name!r}")
 
 
 def _pair(v):
@@ -112,12 +136,10 @@ class SFHFConv1D(nn.Module):
         self.train(conv.training)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.ops.sf.linear(x, self.weight.t(), self.bias, self.sf.bits, self.sf.scale,
-                                   self.sf.headroom, self.sf_name)
+        return call_linear(x, self.weight.t(), self.bias, self.sf, self.sf_name)
 
     def extra_repr(self) -> str:
-        return (f"nf={self.nf}, nx={self.nx}, dtype={self.sf.dtype_name}, scale={self.sf.scale}, "
-                f"headroom={self.sf.headroom}, name={self.sf_name!r}")
+        return f"nf={self.nf}, nx={self.nx}, {self.sf.describe()}, name={self.sf_name!r}"
 
 
 class SFConv2d(nn.Module):
@@ -143,14 +165,14 @@ class SFConv2d(nn.Module):
         cols = F.unfold(x, (kh, kw), dilation=self.dilation, padding=self.padding, stride=self.stride)
         oh = (h + 2 * self.padding[0] - self.dilation[0] * (kh - 1) - 1) // self.stride[0] + 1
         ow = (w + 2 * self.padding[1] - self.dilation[1] * (kw - 1) - 1) // self.stride[1] + 1
-        y = torch.ops.sf.linear(cols.transpose(1, 2), self.weight.reshape(self.out_channels, -1),
-                                self.bias, self.sf.bits, self.sf.scale, self.sf.headroom, self.sf_name)
+        y = call_linear(cols.transpose(1, 2), self.weight.reshape(self.out_channels, -1),
+                        self.bias, self.sf, self.sf_name)
         return y.transpose(1, 2).reshape(n, self.out_channels, oh, ow)
 
     def extra_repr(self) -> str:
         return (f"{self.in_channels}, {self.out_channels}, kernel_size={self.kernel_size}, "
-                f"stride={self.stride}, padding={self.padding}, dtype={self.sf.dtype_name}, "
-                f"scale={self.sf.scale}, headroom={self.sf.headroom}, name={self.sf_name!r}")
+                f"stride={self.stride}, padding={self.padding}, {self.sf.describe()}, "
+                f"name={self.sf_name!r}")
 
 
 def convertible_conv(c: nn.Conv2d) -> tuple[bool, str]:
@@ -179,15 +201,20 @@ class ConversionReport:
 
 
 def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom: str = "bound",
-            inplace: bool = False) -> nn.Module:
+            inplace: bool = False, *, accumulate: str = "chain", shift: int | None = None,
+            calibration: str = "heuristic") -> nn.Module:
     """Swap ``nn.Linear``, ``nn.Conv2d`` and Hugging Face's ``Conv1D`` (GPT-2's
     layers) for SF versions with a scale policy.
+
+    ``accumulate="wide"`` runs every converted layer on the MX engine and
+    chooses every shift with the wide-mode rule (no calibration data);
+    ``sft.last_status()`` reports the shifts and redos per layer.
 
     Other modules (activations, normalisation, pooling, softmax, ...) stay as
     they are and run in float on the host; ``sft.conversion_report(model)``
     lists what was converted and what was skipped, and why.
     """
-    cfg = SFConfig(_bits_of(dtype), scale, headroom)
+    cfg = SFConfig(_bits_of(dtype), scale, headroom, accumulate, shift, calibration)
     if not inplace:
         model = copy.deepcopy(model)
     report = ConversionReport()

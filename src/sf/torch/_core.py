@@ -41,11 +41,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .. import _linalg, _vectorized as vec
+from .. import _heuristic, _linalg, _vectorized as vec
 from .._format import FORMATS, SFFormat
 
 WSCALES = ("per_tensor", "per_channel")
 HEADROOMS = ("bound", "none")
+ACCUMULATES = ("chain", "wide")
 _MAX_ITER = 32
 
 
@@ -63,6 +64,25 @@ class HostRunner:
     def add(self, fmt: SFFormat, ka: np.ndarray, kb: np.ndarray):
         codes, ev = vec.add(fmt, ka, kb)
         return codes, {"saturated": ev["overflow"], "exact": True}
+
+    def matmul_wide(self, fmt, ka, kb, shift, shift_redo, mx):
+        """POP at ``shift``; where an output's code reached +-max with a
+        nonzero total, POP again at ``shift_redo`` (None: no redo).  The
+        accumulation runs once, which gives the same bits as the chip
+        relaunching the tile."""
+        acc, clipped, F = _linalg.matmul_wide_acc(fmt, ka, kb, mx)
+        q, over, under = _linalg.mx_pop(fmt, acc, shift, F)
+        redo = np.zeros(q.shape, bool)
+        used = np.broadcast_to(shift, q.shape)
+        if shift_redo is not None:
+            redo = (np.abs(q) >= fmt.max_code) & (acc != 0)       # the golden rule: |q| reaches max
+            if redo.any():
+                q2, over2, under2 = _linalg.mx_pop(fmt, acc, shift_redo, F)
+                q = np.where(redo, q2, q)
+                over, under = np.where(redo, over2, over), np.where(redo, under2, under)
+                used = np.where(redo, shift_redo, used)
+        return q, {"used": used, "redone": int(redo.sum()), "saturated": over, "flushed": under,
+                   "acc_clipped": clipped, "exact": True}
 
 
 class DeviceRunner:
@@ -90,6 +110,28 @@ class DeviceRunner:
         with sf.errstate(all="ignore"):
             C = A + B
         return np.asarray(C.codes, dtype=np.int64), self._events(C, under=False)
+
+    def matmul_wide(self, fmt, ka, kb, shift, shift_redo, mx):
+        """One launch at ``shift``, then one relaunch at ``shift_redo`` if any
+        output came back at +-max (the codes show it).  The chip cannot
+        report flushed totals; accumulator clips were ruled out on the host."""
+        import sf
+        A, B = self._arrays(fmt, ka, kb)
+        with sf.errstate(all="ignore"):
+            q = np.asarray(sf.matmul(A, B, accumulate="wide", shift=shift).codes, dtype=np.int64)
+        top = np.abs(q) >= fmt.max_code
+        used = np.broadcast_to(shift, q.shape)
+        redo = np.zeros(q.shape, bool)
+        if shift_redo is not None and top.any():
+            with sf.errstate(all="ignore"):
+                q2 = np.asarray(sf.matmul(A, B, accumulate="wide", shift=shift_redo).codes, dtype=np.int64)
+            redo = top
+            q = np.where(redo, q2, q)
+            used = np.where(redo, shift_redo, used)
+            top = np.abs(q) >= fmt.max_code
+        # +-max after the redo is an upper bound: it may be a true value
+        return q, {"used": used, "redone": int(redo.sum()), "saturated": int(top.sum()), "flushed": None,
+                   "acc_clipped": 0, "exact": not top.any()}
 
     @staticmethod
     def _events(C, under: bool) -> dict:
@@ -119,6 +161,14 @@ class CoreResult:
     headroom_bits: float
     outputs: int
     act_scale: float = 1.0          # the activation scale ``a`` that was chosen
+    accumulate: str = "chain"
+    shift_min: int | None = None    # wide: range of the shifts used
+    shift_max: int | None = None
+    h: int | None = None            # wide: the table value for this K
+    redone: int = 0                 # wide: outputs popped again at the l2 exponent
+    flushed: int | None = None      # wide: nonzero totals that rounded to 0 (None: unknown)
+    acc_clipped: int | None = None  # wide: totals clipped at the accumulator's limit
+    guard_raised: int = 0           # wide: tokens whose exponent the accumulator guard raised
 
 
 def _count(mask) -> int | None:
@@ -134,7 +184,10 @@ def _cast(fmt: SFFormat, values: np.ndarray):
     return codes, ev
 
 
-def _check(fmt_bits: int, wscale: str | None = None, headroom: str | None = None) -> SFFormat:
+def _check(fmt_bits: int, wscale: str | None = None, headroom: str | None = None,
+           accumulate: str | None = None) -> SFFormat:
+    if accumulate is not None and accumulate not in ACCUMULATES:
+        raise ValueError(f"accumulate must be one of {ACCUMULATES}, got {accumulate!r}")
     if fmt_bits not in FORMATS:
         raise ValueError(f"unsupported SF width {fmt_bits}")
     if wscale is not None and wscale not in WSCALES:
@@ -359,3 +412,62 @@ def fake_quantize(x: np.ndarray, bits: int, mode: str, scale: float):
         raise ValueError(f"unknown quantize mode {mode!r}")
     codes, ev = _cast(fmt, x / s)
     return codes / fmt.scale * s, codes, s, ev
+
+
+# --- wide mode (the MX engine) ---------------------------------------------------------------
+
+def _wide(fmt, x_rows, qa, ea, qb, eb, in_under, w_under, shift, runner, mx):
+    """The common wide step for (..., M, K) codes @ (..., K, N) codes."""
+    qa, ea, raised = _heuristic.acc_guard(fmt, x_rows, qa, ea, qb, mx)
+    if shift is None:
+        sh, sh_redo, h = _heuristic.plan(fmt, qa, ea, qb, eb)
+    else:                                          # an explicit shift overrides the rule
+        sh, sh_redo, h = _linalg.check_shift(shift, allow_array=False), None, None
+    q, ev = runner.matmul_wide(fmt, qa, qb, sh, sh_redo, mx)
+    used = np.broadcast_to(ev["used"], q.shape)
+    fe = ea[..., :, None] + eb[..., None, :] - used          # each output's exponent
+    with np.errstate(over="ignore"):
+        y = np.ldexp(q.astype(np.float64), (fe - (fmt.bits - 1)).astype(np.int64))
+    return y, dict(
+        saturated=_count(ev["saturated"]), exact=ev["exact"], underflow=_count(ev["flushed"]),
+        input_underflow=in_under, weight_underflow=w_under, bias_saturated=0, headroom_bits=0.0,
+        outputs=int(q.size), act_scale=float(np.ldexp(1.0, int(ea.max()))) if ea.size else 1.0,
+        accumulate="wide", shift_min=int(used.min()) if used.size else None,
+        shift_max=int(used.max()) if used.size else None, h=h, redone=ev["redone"],
+        flushed=_count(ev["flushed"]), acc_clipped=_count(ev["acc_clipped"]), guard_raised=raised)
+
+
+def wide_linear(x: np.ndarray, w: np.ndarray, b: np.ndarray | None, bits: int,
+                shift: int | None = None, runner=None, mx=None) -> CoreResult:
+    """``y = x W^T + b`` on the MX engine with the wide-mode rule.
+
+    x: (R, K), w: (N, K), b: (N,) or None, all float64.  Activations get one
+    power-of-two exponent per token, weights one per output channel (the
+    chip only shifts), every shift comes from ``_heuristic``, and outputs
+    that saturate are redone at the l2 exponent.  ``shift`` (an int)
+    overrides the rule.  The bias is added in float after POP, on the host.
+    """
+    fmt = _check(bits)
+    runner = runner or HostRunner()
+    x = sanitize(x, fmt, "linear input")
+    w = sanitize(w, fmt, "linear weight")
+    qa, ea, in_under = _heuristic.quantize_pow2(fmt, x, -1)
+    qw, ew, w_under = _heuristic.quantize_pow2(fmt, w, -1)
+    y, info = _wide(fmt, x, qa, ea, np.ascontiguousarray(qw.T), ew, in_under, w_under, shift, runner, mx)
+    if b is not None:
+        y = y + sanitize(b, fmt, "linear bias")[None, :]
+    return CoreResult(y=y, **info)
+
+
+def wide_matmul(a_val: np.ndarray, b_val: np.ndarray, bits: int, shift: int | None = None,
+                runner=None, mx=None) -> CoreResult:
+    """(..., M, K) @ (..., K, N) of two activations on the MX engine: one
+    exponent per row of ``a`` and per column of ``b``, shifts from the rule."""
+    fmt = _check(bits)
+    runner = runner or HostRunner()
+    a_val = sanitize(a_val, fmt, "matmul left operand")
+    b_val = sanitize(b_val, fmt, "matmul right operand")
+    qa, ea, ua = _heuristic.quantize_pow2(fmt, a_val, -1)
+    qb, eb, ub = _heuristic.quantize_pow2(fmt, b_val, -2)
+    y, info = _wide(fmt, a_val, qa, ea, qb, eb, ua + ub, 0, shift, runner, mx)
+    return CoreResult(y=y, **info)

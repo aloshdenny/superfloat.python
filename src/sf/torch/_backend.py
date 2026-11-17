@@ -25,7 +25,7 @@ import torch
 from torch._dynamo import register_backend
 
 from . import _core
-from ._ops import SF_OPS, linear_impl, matmul_impl
+from ._ops import SF_OP_ARGS, SF_OPS, linear_impl, linear_wide_impl, matmul_impl, matmul_wide_impl
 
 # float ops that could have been SF if the model had been converted
 _UNCONVERTED = {
@@ -115,6 +115,16 @@ def _device_matmul(device):
     return run
 
 
+def _device_wide(device, impl, op):
+    runner = _core.DeviceRunner(device)
+
+    def run(*args):
+        _require_no_grad(*[t for t in args[:3] if isinstance(t, torch.Tensor)])
+        return impl(*args, runner)
+    run.__name__ = f"sf_{op}_on_{device}"
+    return run
+
+
 def _arg(node, index, key):
     if len(node.args) > index:
         return node.args[index]
@@ -128,16 +138,21 @@ def superfloat(gm: torch.fx.GraphModule, example_inputs, **kwargs):
     device_name = _config.get("default_device")
     dev = _device.get_device(device_name)
     report = GraphReport()
-    impl = {"linear": _device_linear(dev.name), "matmul": _device_matmul(dev.name)}
+    impl = {"linear": _device_linear(dev.name), "matmul": _device_matmul(dev.name),
+            "linear_wide": _device_wide(dev.name, linear_wide_impl, "linear_wide"),
+            "matmul_wide": _device_wide(dev.name, matmul_wide_impl, "matmul_wide")}
     for node in gm.graph.nodes:
         if node.op not in ("call_function", "call_method", "call_module"):
             continue
         name = _target_name(node)
         if node.op == "call_function" and str(node.target) in SF_OPS:
             op = SF_OPS[str(node.target)]
-            bits = _arg(node, 3 if op == "linear" else 2, "bits")
-            layer = _arg(node, 6 if op == "linear" else 4, "name")
-            if bits in dev.supported_bits:
+            ib, iname = SF_OP_ARGS[op]
+            bits = _arg(node, ib, "bits")
+            layer = _arg(node, iname, "name")
+            if op.endswith("_wide") and not dev.mx:
+                report.host_emulated.append((node.name, op, layer, f"{dev.name} has no MX engine"))
+            elif bits in dev.supported_bits:
                 node.target = impl[op]
                 report.on_device.append((node.name, op, layer, dev.name))
             else:
