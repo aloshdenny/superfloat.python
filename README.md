@@ -145,3 +145,7 @@ Not done:
 | [NOTES.md](NOTES.md) | Design decisions, open hardware questions, review history. |
 | `examples/` | A runnable tour per stage. |
 | `website/` | The developer docs site at [docs.superfloat.si](https://docs.superfloat.si) (Mintlify, hand-written). |
+
+## License
+
+sf is free to use for developing and running software on Atreides hardware, under the [Superfloat SDK License Agreement](LICENSE). Copyright (c) 2026 Superfloat Private Limited ([superfloat.si](https://superfloat.si)).
