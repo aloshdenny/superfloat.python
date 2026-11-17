@@ -108,19 +108,24 @@ def acc_guard(fmt: SFFormat, x: np.ndarray, qa: np.ndarray, ea: np.ndarray, qb: 
     raise RuntimeError("sf: accumulator guard did not converge")    # pragma: no cover
 
 
-def plan(fmt: SFFormat, qa, ea, qb, eb):
+def plan(fmt: SFFormat, qa, ea, qb, eb, eo=None):
     """The rule for (..., M, K) @ (..., K, N) with token exponents ``ea``
     (..., M) and column exponents ``eb`` (..., N).
 
+    ``eo``: output exponents to use instead of ``l2 - h`` (broadcastable to
+    the output), for products whose bound is known: attention's P @ V,
+    whose rows of P sum to 1, takes ``eo`` from max|V| per channel.
+
     Returns (shift, shift_l2, h): POP's shift per output, the shift at the
-    safe l2 exponent for redos, and the table value used."""
+    safe l2 exponent for redos, and the table value used (None with ``eo``)."""
     P = fmt.bits - 1
     K = qa.shape[-1]
-    h = h_for(K)
+    h = h_for(K) if eo is None else None
     na = _norms(fmt, qa, -1) * np.ldexp(1.0, (ea - P).astype(np.int64))       # dequantized norms
     nb = _norms(fmt, qb, -2) * np.ldexp(1.0, (eb - P).astype(np.int64))
     l2 = pow2_exp(na[..., :, None] * nb[..., None, :])
     base = ea[..., :, None] + eb[..., None, :]
-    shift = np.clip(base - (l2 - h), _linalg.SHIFT_MIN, _linalg.SHIFT_MAX)
+    target = (l2 - h) if eo is None else np.broadcast_to(eo, base.shape)
+    shift = np.clip(base - target, _linalg.SHIFT_MIN, _linalg.SHIFT_MAX)
     shift_l2 = np.clip(base - l2, _linalg.SHIFT_MIN, _linalg.SHIFT_MAX)
     return shift, shift_l2, h

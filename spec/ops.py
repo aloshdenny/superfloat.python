@@ -20,9 +20,10 @@ Versioning (see website/compiler/versioning.mdx):
     example a move to the v4.8.1 wide accumulator).
 """
 
-SPEC_VERSION = "1.5.0"
+SPEC_VERSION = "1.6.0"
 
 CHANGELOG = [
+    ("1.6.0", "2026-11-16", "Attention on the MX engine: sft.attention (F.scaled_dot_product_attention's arguments, GQA included) runs Q K^T with the wide-mode rule and P V with the output exponent per channel from max|V| (rows of P sum to 1; new op sf::matmul_wide_pv), both at sf16; softmax in float. sft.autocast / sft.convert(accumulate=\"wide\") catch SDPA calls (convert: attention=\"auto\"). DSL 0.11.0."),
     ("1.5.0", "2026-11-16", "Atreides targets hold sf4 to sf16 and run dot_wide at every width (the MX engine: sf4-sf8 on the SF8 block, sf9-sf16 on the SF16 block); every other op stays sf16 and is refused below it before launch. Device.wide_bits / widths_for(op) / can_run(op, fmt). A host op is offloaded only when the default device can run it at that width. sft.convert(dtype narrower than sf16) keeps the LM head at sf16 (keep_sf16=\"auto\"). DSL 0.10.0."),
     ("1.4.0", "2026-11-16", "Ships the wide-mode shift rule (sf._heuristic, margin 2): h = max(0, floor(log2 K) // 2 - 2), eo = l2 - h with l2 = pow2_exp(|a_t| |w_c|), shift = clamp(ea + ew - eo, -32, 31), and a redo at l2 for outputs at +-max. sf.torch runs Linear, Conv2d and Hugging Face Conv1D on dot_wide with it: sft.convert / autocast / linear / matmul / SFLinear take accumulate=\"wide\". Pinned by the 13 matmul cases and the h table of the heuristic section in sf_golden_v4.9.2.json. DSL 0.9.0."),
     ("1.3.0", "2026-11-16", "dot_wide's shift can be one per output: sf.matmul / sf.dot / sf.addmm (accumulate=\"wide\") take an int or an int array broadcastable to the result shape, every element from -32 to 31. This is what POP does: one Rs per token and column. In kernels and the IR the attribute stays one int per block for now. DSL 0.8.0. Checked against the 13 matmul cases of the heuristic section in sf_golden_v4.9.2.json."),

@@ -133,6 +133,31 @@ them. Each one is a single place to change if the team decides differently.
   automatically with an override, reported in `SFLayerStatus`; Alosh is
   computing golden values chip-side).
 
+## Attention on MX (0.11.0, spec 1.6.0)
+
+* Item 4 of Alosh's build order.  `sft.attention(q, k, v, attn_mask,
+  dropout_p, is_causal, scale, enable_gqa, name=)`, in `torch/_attention.py`.
+* Scores: `sf::matmul_wide(q * scale, k^T)`, one exponent per query row and
+  per key, `eo = l2 - h`.  The 1/sqrt(d) scale is applied to Q in float
+  before quantizing (Q's per-row power of two absorbs it).
+* Softmax and masks: float on the host.  `dropout_p` applies to P in float.
+* `P @ V`: new op `sf::matmul_wide_pv` (`_core.wide_matmul(out_rule="max_b")`):
+  `eo` per channel = V's exponent there, `pow2_exp(max|V[:, c]|)`, via
+  `_heuristic.plan(eo=...)`.  Never saturates; the l2 redo stays as a guard.
+  Measured: error within 2^-15 of each channel's max.  The general rule was
+  about 1.5x more precise on outlier-heavy V in a quick check: to discuss.
+* GQA: key and value heads repeated to the query's (on the host).
+* `sft.autocast(accumulate="wide")` catches `F.scaled_dot_product_attention`
+  (chain: left in float).  `sft.convert(..., attention="auto")` installs a
+  forward pre-hook / post-hook (`always_call`) on the root that enters an
+  `AttentionMode` for each forward; calls named `attention.0`, `attention.1`,
+  ... per forward.  `ConversionReport.attention` says where it runs.
+* Attention is always sf16, also when the layers are sf8.
+* Compile backend: `matmul_wide_pv` goes to the target's MX engine.
+* Not yet: `nn.MultiheadAttention`, flash/varlen kernels, KV caches beyond
+  what SDPA sees.
+* Tests: `tests/test_torch_attention.py` (11).
+
 ## The sf8 / sf16 split (0.10.0, spec 1.5.0)
 
 * Items 7 and 3 of Alosh's build order.

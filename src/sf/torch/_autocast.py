@@ -1,8 +1,9 @@
 """``sft.autocast``: run linear algebra inside a block with SF semantics.
 
 Intercepts ``F.linear``, ``F.conv2d`` (groups=1), ``torch.matmul`` / ``@`` /
-``mm`` / ``bmm`` through a ``TorchFunctionMode`` and routes them to the SF
-custom ops, so an unmodified model's linear algebra runs chip-exact SF while
+``mm`` / ``bmm`` (and, with ``accumulate="wide"``,
+``F.scaled_dot_product_attention``) through a ``TorchFunctionMode`` and
+routes them to the SF custom ops, so an unmodified model's linear algebra runs chip-exact SF while
 everything else stays in float:
 
 >>> with sft.autocast(sf.sf16):
@@ -57,6 +58,9 @@ class _SFMode(TorchFunctionMode):
             return y
         if func is F.conv2d:
             return self._conv2d(func, args, kwargs)
+        if func is F.scaled_dot_product_attention and cfg.accumulate == "wide":
+            from ._attention import from_sdpa_call
+            return from_sdpa_call(args, kwargs, self._name("attention"))
         return func(*args, **kwargs)
 
     def _conv2d(self, func, args, kwargs):

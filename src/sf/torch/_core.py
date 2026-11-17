@@ -416,11 +416,11 @@ def fake_quantize(x: np.ndarray, bits: int, mode: str, scale: float):
 
 # --- wide mode (the MX engine) ---------------------------------------------------------------
 
-def _wide(fmt, x_rows, qa, ea, qb, eb, in_under, w_under, shift, runner, mx):
+def _wide(fmt, x_rows, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo=None):
     """The common wide step for (..., M, K) codes @ (..., K, N) codes."""
     qa, ea, raised = _heuristic.acc_guard(fmt, x_rows, qa, ea, qb, mx)
     if shift is None:
-        sh, sh_redo, h = _heuristic.plan(fmt, qa, ea, qb, eb)
+        sh, sh_redo, h = _heuristic.plan(fmt, qa, ea, qb, eb, eo)
     else:                                          # an explicit shift overrides the rule
         sh, sh_redo, h = _linalg.check_shift(shift, allow_array=False), None, None
     q, ev = runner.matmul_wide(fmt, qa, qb, sh, sh_redo, mx)
@@ -460,14 +460,22 @@ def wide_linear(x: np.ndarray, w: np.ndarray, b: np.ndarray | None, bits: int,
 
 
 def wide_matmul(a_val: np.ndarray, b_val: np.ndarray, bits: int, shift: int | None = None,
-                runner=None, mx=None) -> CoreResult:
+                runner=None, mx=None, out_rule: str = "heuristic") -> CoreResult:
     """(..., M, K) @ (..., K, N) of two activations on the MX engine: one
-    exponent per row of ``a`` and per column of ``b``, shifts from the rule."""
+    exponent per row of ``a`` and per column of ``b``, shifts from the rule.
+
+    ``out_rule="max_b"``: the output exponent of column c is ``b``'s own
+    exponent there, pow2_exp(max |b[:, c]|): exact bound when every row of
+    ``a`` is nonnegative and sums to at most 1 (attention's P @ V).  The
+    redo at l2 stays as a guard for the rounding of P."""
     fmt = _check(bits)
     runner = runner or HostRunner()
     a_val = sanitize(a_val, fmt, "matmul left operand")
     b_val = sanitize(b_val, fmt, "matmul right operand")
     qa, ea, ua = _heuristic.quantize_pow2(fmt, a_val, -1)
     qb, eb, ub = _heuristic.quantize_pow2(fmt, b_val, -2)
-    y, info = _wide(fmt, a_val, qa, ea, qb, eb, ua + ub, 0, shift, runner, mx)
+    if out_rule not in ("heuristic", "max_b"):
+        raise ValueError(f"out_rule must be 'heuristic' or 'max_b', got {out_rule!r}")
+    eo = eb[..., None, :] if out_rule == "max_b" else None
+    y, info = _wide(fmt, a_val, qa, ea, qb, eb, ua + ub, 0, shift, runner, mx, eo)
     return CoreResult(y=y, **info)
