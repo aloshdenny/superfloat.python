@@ -94,3 +94,26 @@ def test_sensitivity_and_fit_end_to_end():
     plan = sft.fit_widths(m, evaluate, sens, max_loss=full / 3, widths=(6, 16), keep_sf16=False)
     assert plan.measured_loss is not None and plan.measured_loss <= full / 3
     assert 6 in plan.widths.values() or plan.cost == plan.cost_widest
+
+
+def test_fit_with_a_fresh_model_each_round():
+    m = _mlp()
+    torch.manual_seed(1)
+    x = torch.randn(64, 16)
+    y = m(x).detach()
+    state = {k: v.clone() for k, v in m.state_dict().items()}
+    made = []
+
+    def fresh():
+        n = _mlp()
+        n.load_state_dict(state)
+        made.append(n)
+        return n
+
+    def evaluate(model):
+        with torch.no_grad():
+            return float(((model(x) - y) ** 2).mean() / (y ** 2).mean())
+
+    sens = sft.layer_sensitivity(m, evaluate, "sf6")
+    plan = sft.fit_widths(m, evaluate, sens, max_loss=1.0, widths=(6, 16), keep_sf16=False, fresh=fresh)
+    assert made and set(plan.widths.values()) == {6} and isinstance(m[0], nn.Linear)

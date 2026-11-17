@@ -273,22 +273,31 @@ def choose_widths(model: nn.Module, sensitivity: dict, max_loss: float, widths=(
 @torch.no_grad()
 def fit_widths(model: nn.Module, evaluate, sensitivity: dict, max_loss: float, widths=(8, 16), *, dtype=None,
                metric: str = "energy_130nm", phase: str = "prefill", table: CostTable | None = None, keep_sf16="auto",
-               accumulate: str = "wide", rounds: int = 4, progress=None, **convert_kw) -> WidthPlan:
+               accumulate: str = "wide", rounds: int = 4, progress=None, fresh=None, **convert_kw) -> WidthPlan:
     """``choose_widths``, then check: convert a copy with the plan, measure ``evaluate``, and if the measured loss
     misses the budget scale the budget by predicted / measured and choose again (``rounds`` times at most).
-    Returns the cheapest plan whose measured loss was within ``max_loss`` (or the closest one, if none was)."""
+    Returns the cheapest plan whose measured loss was within ``max_loss`` (or the closest one, if none was).
+
+    ``fresh``: a function returning a new copy of the model, converted in place each round instead of a deep
+    copy of ``model`` (one model in memory: ``model`` may then be a structure-only copy, e.g. on the meta
+    device).  The sensitivity's ``"_baseline"`` is used, or ``evaluate(fresh())``."""
     from ._modules import convert
     base = sensitivity.get("_baseline")
     if base is None:
-        base = float(evaluate(model))
+        base = float(evaluate(model if fresh is None else fresh()))
     lo = f"sf{min(widths)}" if dtype is None else dtype
     budget, best, closest = max_loss, None, None
     for _ in range(rounds):
         plan = choose_widths(model, sensitivity, budget, widths, metric=metric, phase=phase, table=table,
                              keep_sf16=keep_sf16)
-        m = convert(model, lo, accumulate=accumulate, **plan.convert_kwargs(), **convert_kw)
+        if fresh is None:
+            m = convert(model, lo, accumulate=accumulate, **plan.convert_kwargs(), **convert_kw)
+        else:
+            m = convert(fresh(), lo, accumulate=accumulate, inplace=True, **plan.convert_kwargs(), **convert_kw)
         plan.measured_loss = float(evaluate(m)) - base
         del m
+        import gc
+        gc.collect()
         if progress:
             progress(plan)
         if plan.measured_loss <= max_loss and (best is None or plan.cost < best.cost):
