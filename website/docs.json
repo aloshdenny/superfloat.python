@@ -75,6 +75,7 @@
               "compiler/overview",
               "compiler/ops",
               "compiler/python-api",
+              "compiler/target-v4-8-1",
               "compiler/versioning"
             ]
           }

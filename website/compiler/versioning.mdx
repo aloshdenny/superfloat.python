@@ -3,7 +3,7 @@ title: "Versioning"
 description: "How the spec version changes, and what changed in each version."
 ---
 
-Current version: **1.1.0** (MAJOR.MINOR.PATCH).
+Current version: **1.1.1** (MAJOR.MINOR.PATCH).
 
 | Change | Bump | Example |
 |---|---|---|
@@ -17,6 +17,7 @@ Each op carries the version in which its contract last changed. If your lowering
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1.1 | 2026-11-07 | Adds the Atreides v4.8.1 target guide from the ISA doc: a verdict for every op (native, expand, limited, host, none) with its exact instruction sequence and cost, the machine limits, how kernel concepts map onto the chip, register constraints, the cost model and the known gaps. No op changes behaviour. |
 | 1.1.0 | 2026-11-07 | Adds dot_wide: matmul on the v4.8.1 MX engine (wide accumulator, one rounding at POP with a power-of-two shift), from sf.dot(..., accumulate="wide") and a @ b under sf.accumulate("wide"). DSL 0.5.0. Golden vectors for dot_wide come from the chip repo's mxref.py. The dot entry now says v4.8.1 runs the chain as FMA instructions (MX replaced v1's systolic array). |
 | 1.0.3 | 2026-11-06 | Corrects 1.0.2 against the v4.8.1 ISA doc (compiler_v4.8.1.md): the chip has no sign-magnitude compare, max or min instructions. CMP is a signed 16-bit integer compare; compare, max, min, neg and abs are now given as the ISA section 5 sequences built from ACT, ADD and CMP. widen and narrow have no instruction. Op semantics unchanged. |
 | 1.0.2 | 2026-11-06 | Chip team confirmed registers hold sign-magnitude and compare / max / min work on it, so there is no conversion on load and store. Lowering notes for neg, abs, cmp, cmp_lit, maximum, minimum, max, min, widen, narrow and the width rule updated to sign-magnitude. Op semantics unchanged. |
