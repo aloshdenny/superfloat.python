@@ -140,6 +140,7 @@ def page_overview() -> str:
          "| File | Use |", "|---|---|",
          "| `spec/ops.json` | Every IR op as JSON: operands, attributes, result, shape rule, semantics, events, memory, faults, predication, v1 hardware unit, suggested MLIR op and traits, legal rewrites. Generate your op definitions or tests from it. |",
          "| `spec/golden/<op>.json` | Conformance vectors per op at sf16, sf8 and sf4 (edge codes and random), from the exact-fraction oracle. Run your lowered op on `in`, compare `out` and the events bit for bit. |",
+         "| `spec/golden/wide/dot_wide_shift.json`, `spec/golden/wide/sft_wide.json` | Wide mode beyond a single shift: shift arrays at every width, and the full `sft` wide path (written by `tools/gen_golden_wide.py`). |",
          "| [IR ops](/compiler/ops) | The same content as readable pages. |",
          "| [Python API map](/compiler/python-api) | Which IR op each public Python function becomes, and where it runs. |",
          "| [Atreides v4.8.1 target](/compiler/target-v4-8-1) | How every op lowers to the v4.8.1 chip: verdicts, instruction sequences, machine limits, kernel mapping, register rules, cost. |",

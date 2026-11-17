@@ -30,6 +30,8 @@ Floating point has NaN and infinity to carry bad results forward. Superfloat has
     ```
 
     Where it happens: `*` and the product inside `fma`, and casts of tiny values. The default policy only warns, because underflow is common and usually harmless.
+
+    **In wide mode it means something else:** a nonzero total that rounded to 0 at `POP`. The host counts it exactly; the chip cannot report it, so on a device it is unknown.
   </Tab>
 
   <Tab title="Divide">

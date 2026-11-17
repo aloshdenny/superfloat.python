@@ -1,6 +1,11 @@
 {
- "spec_version": "1.6.0",
+ "spec_version": "1.6.1",
  "changelog": [
+  [
+   "1.6.1",
+   "2026-11-16",
+   "Golden vectors: spec/golden/wide/dot_wide_shift.json (dot_wide with shift arrays, sf4 to sf16, v4.9.2 and v4.8.1, 144 cases) and spec/golden/wide/sft_wide.json (sft wide layers with every SFLayerStatus field, attention, one small model end to end), from sf's host model; to confirm on the RTL. Docs: wide-mode status, events, rounding, policy, kernels, hardware; v1 wording removed."
+  ],
   [
    "1.6.0",
    "2026-11-16",
@@ -1660,6 +1665,7 @@
     "the chips differ only in the units: on the 240 golden inputs, v4.8.1 and v4.9.2 differ in 8 cases (sums near +-32 and the SF16 product cut). A lowering targets one chip and must use that chip's units",
     "on the SF16 block a product below the engine's resolution (e.g. 2^-15 x 2^-15) adds 0, so a total of exactly 0 raises nothing",
     "golden vectors: spec/golden/dot_wide.json, v4.9.2, computed by the chip repo's mxref.Engine (the mx section of sf golden v4.9.2.json); the v4.8.1 outputs of the same inputs are in tests/data/mx_golden_v4.8.1.json",
+    "more golden vectors (sf's host model, which matches the cases above; to confirm on the RTL): spec/golden/wide/dot_wide_shift.json (shift as an array, sf4 to sf16, both chips, 144 cases) and spec/golden/wide/sft_wide.json (the sft wide path: layers with every status field, attention, one small model); written by tools/gen_golden_wide.py",
     "the kernel trace picks dot or dot_wide from sf.accumulate at trace time; the kernel cache keys on it"
    ],
    "memory": "none",

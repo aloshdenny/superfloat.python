@@ -21,7 +21,7 @@ y.status                     # SFStatus(saturated=0, underflow=unknown, div0=0, 
 out = y.numpy()              # floats on the host
 ```
 
-`saturated=0, exact=True` is a proof from the host's range bound. `underflow=unknown` is honest too: some inputs are small enough that a product could truncate to 0, and the v1 chip cannot report it. A target with flags, or `sf.config(status="replay")`, gives the exact count. [Reading status →](/arrays/status)
+`saturated=0, exact=True` is a proof from the host's range bound. `underflow=unknown` is honest too: some inputs are small enough that a product could truncate to 0, and the chip cannot report it. A target with flags, or `sf.config(status="replay")`, gives the exact count. [Reading status →](/arrays/status)
 
 `sf.asarray(..., device=...)` quantizes on the host and uploads; `.to("host")` downloads; `.numpy()` downloads and converts. sf4 to sf16 arrays can live on Atreides, but only wide matmuls (`accumulate="wide"`) run below sf16; every other op needs sf16.
 
