@@ -1,6 +1,11 @@
 {
- "spec_version": "1.6.1",
+ "spec_version": "1.7.0",
  "changelog": [
+  [
+   "1.7.0",
+   "2026-11-17",
+   "Wide mode adds a linear layer's bias on the chip after POP: the bias is quantized to each output's exponent (round half to even, clamped; SFLayerStatus.bias_saturated counts clamps) and added with the saturating sfN add (ACT f=00); an output whose POP or add reaches +-max is redone at the exponent of |x||w| + |b|. Atreides targets run every op except divide and sqrt at sf4 to sf16 (below sf16: the sf16 op plus a mask of the low bits, measured bit-exact on the chip). sft_wide.json regenerated; its status now includes bias_saturated."
+  ],
   [
    "1.6.1",
    "2026-11-16",

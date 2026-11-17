@@ -291,9 +291,9 @@ them. Each one is a single place to change if the team decides differently.
   `redone`, `flushed`, `acc_clipped`, `guard_raised` (defaults keep chain
   statuses as before).  On a device `flushed` is `None` (the chip cannot
   report it) and `saturated` after the redo is an upper bound.
-* Decision to confirm with Alosh: the bias is added in float after POP on
-  the host, as in the GPT-2 prototype.  On the chip it would be an ADD at
-  each output's exponent.
+* The bias was added in float after POP on the host, as in the GPT-2
+  prototype.  Decided (Alosh, 2026-11-17): from 0.12.0 it is added on the
+  chip at each output's exponent (see "Bias on the chip" below).
 * `_linalg.matmul_wide_acc` computes in blocks of columns (bounded memory,
   the same bits), so a 50,257-column LM head no longer runs out of memory.
 * Tests: `tests/test_torch_wide.py` (43): the `h` table, the 13 golden cases
@@ -530,3 +530,48 @@ op with the vectorised reference against an independent int64 oracle
 and then sweeps every code against every boundary-class code (both operand
 orders, about 7M pairs per op) through the public scalar operators and the
 Fraction oracle, counting the event transitions it crosses.
+
+## Bias on the chip, and every op at sf4 to sf16 (0.12.0, spec 1.7.0)
+
+Decided by Alosh, 2026-11-17.
+
+* **The bias of a wide linear is added on the chip, after POP.** Before
+  0.12.0 it was added in float on the host, so a layer was not SF arithmetic
+  end to end. Now `_core._wide(..., bias=b)`: for each output, the bias is
+  quantized to that output's exponent `fe` (round half to even of
+  `b * 2^(P - fe)`, clamped to +-max) and added to the POP code with the
+  saturating sfN add. On the chip that is one `ACT f=00` per output (`ACT`
+  takes a bias register; ReLU comes free with f=01). Below sf16 the add is
+  masked like every other op (below).
+* **Redo.** An output is redone when its POP code reached +-max, when
+  `q + b` did, or when its bias code was clamped. The first two show in the
+  codes; the clamp is known on the host, which aligned the codes. The POP
+  code must be checked as well as the sum: a POP that clipped can be pulled
+  back below max by a bias of the other sign, which would hide the clip. A
+  clamped bias likewise. Both cases are tests in `tests/test_bias_on_chip.py`.
+* **Redo exponent.** `_heuristic.plan(..., bias_abs=|b|)` takes the redo
+  exponent from `pow2_exp(|x||w| + |b|)`, so a redone output can clip in
+  neither the POP nor the add. The first POP's exponent is unchanged
+  (`l2 - h` from the dot product alone).
+* **Status.** `bias_saturated` counts bias codes clamped at the final
+  exponent; `saturated` includes them. `sft_wide.json` pins
+  `bias_saturated` from 1.7.0.
+* **Cost on the chip.** One extra word per output to read (the aligned bias
+  code, M x N per launch, like the shift operands) and one ACT per output;
+  M x N adds against M x N x K MACs.
+* **Atreides targets run every op except divide and sqrt at sf4 to sf16.**
+  The cores compute in sf16. Below sf16 the compiler keeps codes
+  left-aligned and masks the low `16 - N` bits after every op: `DIV` (a
+  logical right shift, up to 6 bits per instruction) then `ADD` to double
+  back. That gives sfN's bits exactly, because sf `mul` truncates toward
+  zero and sums of left-aligned codes are exact until they saturate. The
+  compiler reference (`compiler_v4.9.2.md` s5) measured it on the chip with
+  the sf8 and sf4 golden vectors, 0 wrong. There is no AND instruction, so
+  the mask costs `ceil((16 - N) / 6) + (16 - N)` instructions: about 10x the
+  time of the sf16 op at sf8, 16x at sf4. A one-instruction mask would be
+  worth adding to the 2 nm ISA. User kernels (`@sf.jit`) stay sf16
+  (`KernelDevice.kernel_bits`).
+* **RTL check.** `superfloat.gpu/test/test_wide_prs_chip.py` part F runs
+  wide linears with biases at sf4 to sf16 on the RTL: the kernel stores q,
+  loads the aligned bias code, runs ACT (masked below sf16) and stores
+  q + b. Parts C and E carry biases the same way.

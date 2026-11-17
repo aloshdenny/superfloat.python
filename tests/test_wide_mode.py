@@ -522,6 +522,8 @@ def test_c_backend_takes_the_targets_units():
     with sf.errstate(all="ignore"):
         C = dev.alloc((2, 2))
         mm_wide[(1, 1)](dA, dB, C, 2, 2, K=8, BM=2, BN=2, SHIFT=0)
-    ir = next(ir for ir in mm_wide.cache.values() if "dot_wide" in ir.dump())
+    # this test's own trace: other tests trace mm_wide at other sizes and widths, in any order under xdist
+    ir = next(ir for ir in mm_wide.cache.values()
+              if "dot_wide" in ir.dump() and ir.constexpr.get("K") == 8 and ir.constexpr.get("BM") == 2)
     assert "0, 32, 22, 6, 80, &le" in _cgen.emit_c(ir)
     assert "0, 25, 19, 9, 1024, &le" in _cgen.emit_c(ir, "v4.8.1")

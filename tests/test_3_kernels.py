@@ -46,7 +46,8 @@ def rand(shape, lo, hi, seed):
 
 def test_targets_and_copies(dev):
     assert "atreides-sim" in sf.devices() and "atreides-hw" in sf.devices()
-    assert isinstance(dev, sf.SimulatorAtreides) and dev.sticky_flags and dev.supported_bits == (16,)
+    assert isinstance(dev, sf.SimulatorAtreides) and dev.sticky_flags
+    assert dev.supported_bits == tuple(range(4, 17)) and dev.kernel_bits == (16,)   # arrays: every width; kernels: sf16
     codes = np.random.default_rng(0).integers(-32767, 32768, (7, 9))
     host = sf.from_codes(codes, sf.sf16)
     d = dev.upload(host)

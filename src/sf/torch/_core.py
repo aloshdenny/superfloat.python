@@ -65,23 +65,32 @@ class HostRunner:
         codes, ev = vec.add(fmt, ka, kb)
         return codes, {"saturated": ev["overflow"], "exact": True}
 
-    def matmul_wide(self, fmt, ka, kb, shift, shift_redo, mx):
+    def matmul_wide(self, fmt, ka, kb, shift, shift_redo, mx, bias_at=None):
         """POP at ``shift``; where an output's code reached +-max with a
         nonzero total, POP again at ``shift_redo`` (None: no redo).  The
         accumulation runs once, which gives the same bits as the chip
-        relaunching the tile."""
+        relaunching the tile.
+
+        ``bias_at(used)``: (codes, clamped) of the bias aligned to each
+        output's exponent for the shifts ``used``; the codes are added to the POP codes with the
+        saturating sfN add (ACT on the chip), and an output whose POP or add
+        reached +-max is redone too."""
         acc, clipped, F = _linalg.matmul_wide_acc(fmt, ka, kb, mx)
         q, over, under = _linalg.mx_pop(fmt, acc, shift, F)
         redo = np.zeros(q.shape, bool)
         used = np.broadcast_to(shift, q.shape)
+        y, add_sat, nz = _post(self, fmt, q, acc != 0, used, bias_at)
         if shift_redo is not None:
-            redo = (np.abs(q) >= fmt.max_code) & (acc != 0)       # the golden rule: |q| reaches max
+            # |q| or |q + b| reaches max, or b itself was clamped at this exponent
+            redo = ((np.abs(q) >= fmt.max_code) | (np.abs(y) >= fmt.max_code) | add_sat) & nz
             if redo.any():
                 q2, over2, under2 = _linalg.mx_pop(fmt, acc, shift_redo, F)
-                q = np.where(redo, q2, q)
+                used2 = np.broadcast_to(shift_redo, q.shape)
+                y2, add_sat2, _ = _post(self, fmt, q2, acc != 0, used2, bias_at)
+                y, add_sat = np.where(redo, y2, y), np.where(redo, add_sat2, add_sat)
                 over, under = np.where(redo, over2, over), np.where(redo, under2, under)
                 used = np.where(redo, shift_redo, used)
-        return q, {"used": used, "redone": int(redo.sum()), "saturated": over, "flushed": under,
+        return y, {"used": used, "redone": int(redo.sum()), "saturated": over | add_sat, "flushed": under,
                    "acc_clipped": clipped, "exact": True}
 
 
@@ -111,26 +120,29 @@ class DeviceRunner:
             C = A + B
         return np.asarray(C.codes, dtype=np.int64), self._events(C, under=False)
 
-    def matmul_wide(self, fmt, ka, kb, shift, shift_redo, mx):
+    def matmul_wide(self, fmt, ka, kb, shift, shift_redo, mx, bias_at=None):
         """One launch at ``shift``, then one relaunch at ``shift_redo`` if any
         output came back at +-max (the codes show it).  The chip cannot
-        report flushed totals; accumulator clips were ruled out on the host."""
+        report flushed totals; accumulator clips were ruled out on the host.
+        ``bias_at``: as on the host; the add runs on the target."""
         import sf
         A, B = self._arrays(fmt, ka, kb)
         with sf.errstate(all="ignore"):
             q = np.asarray(sf.matmul(A, B, accumulate="wide", shift=shift).codes, dtype=np.int64)
-        top = np.abs(q) >= fmt.max_code
         used = np.broadcast_to(shift, q.shape)
+        y, sat, _ = _post(self, fmt, q, None, used, bias_at)
+        top = (np.abs(q) >= fmt.max_code) | (np.abs(y) >= fmt.max_code) | sat
         redo = np.zeros(q.shape, bool)
         if shift_redo is not None and top.any():
             with sf.errstate(all="ignore"):
                 q2 = np.asarray(sf.matmul(A, B, accumulate="wide", shift=shift_redo).codes, dtype=np.int64)
+            y2, sat2, _ = _post(self, fmt, q2, None, np.broadcast_to(shift_redo, q.shape), bias_at)
             redo = top
-            q = np.where(redo, q2, q)
+            q, y = np.where(redo, q2, q), np.where(redo, y2, y)
             used = np.where(redo, shift_redo, used)
-            top = np.abs(q) >= fmt.max_code
+            top = (np.abs(q) >= fmt.max_code) | (np.abs(y) >= fmt.max_code) | np.where(redo, sat2, sat)
         # +-max after the redo is an upper bound: it may be a true value
-        return q, {"used": used, "redone": int(redo.sum()), "saturated": int(top.sum()), "flushed": None,
+        return y, {"used": used, "redone": int(redo.sum()), "saturated": int(top.sum()), "flushed": None,
                    "acc_clipped": 0, "exact": not top.any()}
 
     @staticmethod
@@ -145,6 +157,31 @@ class DeviceRunner:
                     "underflow": np.asarray(masks["underflow"]) if "underflow" in masks else st.underflow,
                     "exact": True}
         return {"saturated": st.saturated, "underflow": st.underflow if under else 0, "exact": st.exact}
+
+
+def _post(runner, fmt, q, nonzero, used, bias_at):
+    """The step after POP: q + bias with the saturating sfN add, on the
+    runner (ACT f=00 on the chip; below sf16 the masked form, compiler
+    doc s5).  Returns (codes, saturated mask, nonzero mask); "saturated"
+    includes a bias code clamped at this exponent, which the sum alone may
+    not show (q of the other sign pulls it back below max)."""
+    if bias_at is None:
+        return q, np.zeros(q.shape, bool), (np.ones(q.shape, bool) if nonzero is None else nonzero)
+    bq, clamped = (np.broadcast_to(a, q.shape) for a in bias_at(used))
+    y, ev = runner.add(fmt, q, bq)
+    sat = ev["saturated"]
+    sat = np.broadcast_to(np.asarray(sat, dtype=bool), q.shape) if np.ndim(sat) else (np.abs(y) >= fmt.max_code)
+    nz = (np.ones(q.shape, bool) if nonzero is None else nonzero) | (bq != 0)
+    return np.asarray(y, dtype=np.int64), sat | clamped, nz
+
+
+def _bias_codes(fmt, b, fe):
+    """The bias at each output's exponent ``fe``: round half to even of
+    b * 2^(P - fe), clamped to +-max.  Returns (codes, clamped mask)."""
+    P, M = fmt.bits - 1, fmt.max_code
+    with np.errstate(over="ignore"):
+        raw = np.rint(np.ldexp(np.asarray(b, dtype=np.float64), (P - fe).astype(np.int64)))
+    return np.clip(raw, -M, M).astype(np.int64), np.abs(raw) > M
 
 
 # --- results -----------------------------------------------------------------------
@@ -419,26 +456,32 @@ def fake_quantize(x: np.ndarray, bits: int, mode: str, scale: float):
 WIDE_BLOCK = 1 << 23            # weight elements quantized at once by wide_linear (memory, not bits)
 
 
-def _wide(fmt, x_rows, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo=None):
-    """The common wide step for (..., M, K) codes @ (..., K, N) codes."""
+def _wide(fmt, x_rows, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo=None, bias=None):
+    """The common wide step for (..., M, K) codes @ (..., K, N) codes.
+
+    ``bias`` (N,) float64: added after POP on the chip, in sfN at each
+    output's exponent (``_bias_codes``), with the saturating add."""
     qa, ea, raised = _heuristic.acc_guard(fmt, x_rows, qa, ea, qb, mx)
-    return _wide_cols(fmt, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo, raised)
+    return _wide_cols(fmt, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo, raised, bias)
 
 
-def _wide_cols(fmt, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo=None, raised=0):
-    """The wide step after the guard: plan, launch, redo, dequantize."""
+def _wide_cols(fmt, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo=None, raised=0, bias=None):
+    """The wide step after the guard: plan, launch, bias, redo, dequantize."""
+    base = ea[..., :, None] + eb[..., None, :]
     if shift is None:
-        sh, sh_redo, h = _heuristic.plan(fmt, qa, ea, qb, eb, eo)
+        sh, sh_redo, h = _heuristic.plan(fmt, qa, ea, qb, eb, eo, None if bias is None else np.abs(bias))
     else:                                          # an explicit shift overrides the rule
         sh, sh_redo, h = _linalg.check_shift(shift, allow_array=False), None, None
-    q, ev = runner.matmul_wide(fmt, qa, qb, sh, sh_redo, mx)
+    bias_at = None if bias is None else (lambda used: _bias_codes(fmt, bias, base - used))
+    q, ev = runner.matmul_wide(fmt, qa, qb, sh, sh_redo, mx, bias_at)
     used = np.broadcast_to(ev["used"], q.shape)
-    fe = ea[..., :, None] + eb[..., None, :] - used          # each output's exponent
+    fe = base - used                                         # each output's exponent
     with np.errstate(over="ignore"):
         y = np.ldexp(q.astype(np.float64), (fe - (fmt.bits - 1)).astype(np.int64))
+    bias_sat = 0 if bias is None else int(np.count_nonzero(_bias_codes(fmt, bias, fe)[1]))
     return y, dict(
         saturated=_count(ev["saturated"]), exact=ev["exact"], underflow=_count(ev["flushed"]),
-        input_underflow=in_under, weight_underflow=w_under, bias_saturated=0, headroom_bits=0.0,
+        input_underflow=in_under, weight_underflow=w_under, bias_saturated=bias_sat, headroom_bits=0.0,
         outputs=int(q.size), act_scale=float(np.ldexp(1.0, int(ea.max()))) if ea.size else 1.0,
         accumulate="wide", shift_min=int(used.min()) if used.size else None,
         shift_max=int(used.max()) if used.size else None, h=h, redone=ev["redone"],
@@ -453,22 +496,26 @@ def wide_linear(x: np.ndarray, w: np.ndarray, b: np.ndarray | None, bits: int,
     power-of-two exponent per token, weights one per output channel (the
     chip only shifts), every shift comes from ``_heuristic``, and outputs
     that saturate are redone at the l2 exponent.  ``shift`` (an int)
-    overrides the rule.  The bias is added in float after POP, on the host.
+    overrides the rule.  The bias is added on the chip after POP (decided
+    by Alosh, 2026-11-17): quantized to each output's exponent and added
+    with the saturating sfN add (one ACT per output), so the whole layer is
+    SF arithmetic; an output whose add reaches +-max is redone at an
+    exponent that bounds |x||w| + |b|.
     """
     fmt = _check(bits)
     runner = runner or HostRunner()
     x = sanitize(x, fmt, "linear input")
     w = sanitize(w, fmt, "linear weight")
     qa, ea, in_under = _heuristic.quantize_pow2(fmt, x, -1)
+    bias = None if b is None else sanitize(b, fmt, "linear bias")
     N, K = w.shape
     rows = max(1, WIDE_BLOCK // max(1, K))
     if N <= rows:
         qw, ew, w_under = _heuristic.quantize_pow2(fmt, w, -1)
-        y, info = _wide(fmt, x, qa, ea, np.ascontiguousarray(qw.T), ew, in_under, w_under, shift, runner, mx)
+        y, info = _wide(fmt, x, qa, ea, np.ascontiguousarray(qw.T), ew, in_under, w_under, shift, runner, mx,
+                        bias=bias)
     else:
-        y, info = _wide_linear_blocks(fmt, x, qa, ea, in_under, w, rows, shift, runner, mx)
-    if b is not None:
-        y = y + sanitize(b, fmt, "linear bias")[None, :]
+        y, info = _wide_linear_blocks(fmt, x, qa, ea, in_under, w, rows, shift, runner, mx, bias)
     return CoreResult(y=y, **info)
 
 
@@ -494,7 +541,7 @@ def wide_matmul(a_val: np.ndarray, b_val: np.ndarray, bits: int, shift: int | No
     return CoreResult(y=y, **info)
 
 
-def _wide_linear_blocks(fmt, x, qa, ea, in_under, w, rows, shift, runner, mx):
+def _wide_linear_blocks(fmt, x, qa, ea, in_under, w, rows, shift, runner, mx, bias=None):
     """``wide_linear`` for a weight too big to quantize at once (an LM head of
     150,000 rows): the same bits, ``rows`` output channels at a time.  Each
     channel's exponent depends only on its own row, and the guard needs only
@@ -511,7 +558,7 @@ def _wide_linear_blocks(fmt, x, qa, ea, in_under, w, rows, shift, runner, mx):
     for s in blocks:
         qw, ew, _ = _heuristic.quantize_pow2(fmt, w[s], -1)
         yb, ib = _wide_cols(fmt, qa, ea, np.ascontiguousarray(qw.T), ew, in_under, w_under, shift, runner, mx,
-                            None, raised)
+                            None, raised, None if bias is None else bias[s])
         ys.append(yb)
         infos.append(ib)
 
@@ -522,6 +569,7 @@ def _wide_linear_blocks(fmt, x, qa, ea, in_under, w, rows, shift, runner, mx):
     info = dict(infos[0])
     info.update(saturated=total("saturated"), underflow=total("underflow"), flushed=total("flushed"),
                 acc_clipped=total("acc_clipped"), redone=sum(i["redone"] for i in infos),
+                bias_saturated=sum(i["bias_saturated"] for i in infos),
                 outputs=sum(i["outputs"] for i in infos), exact=all(i["exact"] for i in infos),
                 shift_min=min(i["shift_min"] for i in infos), shift_max=max(i["shift_max"] for i in infos))
     return np.concatenate(ys, axis=1), info

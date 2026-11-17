@@ -125,7 +125,35 @@ def test_unconverted_model_is_reported_not_silently_changed():
     assert "not converted" in repr(rep)
 
 
+class _Sf16Only(sf.MockAtreides):
+    """A target with no narrow widths (Atreides v1-like), to keep the host-emulation path under
+    test: from 0.12.0 the Atreides targets run every width from sf4 to sf16."""
+    name = "sf16-only"
+    supported_bits = (16,)
+    wide_bits = (16,)
+
+
+sf.register_device(_Sf16Only())
+
+
 def test_unsupported_width_is_host_emulated():
+    torch.manual_seed(0)
+    model = sft.convert(nn.Sequential(nn.Linear(6, 6), nn.Tanh(), nn.Linear(6, 2)), dtype="sf8")
+    x = torch.randn(4, 6)
+    dev = sf.get_device("sf16-only")
+    with sf.config(default_device="sf16-only"):
+        n0 = dev.launches
+        with torch.no_grad():
+            eager = model(x)
+            out = torch.compile(model, backend="superfloat")(x)
+        assert torch.equal(out, eager) and dev.launches == n0
+    rep = sft.compile_report()
+    assert len(rep.host_emulated) == 2 and rep.on_device == []
+    assert all("sf8 is not supported on sf16-only" in why for *_, why in rep.host_emulated)
+    assert all(s.placement == "host" for s in sft.last_status(model).values())
+
+
+def test_narrow_widths_run_on_atreides():
     torch.manual_seed(0)
     model = sft.convert(nn.Sequential(nn.Linear(6, 6), nn.Tanh(), nn.Linear(6, 2)), dtype="sf8")
     x = torch.randn(4, 6)
@@ -133,11 +161,8 @@ def test_unsupported_width_is_host_emulated():
     with torch.no_grad():
         eager = model(x)
         out = torch.compile(model, backend="superfloat")(x)
-    assert torch.equal(out, eager) and launches() == n0               # Atreides v1 is sf16 only
-    rep = sft.compile_report()
-    assert len(rep.host_emulated) == 2 and rep.on_device == []
-    assert all("sf8 is not supported on atreides" in why for *_, why in rep.host_emulated)
-    assert all(s.placement == "host" for s in sft.last_status(model).values())
+    assert torch.equal(out, eager) and launches() > n0
+    assert all(s.placement == DEV for s in sft.last_status(model).values())
 
 
 def test_mixed_widths_split_between_device_and_host():
@@ -145,12 +170,12 @@ def test_mixed_widths_split_between_device_and_host():
     model = nn.Sequential(nn.Linear(6, 6), nn.ReLU(), nn.Linear(6, 2))
     model = sft.convert(model)
     model[2] = sft.SFLinear.from_float(nn.Linear(6, 2), "head8", sft.SFConfig(bits=8))
-    with torch.no_grad():
+    with sf.config(default_device="sf16-only"), torch.no_grad():
         eager = model(torch.ones(2, 6))
         out = torch.compile(model, backend="superfloat")(torch.ones(2, 6))
     assert torch.equal(out, eager)
     st = sft.last_status(model)
-    assert st["0"].placement == DEV and st["head8"].placement == "host"
+    assert st["0"].placement == "sf16-only" and st["head8"].placement == "host"
 
 
 def test_backend_is_inference_only():

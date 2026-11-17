@@ -29,7 +29,7 @@ from spec.ops import SPEC_VERSION  # noqa: E402
 
 STATUS_FIELDS = ("saturated", "exact", "underflow", "input_underflow", "weight_underflow", "outputs",
                  "accumulate", "shift_min", "shift_max", "h", "redone", "flushed", "acc_clipped",
-                 "guard_raised")
+                 "guard_raised", "bias_saturated")
 
 
 def _codes(rng, fmt, shape, kind):

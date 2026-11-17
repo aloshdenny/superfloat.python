@@ -114,7 +114,12 @@ class MockAtreides(Device):
     Atreides target inherits that."""
 
     name = "atreides"
-    supported_bits = (16,)
+    # every op at sf4 to sf16 (decided by Alosh, 2026-11-17).  The cores compute in sf16; below
+    # sf16 the compiler left-aligns the codes and masks the low 16 - N bits after every op (DIV
+    # to shift right, then ADD to double back), which gives sfN's bits exactly: measured on the
+    # chip with the sf8 and sf4 golden vectors (compiler_v4.9.2.md s5).  Cost: about 2 + (16 - N)
+    # extra instructions per op, so roughly 10x the time of the sf16 op at sf8.
+    supported_bits = tuple(range(4, 17))
     accumulation_order = "sequential"
     accumulator_bits = None
     sticky_flags = False

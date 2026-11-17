@@ -66,7 +66,8 @@ import sf.torch as sft  # noqa: E402
 from sf.torch import _core  # noqa: E402
 
 FIELDS = ("saturated", "exact", "underflow", "input_underflow", "weight_underflow", "outputs",
-          "accumulate", "shift_min", "shift_max", "h", "redone", "flushed", "acc_clipped", "guard_raised")
+          "accumulate", "shift_min", "shift_max", "h", "redone", "flushed", "acc_clipped", "guard_raised",
+          "bias_saturated")
 
 
 @pytest.mark.parametrize("i", range(len(SW["linear"])), ids=[c["what"] for c in SW["linear"]])
