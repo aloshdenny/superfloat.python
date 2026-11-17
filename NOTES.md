@@ -3,6 +3,48 @@
 Decisions the spec left open or did not state, and how this code resolves
 them. Each one is a single place to change if the team decides differently.
 
+## Every matmul on sf, or a reason (0.13.0, closing Stage 2)
+
+Alosh's questions (2026-11-17): does `convert` find every layer at the right
+width, read the bias, and cope with MoE and block-scaled models?  A probe of
+14 tiny random Hugging Face models (counting the matmuls left in torch after
+conversion) found three silent gaps, now closed (`sf.torch._scopes`):
+
+* **MoE experts** (one 3-D parameter, grouped matmul): 31 to 76% of the
+  matmul work stayed in float, unreported.  Now `sf_experts_forward` runs a
+  Hugging Face experts module (the `use_experts_implementation` flags:
+  has_gate, has_bias, is_transposed, post-expert norm, its own
+  `_apply_gate`) with one SF linear per expert and projection, installed on
+  the instance (parameters and state dict keys unchanged, deep copy safe).
+  Under `torch.compile` it runs each expert on every token weighted by 0 or
+  the routing weight: a data-dependent shape broke the graph, and a graph
+  break while the attention mode (entered from a forward pre-hook) is active
+  fails in dynamo.  Wide mode computes rows independently, so the bits are
+  those of the sparse loop (tested).  An experts module without the flags
+  falls back to a `TorchFunctionMode` scope that takes its own `F.linear`
+  calls (eager only is guaranteed).
+* **Routers** (a module with a 2-D `weight` that calls `F.linear`): taken
+  by a scope; sf16 when the layers are narrower (like the LM head).
+* **Eager attention** (`torch.matmul`, no SDPA; Gemma 2 by default): a scope
+  on every module whose class name ends in `Attention` takes each matmul
+  between activations; the first after a softmax is P @ V
+  (`matmul_wide_pv`).  Decided by call order and shapes, not values, so
+  `torch.compile` makes the same choices.  Rotary modules under it are
+  suspended (angles stay float).
+* **Quantized weights**: an FP8 `nn.Linear` subclass was converted as float
+  (block scales ignored, output about 100 times too large); an int8 one gave
+  garbage.  `read_weight`: FP8 with `weight_scale_inv` / `weight_scale` (per
+  tensor or per block, block from `block_size` or the shapes) is dequantized
+  to float32 and converted; any other non-float weight, packed integer
+  buffers (`qweight`, int8 / uint8 / int32) and an `nn.Linear` subclass
+  with its own forward are skipped with the reason.
+* **Report**: `widths` per module; any module with an unconverted 2-D float
+  weight is listed in `skipped` (embedding tables excluded).
+* Probe after: GPT-2, Llama (SDPA and eager), Qwen2, Gemma 2, Mixtral,
+  Qwen2-MoE, Qwen3-MoE, DeepSeek-V3, gpt-oss, BERT, T5, ViT: 0 matmuls left
+  in float.  Mamba: its depthwise Conv1d (reported) and selective scan stay
+  float.  `tests/test_stage2_coverage.py`.
+
 ## Weights prepared once (0.12.1)
 
 * Generating text was about 20 s per token on Qwen2.5-0.5B (2 cores): every
