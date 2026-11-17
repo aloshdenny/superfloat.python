@@ -127,8 +127,26 @@ sf.dot(a, b, accumulate="wide", shift=-2)
 ```
 
 - `shift` is an integer from -32 to 31, default 0. There are no float scales, because the hardware only shifts.
+- `sf.matmul`, `sf.dot` and `sf.addmm` also take an array of shifts, one per output. It must broadcast to the result shape. POP takes one shift per token and column, so this costs nothing on the chip.
 - `sf` does not remember the shift. You keep each result's exponent, as you do for any scaled data.
 - `shift=` with the chain raises `ValueError`, because the chain has no shift.
+
+### A shift per token and column
+
+**Each row and column can have its own scale, so each output gets its own shift.** With a per-token activation exponent `ea` and a per-channel weight exponent `ew`, the heuristic in the wide-mode doc picks one shift for every output.
+
+```python
+y = sf.matmul(a, w, accumulate="wide", shift=s)   # a: (T, K), w: (K, N)
+# s can be shape (T, N): one per output
+#              (T, 1):   one per token
+#              (N,):     one per column
+#              an int:   one for all
+```
+
+- Every element must be from -32 to 31. One element outside it raises `ValueError` and nothing runs.
+- A shape that does not broadcast to the result raises `SFShapeError`.
+- For 1-D operands the shift broadcasts against the result as you see it: `sf.matmul(x, w)` with `x` of shape `(K,)` takes a shift of shape `(N,)`.
+- In `@sf.jit` and `@sf.kernel` code, `sf.dot` still takes one int per block. An array there raises `SFCompileError`.
 
 ## Widths
 
