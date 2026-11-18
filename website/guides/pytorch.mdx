@@ -107,6 +107,8 @@ Measured on Qwen2.5-0.5B (WikiText-2, 2,040 tokens, energy at 130 nm):
 | all sf8, LM head at sf16 (`keep_sf16="auto"`) | +10.4% | 72% | 60% |
 | `fit_widths`, budget +2%, sf8 / sf16 | +1.78% | 65% | 64% |
 
+Chosen for cycles instead (prefill, weights packed, `metric="cycles"`, `widths=(8, 10, 12, 16)`), the same +2% budget gives +1.22% with 56% of MACs at sf8, 37% at sf10 (the LM head among them), 4% at sf12 and 3% at sf16: 81% of all-sf16 cycles, against 77% for all sf8.
+
 The LM head is 27% of Qwen's MACs and costs 1.5% at sf8 but nothing measurable at sf10, so with `widths=(8, 10, 12, 16)` the chooser puts it at sf10. On the v0 table sf9 to sf15 save little energy over sf16 (sf10 is 77% of sf16's energy per MAC, sf8 45%), but packed even widths save cycles.
 
 **MoE models.** Hugging Face keeps every expert of an MoE block in one 3-D parameter (`gate_up_proj`, `down_proj`) and multiplies with a grouped matmul, so there is no `nn.Linear` to swap. `sft.convert` runs those experts itself, one SF linear per expert and projection, with the model's own layout (gate and up concatenated or interleaved, transposed weights, biases, its own gate function). Mixtral, Qwen2-MoE, Qwen3-MoE, DeepSeek-V3 and gpt-oss are covered.

@@ -73,7 +73,11 @@ them. Each one is a single place to change if the team decides differently.
   sf8 / sf16, energy at 130 nm, LM head free: round 1 predicted +1.99%,
   measured +1.78% (65% of MACs at sf8, 64% of all-sf16 energy); round 2 at
   +2.25% predicted +2.18%, measured +2.60% (rejected).  All sf8 with the LM
-  head at sf16: +10.4% at 60%.  Cycles and bus words use
+  head at sf16: +10.4% at 60%.  Cycles, sf8 to sf16: round 1 predicted
+  +1.89%, measured +1.29% (82% of all-sf16 cycles); round 2 at +3.11%
+  predicted +2.57%, measured +1.22% (81%; 56% sf8, 37% sf10, 4% sf12, 3%
+  sf16).  Measured loss is not monotone in the predicted one: the sum of
+  single-layer losses is a rough guide, the whole-model check decides.  Cycles and bus words use
   the better of plain and weights-packed (sf16 packed is slower than plain).
 
 ## dot_wide with a shift per output in kernels (0.14.0, spec 1.8.0)
