@@ -44,9 +44,16 @@ class FloatMatmuls(TorchDispatchMode):
         self.calls = []
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        if func in FLOAT_MATMULS:
+        if func in FLOAT_MATMULS and _inner_dim(func, args) != 1:
             self.calls.append(str(func))
         return func(*args, **(kwargs or {}))
+
+
+def _inner_dim(func, args):
+    """K of a matmul call.  K = 1 is an outer product, no accumulation: transformers < 5.20 builds RoPE's angles
+    as inv_freq (d/2, 1) @ positions (1, T) with bmm, host-side position bookkeeping like the norms."""
+    a = args[1] if func in (aten.addmm.default, aten.baddbmm.default) else args[0]
+    return a.shape[-1] if isinstance(a, torch.Tensor) and a.dim() else None
 
 
 def float_matmuls(model, *a):
@@ -196,10 +203,13 @@ def test_moe_compiled_on_the_target_equals_the_host_bit_for_bit():
     with torch.no_grad():
         want = c(IDS)
         torch._dynamo.reset()
+        n0 = len(sft.compile_reports())
         with sf.config(default_device="atreides", preflight="ignore"):
             got = torch.compile(c, backend="superfloat")(IDS)
     assert torch.equal(got, want)
-    on = {layer for *_, layer, _ in sft.compile_report().on_device}
+    # the model compiles to several graphs (5 on torch 2.9 / 2.11: graph breaks at the host round trips), and
+    # compile_report() is only the last one (the LM head): read every graph this call compiled
+    on = {layer for r in sft.compile_reports()[n0:] for *_, layer, _ in r.on_device}
     assert any(n.startswith("moe.experts.down_proj[") for n in on) and "moe.gate" in on
 
 
@@ -462,13 +472,28 @@ def _hf_models():
                                                                     moe_intermediate_size=32, head_dim=8)),
         "llama-eager": lambda: T.LlamaForCausalLM(T.LlamaConfig(**SMALL, attn_implementation="eager")),
         "gemma2": lambda: T.Gemma2ForCausalLM(T.Gemma2Config(**SMALL, head_dim=8)),
+        "qwen2-moe": lambda: T.Qwen2MoeForCausalLM(T.Qwen2MoeConfig(**SMALL, num_experts=4, num_experts_per_tok=2,
+                                                                    moe_intermediate_size=32,
+                                                                    shared_expert_intermediate_size=32)),
+        # multi-head latent attention: one key-value head per query head (2 would be an invalid config, which
+        # transformers 5.20 refuses in float too)
+        "deepseek-v3": lambda: T.DeepseekV3ForCausalLM(T.DeepseekV3Config(
+            **dict(SMALL, num_key_value_heads=4), n_routed_experts=4, num_experts_per_tok=2, moe_intermediate_size=32,
+            n_shared_experts=1, first_k_dense_replace=1, kv_lora_rank=16, q_lora_rank=16, qk_rope_head_dim=8,
+            qk_nope_head_dim=8, v_head_dim=8, n_group=1, topk_group=1)),
+        "gpt-oss": lambda: T.GptOssForCausalLM(T.GptOssConfig(**SMALL, num_local_experts=4, num_experts_per_tok=2,
+                                                              head_dim=8)),
     }
 
 
-@pytest.mark.parametrize("name", ["mixtral", "qwen3-moe", "llama-eager", "gemma2"])
+@pytest.mark.parametrize("name", ["mixtral", "qwen3-moe", "llama-eager", "gemma2", "qwen2-moe", "deepseek-v3",
+                                  "gpt-oss"])
 def test_real_hf_models_have_no_float_matmul_left(name):
     torch.manual_seed(10)
-    m = _hf_models()[name]().eval()
+    try:
+        m = _hf_models()[name]().eval()
+    except AttributeError as e:                       # a model class this transformers does not have
+        pytest.skip(str(e))
     c = sft.convert(m, dtype="sf16", accumulate="wide")
     ids = torch.randint(0, 128, (1, 7))
     left, y = float_matmuls(c, ids)
