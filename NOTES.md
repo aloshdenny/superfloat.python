@@ -42,8 +42,15 @@ them. Each one is a single place to change if the team decides differently.
   quantized product, (sum of the row's quantized P) x max |quantized V| over
   the keys the row uses (P != 0), times 32768/32767 for POP's rounding.  No
   P·V output can saturate, so none is redone: max |V| alone left rows that
-  see one key with V just under a power of two at the top code (Qwen sf16:
-  301k redos against 85k with the all-keys rule).  V's own per-channel quantization exponent still
+  see one key with V just under a power of two at the top code (128 redos in
+  `test_pv_is_never_redone`).
+* Redos on Qwen2.5-0.5B at sf16 (one window of 256 tokens, about 300k): q_proj
+  173k (3% of its outputs), scores 65k, k_proj 40k (5%), every other kind
+  under 4k, P·V 0.  q_proj and k_proj carry Qwen's large biases: the first
+  POP's exponent (l2 - h) ignores the bias added after it, so an output
+  dominated by its bias saturates and is redone.  Taking the bias into the
+  first exponent would remove most of these; left as is (the bias path is
+  Alosh's), raised with him.  V's own per-channel quantization exponent still
   spans every key: a row is not yet fully invariant to masked keys appended
   after it (question to Alosh).
 * Width per layer (`sf.torch._widths`): `cost_table_v0.json` packaged and

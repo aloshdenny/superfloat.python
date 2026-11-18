@@ -72,14 +72,16 @@ Each call is reported as `attention.0.scores` and `attention.0.pv`, then `attent
 fast = sft.convert(model, "sf16", accumulate="wide", nonlinear="integer")
 ```
 
-P·V's output exponent comes from the keys each row can see (P ≠ 0), so a causal row's result does not depend on the masked keys after it.
+P·V's output exponent is the exact bound of the row's product over the keys it can see (P ≠ 0): a causal row's result does not depend on the masked keys after it, and P·V is never redone.
+
+The scores enter the integer softmax with their row max subtracted. Quantizing raw scores would saturate Qwen2.5-0.5B's, which reach 1728 on its first token, and double its perplexity.
 
 | WikiText-2, 2,040 tokens | float ops | integer softmax / GELU / SiLU |
 | --- | --- | --- |
 | GPT-2, matmuls in float | 49.538 | 49.551 |
-| GPT-2, matmuls at sf16 (wide) | 49.535 | 49.547 |
+| GPT-2, matmuls at sf16 (wide) | 49.530 | 49.545 |
 | Qwen2.5-0.5B, matmuls in float | 22.415 | 22.418 |
-<!-- QWEN_ROWS -->
+| Qwen2.5-0.5B, matmuls at sf16 (wide) | 22.416 | 22.418 |
 
 **MoE models.** Hugging Face keeps every expert of an MoE block in one 3-D parameter (`gate_up_proj`, `down_proj`) and multiplies with a grouped matmul, so there is no `nn.Linear` to swap. `sft.convert` runs those experts itself, one SF linear per expert and projection, with the model's own layout (gate and up concatenated or interleaved, transposed weights, biases, its own gate function). Mixtral, Qwen2-MoE, Qwen3-MoE, DeepSeek-V3 and gpt-oss are covered.
 

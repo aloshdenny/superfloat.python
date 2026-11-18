@@ -22,8 +22,8 @@ Each stage went through an independent review and every finding is fixed with a 
 **Silicon.** Everything above is proved on the host, a mock device and a simulator. Running the same cases on the chip needs the driver, the compiler and the board. The hooks are in place; see [plugging in hardware](/reference/hardware).
 </Warning>
 
-- **Width per layer** (sf8 where it is safe, sf16 where it is not): today a model is one width, with the LM head and MoE routers kept at sf16. sf8 costs about 10% perplexity on Qwen2.5-0.5B.
-- **Ops outside the matmuls** (softmax, LayerNorm, RMSNorm, GELU, SiLU) run in float on the host: the chip has no exp, divide or square root.
+- **Width per layer**: `sft.choose_widths` / `sft.fit_widths` pick a width per layer from measured sensitivity and the chip's cost table (v0, chip v4.9.2), and `convert(widths=...)` runs it. The cost table changes with the next chip.
+- **Softmax, GELU and SiLU** have integer definitions (`sf.intops`, the chip's sequences, bit for bit) and run through them with `convert(nonlinear="integer")`: within 0.03% perplexity of float on GPT-2 and Qwen2.5-0.5B. The softmax changes for causal rows await Alosh's sign-off. LayerNorm and RMSNorm stay in float on the host.
 - **State-space models**: Mamba's depthwise Conv1d and selective scan stay in float (reported).
 - **Stage 1.2 diagnostics** (`sf.explain`): optional in the plan, deferred.
 - **Stage 2.3** (Atreides as a PyTorch device): deferred until the real transfer cost exists.
