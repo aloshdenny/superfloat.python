@@ -70,7 +70,11 @@ them. Each one is a single place to change if the team decides differently.
   sf12 for `llm` / `any`, every width for `other`; `l2` unmeasured; under 1
   bit kept is lossy; deterministic needs no redo; speed by cycles then bits,
   accuracy by bits then cycles, top 3.  On Qwen2.5-0.5B (decode, LLM, speed):
-  sf12 everywhere, LM head sf16, 88% of all-sf16 cycles.
+  sf12 everywhere, LM head sf16: 88% of all-sf16 decode cycles (95% prefill),
+  perplexity +0.99% (22.636 against 22.415).  Priced with the same v4.9.2
+  model, the measured plans: fit A (energy, sf8 / sf16) 76% decode / 89%
+  prefill at +1.78%; fit B (cycles, sf8 to sf16) 69% / 86% at +1.22%; all
+  sf8 63% / 84% at +10.4%.
 * Width per layer from measured accuracy (`sf.torch._widths`): `cost_table_v0.json` packaged and
   read as given; `layer_sensitivity` (one layer at a time, rest float);
   `choose_widths` (greedy on loss saved per cost, from all-narrowest; widths

@@ -107,6 +107,8 @@ Measured on Qwen2.5-0.5B (WikiText-2, 2,040 tokens, energy at 130 nm):
 | all sf8, LM head at sf16 (`keep_sf16="auto"`) | +10.4% | 72% | 60% |
 | `fit_widths`, budget +2%, sf8 / sf16 | +1.78% | 65% | 64% |
 
+Alosh's configuration chooser (`sft.plan_configs(model, tokens=1, model="llm")`, the rules of the v4.9.2 golden file) puts every layer at sf12 and the LM head at sf16: +0.99%, at 88% of all-sf16 decode cycles. The plans below measure each layer instead.
+
 Chosen for cycles instead (prefill, weights packed, `metric="cycles"`, `widths=(8, 10, 12, 16)`), the same +2% budget gives +1.22% with 56% of MACs at sf8, 37% at sf10 (the LM head among them), 4% at sf12 and 3% at sf16: 81% of all-sf16 cycles, against 77% for all sf8.
 
 The LM head is 27% of Qwen's MACs and costs 1.5% at sf8 but nothing measurable at sf10, so with `widths=(8, 10, 12, 16)` the chooser puts it at sf10. On the v0 table sf9 to sf15 save little energy over sf16 (sf10 is 77% of sf16's energy per MAC, sf8 45%), but packed even widths save cycles.
