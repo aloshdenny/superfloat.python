@@ -24,6 +24,7 @@ from ._errors import *            # noqa: F401,F403
 from ._errors import __all__ as _errors_all
 from ._errstate import errstate, geterr, seterr
 from ._format import FORMATS, MAX_BITS, MIN_BITS, SFFormat
+from . import _intops as intops   # integer exp, softmax, GELU, SiLU, reciprocal, rsqrt (bit-exact reference)
 from ._functions import *         # noqa: F401,F403
 from ._functions import __all__ as _functions_all
 from ._scalar import DTYPES, SFScalar
@@ -32,7 +33,7 @@ from .kernels import (HardwareAtreides, Kernel, LaunchResult, Limits, SimulatorA
                       arange, autotune, barrier, block_dim, block_idx, cdiv, constexpr, jit, kernel,
                       load, predicate, program_id, shared, store, synchronize, thread_idx)
 
-__version__ = "0.13.0"          # every matmul on sf or a reason: MoE experts and routers, eager attention, FP8 block scales; weights prepared once
+__version__ = "0.15.0"          # integer softmax / GELU / SiLU (sf.intops, convert(nonlinear="integer")); P·V exponent over visible keys; a width per layer (sft.choose_widths, convert(widths=...))
 
 # sf.sf4 .. sf.sf16
 globals().update({cls.__name__: cls for cls in DTYPES.values()})

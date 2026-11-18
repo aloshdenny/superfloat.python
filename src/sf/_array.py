@@ -696,10 +696,10 @@ def dot(a, b, *, accumulate=None, shift=None):
     """1-D · 1-D.  ``accumulate="chain"`` (default): a chain of fma in target
     order.  ``accumulate="wide"``: the MX engine, rounded once at ``2^shift``.
     Higher ranks go to matmul."""
+    if _traced(a, b) or _traced(shift):
+        from .kernels import _lang                   # in a kernel: the shift may be a traced int block
+        return _lang.dot(a, b, accumulate=accumulate, shift=shift)
     mode, sh = _mode_and_shift(accumulate, shift, "dot")
-    if _traced(a, b):
-        from .kernels import _lang
-        return _lang.dot(a, b, accumulate=mode, shift=shift if mode == "wide" else None)
     a, b = _as_sfarray(a, "dot"), _as_sfarray(b, "dot")
     if a.ndim == 1 and b.ndim == 1:
         if a.shape != b.shape:

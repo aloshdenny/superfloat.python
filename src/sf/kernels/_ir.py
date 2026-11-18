@@ -59,10 +59,10 @@ class BoolType:
 
 @dataclass(frozen=True)
 class PtrType:
-    bits: int
+    bits: int                               # 0: a read-only int buffer (per-output shifts and other tables)
 
     def __str__(self):
-        return f"ptr<sf{self.bits}>"
+        return "ptr<int>" if self.bits == 0 else f"ptr<sf{self.bits}>"
 
 
 INT = IntType()

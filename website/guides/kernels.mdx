@@ -21,9 +21,24 @@ r.status, r.cycles                                     # exact events, simulated
 ```
 
 Inside a kernel, `sf.dot(x, y, accumulate="wide", shift=s)` runs a block's
-dot product on the MX engine: a wide accumulator and one rounding. In a kernel
-`shift` is one int for the block; a shift per output works on arrays
-(`sf.matmul`), not in kernels yet.
+dot product on the MX engine: a wide accumulator and one rounding. `shift` is
+one int for the block, or an int block broadcastable to the output: one shift
+per output, as the chip's POP takes one per token and column. Pass the shifts
+as a NumPy int array argument (a read-only int buffer) and `sf.load` them:
+
+```python
+@sf.jit
+def mm(a, b, s, out, M: sf.constexpr, K: sf.constexpr, N: sf.constexpr):
+    i, k, j = sf.arange(0, M)[:, None], sf.arange(0, K), sf.arange(0, N)[None, :]
+    x = sf.load(a + i * K + k[None, :])
+    y = sf.load(b + k[:, None] * N + j)
+    sh = sf.load(s + i * N + j)                         # int: one shift per output
+    sf.store(out + i * N + j, sf.dot(x, y, accumulate="wide", shift=sh))
+
+mm[(1,)](a, b, shifts.astype(np.int16), out, M=8, K=64, N=8)
+```
+
+A shift outside -32 to 31 on a live lane is a device fault (`SFDeviceError`).
 
 There is also a CUDA-style `@sf.kernel` with `thread_idx`, shared memory and
 barriers. Kernels run on a simulator today (`atreides-sim`) which has two

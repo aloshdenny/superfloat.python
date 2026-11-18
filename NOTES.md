@@ -3,6 +3,137 @@
 Decisions the spec left open or did not state, and how this code resolves
 them. Each one is a single place to change if the team decides differently.
 
+## Integer nonlinears, P·V over visible keys, a width per layer (0.15.0, spec 1.9.0)
+
+* Alosh (2026-11-18): port his `sf_intops_ref.py` (exp, softmax, GELU, SiLU,
+  reciprocal, rsqrt, norms) bit for bit as sf's reference, with golden
+  vectors; fix the causal-masked softmax rows; take P·V's exponent over the
+  visible keys only; build width per layer from the cost table, read as
+  input.
+* `sf._intops` (`sf.intops`): his file verbatim (his `softmax_row` renamed
+  `softmax_row_v0`), compared on every input code (`tests/test_intops.py`);
+  the original sits unchanged in `tests/data/sf_intops_ref_v0.py`.  Golden
+  vectors: `spec/golden/intops/` from `tools/gen_golden_intops.py`.
+* sf's `softmax_row` = v0 with three changes, **pending Alosh's sign-off**:
+  (1) e_i flushed by the main exp get a second exp at d + 15 ln2 / 2^k and
+  are summed in a third MX slot popped 15 lower; (2) q < 2^14 after
+  normalising: pop once more one step higher; (3) P returned with the row's
+  exponent `(t, ep)`, not shifted to scale 1.  His row: worst error 0.0037 to
+  under 0.0003.  Left as defined: `mul` truncation (up to 1 ulp low per
+  nonzero P, as v0) and scores above 64 saturating under k <= 6.
+* Float rows on the host (`softmax_rows`): **the row max is subtracted before
+  quantizing** (d = s - max, k = 4, or 5 when a visible key is more than 16
+  below the max; anything 32 below is under 2^-46 and may saturate).  Alosh's
+  convention quantized raw scores (k = 4, redo at 5, 6; kept as
+  `softmax_rows_raw`): Qwen2.5-0.5B's attention scores reach 1728 (its sink
+  token), 6% of rows saturate at 64, keys above 64 collapse, and perplexity
+  doubles (17.40 to 36.9 on one window; with the max first, 17.41).  On the
+  chip this needs one max over the wide Q·Kᵀ output before narrowing
+  (question to Alosh).  A score at or below -10^4 is a mask (models mask
+  with `finfo.min` as well as -inf).
+  GELU / SiLU rows: one exponent from max |x|, clamped to 0..6 (his tables),
+  so |x| above 64 saturates.
+* `convert(nonlinear="integer")`: softmax in `sft.attention` (wide mode) and
+  in eager attention scopes; tanh-GELU and SiLU modules swapped for
+  `IntGELU` / `IntSiLU` (MoE `act_fn` too).  erf GELU has no integer form:
+  stays float, reported.  Norms stay float (Alosh: up to 4% off with squares
+  in sf16).  Numpy round trip: no gradient, graph break under compile.
+* P·V (`out_rule="max_b"`): each output's exponent is the exact bound of the
+  quantized product, (sum of the row's quantized P) x max |quantized V| over
+  the keys the row uses (P != 0), times 32768/32767 for POP's rounding.  No
+  P·V output can saturate, so none is redone: max |V| alone left rows that
+  see one key with V just under a power of two at the top code (128 redos in
+  `test_pv_is_never_redone`).
+* Redos on Qwen2.5-0.5B at sf16 (one window of 256 tokens, about 300k): q_proj
+  173k (3% of its outputs), scores 65k, k_proj 40k (5%), every other kind
+  under 4k, P·V 0.  q_proj and k_proj carry Qwen's large biases: the first
+  POP's exponent (l2 - h) ignores the bias added after it, so an output
+  dominated by its bias saturates and is redone.  Taking the bias into the
+  first exponent would remove most of these; left as is (the bias path is
+  Alosh's), raised with him.  Measured (one window, `diag_bias.py` outside
+  the repo): first exponent max(l2 - h, pow2_exp(|b| + 2^(l2 - h))) takes
+  redos from 285k to 72k (q_proj 172,852 to 79, k_proj 40,155 to 0; the
+  scores' 65k stay), perplexity 17.414 to 17.417 (float 17.399).  V's own per-channel quantization exponent still
+  spans every key: a row is not yet fully invariant to masked keys appended
+  after it (question to Alosh).  Measured: 128 keys, the last 28 with V 8x
+  larger; every earlier row changes when they are appended (932 of 932, up
+  to 7e-4), since V's per-channel exponent rises 3 bits for all rows.  K's
+  per-channel exponent in Q·Kᵀ does the same.  Full invariance needs K and V
+  quantized per block of keys (or re-quantized per prefix), not per channel
+  over the whole sequence.
+* Configuration chooser (`sf.torch._configs`): the 56 cases of
+  `sf_golden_v4.9.2.json` (`heuristic.configuration`, the ones Alosh meant)
+  reproduced exactly (`tests/test_configs.py`).  Read from the file: cycles =
+  round(MACs x c), c per GEMV / GEMM and plain / packed sf8, sf10, sf12, times
+  1.066 for `tbl2`; bits kept = (bits - h(K) for `l2`) - 4.2.  Inferred, holds
+  on all 56: LM head and grouped conv at sf16 plain; `tbl2` measured from
+  sf12 for `llm` / `any`, every width for `other`; `l2` unmeasured; under 1
+  bit kept is lossy; deterministic needs no redo; speed by cycles then bits,
+  accuracy by bits then cycles, top 3.  On Qwen2.5-0.5B (decode, LLM, speed):
+  sf12 everywhere, LM head sf16: 88% of all-sf16 decode cycles (95% prefill),
+  perplexity +0.99% (22.636 against 22.415).  Priced with the same v4.9.2
+  model, the measured plans: fit A (energy, sf8 / sf16) 76% decode / 89%
+  prefill at +1.78%; fit B (cycles, sf8 to sf16) 69% / 86% at +1.22%; all
+  sf8 63% / 84% at +10.4%.
+* Width per layer from measured accuracy (`sf.torch._widths`): `cost_table_v0.json` packaged and
+  read as given; `layer_sensitivity` (one layer at a time, rest float);
+  `choose_widths` (greedy on loss saved per cost, from all-narrowest; widths
+  not measured count as no better than the next narrower measured width, 0
+  at sf16, and are flagged: the 4x-per-bit rule was wrong on Qwen, where the
+  top three layers lose only 1.1-1.3x less at sf10 than at sf8);
+  `fit_widths` measures the plan on the whole model and corrects the budget,
+  since the sum of single-layer losses is off by up to 1.5x on Qwen2.5-0.5B.
+  `convert(widths={name: dtype})` takes the plan.  Qwen2.5-0.5B, +2% budget,
+  sf8 / sf16, energy at 130 nm, LM head free: round 1 predicted +1.99%,
+  measured +1.78% (65% of MACs at sf8, 64% of all-sf16 energy); round 2 at
+  +2.25% predicted +2.18%, measured +2.60% (rejected).  All sf8 with the LM
+  head at sf16: +10.4% at 60%.  Cycles, sf8 to sf16: round 1 predicted
+  +1.89%, measured +1.29% (82% of all-sf16 cycles); round 2 at +3.11%
+  predicted +2.57%, measured +1.22% (81%; 56% sf8, 37% sf10, 4% sf12, 3%
+  sf16).  Measured loss is not monotone in the predicted one: the sum of
+  single-layer losses is a rough guide, the whole-model check decides.  Cycles and bus words use
+  the better of plain and weights-packed (sf16 packed is slower than plain).
+
+## dot_wide with a shift per output in kernels (0.14.0, spec 1.8.0)
+
+* Alosh (2026-11-18): the chip already takes a shift per output (POP's Rs per
+  token and column); `@sf.jit` did not expose it.  Kartik follows on the
+  compiler side.
+* IR: `dot_wide` takes an optional third operand, an int value broadcastable
+  to (m, n); the `shift` attribute is then None.  Interpreter: the host's
+  `matmul_wide_codes` with the broadcast block; C: `sh` read per output and
+  passed to `__sf16_dot_wide`.  A live lane outside -32..31 faults (C fault
+  code 6); masked lanes use 0 and never fault.
+* Int buffers: a NumPy integer array argument is a `ptr<int>` (`PtrType(0)`,
+  same plumbing as sf pointers), copied in with the launch, read-only (a
+  store is refused at trace time, so nothing has to be copied back), every
+  value within int16 (one word on the chip) or `SFLaunchError`.
+* `sf.dot` dispatches to the kernel version before checking the shift, so a
+  traced shift reaches it.
+* Spec 1.8.0 (a contract change: a new operand); golden files only change
+  their version field.  `tests/test_kernel_dot_wide_shift.py`: every v4.9.2
+  sf16 case of `dot_wide_shift.json` through a kernel on both backends, codes
+  and saturation counts.
+
+## MXFP4 (0.13.1)
+
+* Alosh (2026-11-18): add MXFP4, the format the real gpt-oss checkpoints ship
+  in; same pattern as FP8 (read exactly, then quantize to sf).  NVFP4 is
+  skipped (native to Blackwell GPUs only).
+* `sf.torch._mxfp4`: `dequantize_mxfp4` (E2M1 low nibble first, E8M0 bias
+  127, 255 = NaN; exact in float32), `quantize_mxfp4` (the OCP encoder, for
+  tests and writing checkpoints), `load_mxfp4` (every `*_blocks` /
+  `*_scales` pair of a dict, .safetensors file or folder into the model's
+  float parameter; 3-D pairs transposed as gpt-oss stores them: always, not
+  only when the shapes need it, since a square expert matrix fits either way).
+* `convert` reads an `nn.Linear` with uint8 (out, in/2) weights and a (out,
+  in/32) E8M0 scale; `Mxfp4GptOssExperts` (GPU-packed) is skipped with the way
+  out.
+* Checked: the decoder equals `transformers`' `_convert_moe_packed_tensors`;
+  a tiny gpt-oss checkpoint written in the real layout loads to the same
+  values through `sft.load_mxfp4` and through `transformers`
+  (`from_pretrained`, CPU, dequantize); `tests/test_mxfp4.py`.
+
 ## Every matmul on sf, or a reason (0.13.0, closing Stage 2)
 
 Alosh's questions (2026-11-17): does `convert` find every layer at the right

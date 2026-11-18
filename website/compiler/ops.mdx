@@ -1,6 +1,6 @@
 ---
 title: "IR ops"
-description: "Every SF IR op, one section each. Spec version 1.7.0."
+description: "Every SF IR op, one section each. Spec version 1.9.0."
 ---
 
 Each op lists its operands, attributes, result, shape rule, exact semantics on integer codes, events, memory effects, faults, predication, the v1 hardware unit, a suggested MLIR op with traits, and the rewrites that are and are not legal. Ops with golden vectors say so.
@@ -415,17 +415,18 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 
 ### dot_wide
 
-`%r:sfN[m,n] = dot_wide %a, %b {shift}` · version 1.3
+`%r:sfN[m,n] = dot_wide %a, %b [, %shift] {shift}` · version 1.8
 
 | | |
 |---|---|
-| Operands | a: sfN[m, k], b: sfN[k, n] |
-| Attributes | shift: int from -32 to 31: the result is the total times 2^shift (POP's s). On arrays (sf.matmul) it can also be an int array broadcastable to the result (..., m, n): one shift per output, as POP takes one Rs per token and column. In the IR it is one int per block for now |
+| Operands | a: sfN[m, k], b: sfN[k, n], shift (optional): int, broadcastable to (m, n): one shift per output, from -32 to 31, as POP takes one Rs per token and column; when present the attribute is unused |
+| Attributes | shift: int from -32 to 31, for the whole block when there is no shift operand: the result is the total times 2^shift (POP's s). On arrays (sf.matmul) it can also be an int array broadcastable to the result |
 | Result | sfN |
 | Shape | (m, n) |
 | Semantics | The MX engine of the target chip; v4.9.2 is the default. Block: sf9..sf16 use the SF16 block, sf4..sf8 the SF8 block. Units: v4.9.2 SF16 W = 32 bits, F = 22 fraction bits (Q10.22, about +-512), tk = 6, comp = 80; SF8 W = 32, F = 14 (Q18.14, about +-131,072). v4.8.1 SF16 W = 25, F = 19 (Q6.19, about +-32), tk = 9, comp = 1024; SF8 W = 20, F = 14 (Q6.14, about +-32). Operands are sign-magnitude, left-aligned in 16 bits; am, bm are the magnitudes the block reads (15 bits, or the 7 bits of the top byte on SF8). Product magnitude: SF16 t = ((comp + sum over set bits i of am of ((bm &lt;&lt; i) & ~(2^tk - 1))) mod 2^30) >> (30 - F), so NOT exact; SF8 t = am * bm, exact. Sign = sign(a) xor sign(b). For each (i, j): acc = 0; for k0 = 0, 8, 16, ...: acc = saturate_W(acc + sum of the signed t for k in k0 .. k0+7) (two's complement). Result (POP): q = round_half_to_even(\|acc\| * 2^(shift - F + N - 1)), clamped to M, with the sign of acc; never -0. |
 | Events | overflow, underflow |
 | Memory | none |
+| Faults | with a shift operand: a live lane whose shift is outside -32..31 faults the launch (masked lanes never fault and use shift 0) |
 | Predication | events |
 | Hardware | MX engine, one per tile (ISA section 3.4 of compiler_v4.9.2.md; the instructions are the same on v4.8.1): CFG (block, N) from thread 0, CLR; per chunk of 8 k: WL rows 7..0 then SWAP; MAC per token into slot t (up to 8 tokens per weight tile); then POP with Rs(c) = t &lt;&lt; 8 \| (shift & 63). 8 output columns per weight tile, 64 MACs per instruction. The engine has no flags. |
 | v4.8.1 | **expand**: the MX sequence of ISA s3.4: CFG (block and N, from thread 0) and CLR; per chunk of 8 k: WL rows 7..0 then SWAP; MAC per token into its slot (up to 8 tokens per weight tile); then POP with Rs(c) = slot &lt;&lt; 8 \| (shift & 63). Thread j supplies lane or column j. 8 output columns per weight tile. Weights are not reset at block start: always load all 8 rows and SWAP |
@@ -526,8 +527,8 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 
 | | |
 |---|---|
-| Operands | ptr: ptr&lt;sfN> param, offs: int, mask: bool, other: sfN (value for masked lanes) |
-| Result | sfN |
+| Operands | ptr: ptr&lt;sfN> param, or ptr&lt;int> (a read-only int buffer), offs: int, mask: bool, other: sfN, or int for ptr&lt;int> (value for masked lanes) |
+| Result | sfN, or int from ptr&lt;int> |
 | Shape | broadcast(offs, mask, other) |
 | Semantics | live = mask AND predicate. Live lanes: ptr[offs]. Others: other. Offsets are element indices, not bytes. |
 | Events | none |
@@ -546,7 +547,7 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 
 | | |
 |---|---|
-| Operands | ptr: ptr&lt;sfN>, offs: int, val: sfN, mask: bool |
+| Operands | ptr: ptr&lt;sfN> (int buffers are read-only: a store to one is refused at trace time), offs: int, val: sfN, mask: bool |
 | Result | none |
 | Shape | lanes = broadcast(offs, val, mask) |
 | Semantics | live = mask AND predicate. ptr[offs] = val on live lanes. If two live lanes hit the same offset, the reference keeps the last lane in row-major order; kernels should not rely on this. |

@@ -29,7 +29,7 @@ ATTENTION_BITS = 16
 
 def attention(query, key, value, attn_mask=None, dropout_p: float = 0.0, is_causal: bool = False,
               scale: float | None = None, enable_gqa: bool = False, *, name: str = "attention",
-              need_weights: bool = False):
+              need_weights: bool = False, softmax: str = "float"):
     """``F.scaled_dot_product_attention`` with both matmuls on the MX engine.
 
     Statuses are recorded as ``{name}.scores`` and ``{name}.pv``.  Shapes
@@ -37,7 +37,11 @@ def attention(query, key, value, attn_mask=None, dropout_p: float = 0.0, is_caus
     with ``enable_gqa`` the key and value heads (dim -3) are repeated to the
     query's.  ``dropout_p`` applies to P in float (training only).
     ``need_weights=True`` also returns P (after softmax, before dropout).
+    ``softmax="integer"``: P from sf's integer softmax (``sf.intops``, the
+    chip's definition) instead of float on the host.
     """
+    if softmax not in ("float", "integer"):
+        raise ValueError(f"sft.attention: softmax must be 'float' or 'integer', got {softmax!r}")
     if query.dim() < 2:
         raise ValueError("sft.attention: query must have at least 2 dimensions")
     if attn_mask is not None and is_causal:
@@ -65,7 +69,11 @@ def attention(query, key, value, attn_mask=None, dropout_p: float = 0.0, is_caus
             scores = scores.masked_fill(~attn_mask, float("-inf"))
         else:
             scores = scores + attn_mask
-    p = torch.softmax(scores, dim=-1)
+    if softmax == "integer":
+        from ._intops import int_softmax
+        p = int_softmax(scores, dim=-1)
+    else:
+        p = torch.softmax(scores, dim=-1)
     pd = F.dropout(p, dropout_p) if dropout_p > 0.0 else p
     out = torch.ops.sf.matmul_wide_pv(pd, value, ATTENTION_BITS, f"{name}.pv")
     return (out, p) if need_weights else out
@@ -74,33 +82,34 @@ def attention(query, key, value, attn_mask=None, dropout_p: float = 0.0, is_caus
 _SDPA_KW = ("attn_mask", "dropout_p", "is_causal", "scale", "enable_gqa")
 
 
-def from_sdpa_call(args, kwargs, name):
+def from_sdpa_call(args, kwargs, name, softmax: str = "float"):
     """Run an intercepted ``F.scaled_dot_product_attention`` call here."""
     q, k, v, *rest = args
     kw = dict(zip(_SDPA_KW, rest))
     kw.update({k_: v_ for k_, v_ in kwargs.items() if k_ in _SDPA_KW})
-    return attention(q, k, v, name=name, **kw)
+    return attention(q, k, v, name=name, softmax=softmax, **kw)
 
 
 class AttentionMode(TorchFunctionMode):
     """Catches ``F.scaled_dot_product_attention`` only; names the calls
     ``{prefix}attention.{i}`` in call order."""
 
-    def __init__(self, prefix: str = ""):
+    def __init__(self, prefix: str = "", softmax: str = "float"):
         super().__init__()
         self.prefix = prefix
         self.count = 0
+        self.softmax = softmax
 
     def __torch_function__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
         if func is F.scaled_dot_product_attention:
             name = f"{self.prefix}attention.{self.count}"
             self.count += 1
-            return from_sdpa_call(args, kwargs, name)
+            return from_sdpa_call(args, kwargs, name, self.softmax)
         return func(*args, **kwargs)
 
 
-def install(model: torch.nn.Module) -> None:
+def install(model: torch.nn.Module, softmax: str = "float") -> None:
     """Make ``model``'s forward catch its attention calls (``sft.convert``):
     the mode is entered before the root module's forward and left after it,
     also when it raises.  Calls are named ``attention.0``, ``attention.1``,
@@ -108,7 +117,7 @@ def install(model: torch.nn.Module) -> None:
     state = {}
 
     def pre(module, args):
-        mode = AttentionMode()
+        mode = AttentionMode(softmax=softmax)
         mode.__enter__()
         state.setdefault("modes", []).append(mode)
 

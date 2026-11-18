@@ -224,3 +224,50 @@ def test_multihead_attention_trains():
     x = torch.randn(5, 2, 16, requires_grad=True)
     c[0](x, x, x)[0].sum().backward()
     assert x.grad is not None and c[0].in_proj_weight.grad is not None and c[0].out_proj.weight.grad is not None
+
+
+# --- P @ V's output exponent from the keys a row can see (spec 1.9.0) ------------------------------------------------
+
+def test_pv_output_exponent_counts_only_visible_keys():
+    import numpy as np
+    from sf.torch import _core
+    p = np.array([[1.0, 0, 0], [0.5, 0.5, 0], [0.2, 0.3, 0.5]])
+    v = np.array([[0.1, 2.0], [0.4, -3.0], [40.0, 0.25]])
+    e = _core.visible_max_exp(p, v)
+    assert e.tolist() == [[-3, 2], [-1, 2], [6, 2]]                       # row 0 sees key 0 only, ...
+    big = _core.visible_max_exp(np.broadcast_to(p, (2, 3, 3)), np.broadcast_to(v, (2, 3, 2)), chunk=4)
+    assert (big == e).all()
+
+
+def test_pv_rows_do_not_see_the_exponent_of_masked_keys():
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(1, 2, 16, 8) for _ in range(3))
+    v[..., 12:, :] *= 30                                                  # large values only in the last keys
+    import numpy as np
+    from sf.torch import _core
+    calls = []
+    real = _core.visible_max_exp
+    _core.visible_max_exp = lambda *a, **kw: calls.append(real(*a, **kw)) or calls[-1]
+    try:
+        sft.attention(q, k, v, is_causal=True, name="vis")
+    finally:
+        _core.visible_max_exp = real
+    eo = calls[-1]
+    allkeys = np.ceil(np.log2(np.abs(v.numpy()).max(axis=-2)))           # what the old rule took for every row
+    assert (eo[..., :12, :] < allkeys[..., None, :]).any()               # early rows keep finer exponents
+
+
+def test_pv_is_never_redone():
+    """P @ V's exponent bounds the quantized product exactly (sum of P times max visible |V|, with POP's rounding
+    margin): no output can saturate, so nothing is redone, even when a row sees one key whose V is just under a
+    power of two (the case the plain max |V| rule redid)."""
+    torch.manual_seed(3)
+    q, k = torch.randn(2, 4, 64, 16), torch.randn(2, 4, 64, 16)
+    v = torch.randn(2, 4, 64, 16)
+    v[..., 0, :] = 0.99999                                               # row 0 sees only key 0: out = v[0]
+    sft.reset_status()
+    out = sft.attention(q, k, v, is_causal=True, name="nored")
+    st = sft.last_status()["nored.pv"]
+    assert st.redone == 0 and (st.saturated or 0) == 0
+    ref = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+    assert (out - ref).abs().max() < 2e-3

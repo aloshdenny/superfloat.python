@@ -3,7 +3,7 @@ title: "Versioning"
 description: "How the spec version changes, and what changed in each version."
 ---
 
-Current version: **1.7.0** (MAJOR.MINOR.PATCH).
+Current version: **1.9.0** (MAJOR.MINOR.PATCH).
 
 | Change | Bump | Example |
 |---|---|---|
@@ -17,6 +17,8 @@ Each op carries the version in which its contract last changed. If your lowering
 
 | Version | Date | Change |
 |---|---|---|
+| 1.9.0 | 2026-11-18 | Attention's P @ V takes each output's exponent from the exact bound of the quantized product, (sum of the row's P) times max \|V\| over only the keys that row uses (P != 0), with POP's rounding margin: masked keys never change a row's output exponent and no P @ V output is ever redone (sft_wide.json regenerated: its causal cases change). Integer definitions of exp, softmax, GELU, SiLU, reciprocal and rsqrt (Alosh's sf_intops_ref.py, ported bit for bit as sf.intops) with golden vectors in spec/golden/intops/. sf's softmax_row is Alosh's sequence with three changes, pending his sign-off: e_i flushed by the main exp are summed with 15 more fraction bits (a second exp at d + 15 ln2 / 2^k, a third MX slot popped 15 lower), q below 2^14 after normalising is popped once more one step higher, and P keeps the row's own exponent instead of being shifted to scale 1. DSL 0.15.0. |
+| 1.8.0 | 2026-11-18 | dot_wide takes an optional third operand: an int block broadcastable to (m, n), one shift per output, as POP takes one Rs per token and column; in kernels sf.dot(a, b, accumulate="wide", shift=s) with s a traced int block, usually loaded from an int buffer argument. A shift outside -32..31 on a live lane faults the launch. Kernels take read-only int buffers (ptr&lt;int>, a NumPy int array argument, one 16-bit word per element on the chip): load gives int, store is refused at trace time. DSL 0.14.0. |
 | 1.7.0 | 2026-11-17 | Wide mode adds a linear layer's bias on the chip after POP: the bias is quantized to each output's exponent (round half to even, clamped; SFLayerStatus.bias_saturated counts clamps) and added with the saturating sfN add (ACT f=00); an output whose POP or add reaches +-max is redone at the exponent of \|x\|\|w\| + \|b\|. Atreides targets run every op except divide and sqrt at sf4 to sf16 (below sf16: the sf16 op plus a mask of the low bits, measured bit-exact on the chip). sft_wide.json regenerated; its status now includes bias_saturated. |
 | 1.6.1 | 2026-11-16 | Golden vectors: spec/golden/wide/dot_wide_shift.json (dot_wide with shift arrays, sf4 to sf16, v4.9.2 and v4.8.1, 144 cases) and spec/golden/wide/sft_wide.json (sft wide layers with every SFLayerStatus field, attention, one small model end to end), from sf's host model; to confirm on the RTL. Docs: wide-mode status, events, rounding, policy, kernels, hardware; v1 wording removed. |
 | 1.6.0 | 2026-11-16 | Attention on the MX engine: sft.attention (F.scaled_dot_product_attention's arguments, GQA included) runs Q K^T with the wide-mode rule and P V with the output exponent per channel from max\|V\| (rows of P sum to 1; new op sf::matmul_wide_pv), both at sf16; softmax in float. sft.autocast / sft.convert(accumulate="wide") catch SDPA calls (convert: attention="auto"). DSL 0.11.0. |

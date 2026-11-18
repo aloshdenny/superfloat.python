@@ -1,0 +1,37 @@
+---
+title: "sf.intops: integer exp, softmax, GELU, SiLU"
+description: "The chip's definitions of the nonlinear ops, on SF16 codes, bit for bit (spec 1.9.0)."
+---
+
+`sf.intops` is the integer definition of the ops outside the matmuls, built only from sf's own arithmetic. It is Alosh's `sf_intops_ref.py` (2026-11-18), ported bit for bit; the original is kept unchanged as `tests/data/sf_intops_ref_v0.py`, and the tests compare every input code. Golden vectors: `spec/golden/intops/` (`tools/gen_golden_intops.py`, `--check` to verify).
+
+**Format.** SF16 codes: signed integers in [-32767, 32767], value = code / 2^15. `mul` truncates toward zero, `add` saturates, row sums are exact with one round-half-to-even scaling (the MX sum and POP).
+
+| Function | What it computes |
+|---|---|
+| `exp_core(d, k)` | exp(d · 2^k) for d in (-1, 0], k = 0..6: a degree-4 Horner polynomial, then k squarings, each with a 1-ulp offset table. Exact to the definition on every code. |
+| `gelu(x, ex)` | GPT-2's tanh GELU (`gelu_new`) of x = code · 2^(ex-15), ex = 0..6. |
+| `silu(x, ex)` | x · sigmoid(x), same exponents. |
+| `recip_norm(q)` | about 2^29 / q for q in [2^14, 2^15): Newton, 2 steps. |
+| `rsqrt_norm(q)` | about 2^14 sqrt(2^15 / q) for q in [2^13, 2^15): Newton, 3 steps. |
+| `softmax_row_v0(s, k)` | Alosh's softmax, unchanged: P at scale 1. |
+| `softmax_row(s, k, visible=None)` | sf's softmax: returns `(t, ep)`, P = t · 2^(ep-15). Masked keys (`visible` False) give 0 and are not summed. |
+| `softmax(s, k, visible=None)` | `softmax_row` for a batch of rows (one k per row). |
+| `norm_row(x, gamma, beta, ...)` | LayerNorm / RMSNorm, for reference only: norms stay on the host in float. |
+| `softmax_rows(x)`, `xsig_rows(x, cubic)` | Float rows through the integer definitions, for models on the host. Scores: the row max subtracted first, then k = 4, or 5 if a key is more than 16 below the max (`softmax_rows_raw`: Alosh's raw-score convention, k = 4 redone at 5, 6). GELU / SiLU: one exponent per row from max \|x\|, 0..6. |
+
+## sf's softmax: three changes to v0 (pending Alosh's sign-off)
+
+Alosh's v0 loses mass on long causal rows: in his example row (942 visible keys) 660 probabilities are below one ulp, P sums to 0.9863, and the worst element is off by 0.0037. sf's `softmax_row` keeps his sequence with three changes:
+
+1. **Sub-ulp keys still count.** A key whose main exp flushes to 0 gets a second exp at d + 15 ln2 / 2^k, and those are summed in a third MX slot popped 15 bits lower. The row sum L then misses nothing above 2^-30.
+2. **q below 2^14.** When normalising leaves q under the reciprocal's domain, the sum is popped once more one step higher (up to 154 ulps off in v0).
+3. **P keeps the row's exponent.** P is returned as `(t, ep)` instead of shifted to scale 1, so a long flat row keeps its bits (v0 shifts log2(n) bits out of every P).
+
+On his row: worst error 0.0037 to under 0.0003; P·V error 4x smaller or better. What remains: `mul` truncates, so each nonzero P can be up to 1 ulp low (as in v0).
+
+**Scores enter with their row max subtracted.** Quantizing raw scores (k ≤ 6) saturates any score above 64. Qwen2.5-0.5B's attention scores reach 1728 (the first-token sink): 6% of rows saturate, keys above 64 collapse onto one value, and perplexity doubles. Softmax does not change when a row's max is subtracted, and a key more than 32 below the max is under 2^-46, so with the max taken first k = 4 or 5 always suffices. On the chip this is one max over the wide Q·Kᵀ output before it is narrowed.
+
+## In PyTorch
+
+`sft.int_softmax(scores, dim=-1)`, `sft.int_gelu(x)`, `sft.int_silu(x)` run tensors through these definitions (no gradient). `sft.convert(model, ..., nonlinear="integer")` puts them in the model: attention's softmax (wide mode), tanh-GELU and SiLU modules. See the [PyTorch guide](/guides/pytorch).

@@ -66,6 +66,53 @@ Each call is reported as `attention.0.scores` and `attention.0.pv`, then `attent
 
 **Attention written with `torch.matmul`.** Some models do not call SDPA: Hugging Face models loaded with `attn_implementation="eager"`, Gemma 2 (logit soft-capping) and older code. In wide mode `sft.convert` watches every attention module (a class whose name ends in `Attention`): while it runs, each `torch.matmul` between two activations goes to the MX engine at sf16, and the one after a softmax runs as `P V` with V's exponent per channel. A rotary-embedding module inside it stays in float (its angles need float). Statuses: `{module}.scores` and `{module}.pv`.
 
+**Softmax, GELU and SiLU on the chip's integer definitions.** `nonlinear="integer"` runs them through `sf.intops` instead of float on the host: attention's softmax (wide mode), GPT-2's tanh GELU and SiLU (MoE experts' activations too). GELU with erf has no integer form and stays float; LayerNorm and RMSNorm always stay on the host. `ConversionReport.nonlinear` lists what changed.
+
+```python
+fast = sft.convert(model, "sf16", accumulate="wide", nonlinear="integer")
+```
+
+P·V's output exponent is the exact bound of the row's product over the keys it can see (P ≠ 0): a causal row's result does not depend on the masked keys after it, and P·V is never redone.
+
+The scores enter the integer softmax with their row max subtracted. Quantizing raw scores would saturate Qwen2.5-0.5B's, which reach 1728 on its first token, and double its perplexity.
+
+| WikiText-2, 2,040 tokens | float ops | integer softmax / GELU / SiLU |
+| --- | --- | --- |
+| GPT-2, matmuls in float | 49.538 | 49.551 |
+| GPT-2, matmuls at sf16 (wide) | 49.530 | 49.545 |
+| Qwen2.5-0.5B, matmuls in float | 22.415 | 22.418 |
+| Qwen2.5-0.5B, matmuls at sf16 (wide) | 22.416 | 22.418 |
+
+**A width per layer.** sf8 everywhere costs Qwen2.5-0.5B about 10% perplexity, but most of it comes from a few layers. Measure each layer's cost in accuracy once, then let the chip's cost table pick the widths:
+
+```python
+import math
+
+def evaluate(m):                      # any loss, lower is better: here mean NLL per token on a few windows
+    ...
+
+sens = sft.layer_sensitivity(model, evaluate, "sf8")               # one evaluation per layer
+plan = sft.fit_widths(model, evaluate, sens, max_loss=math.log(1.02), widths=(8, 16), keep_sf16=False)
+print(plan)
+fast = sft.convert(model, "sf8", accumulate="wide", **plan.convert_kwargs())
+```
+
+`choose_widths` starts every layer at the narrowest width and widens the layer that saves the most loss per unit of cost until the summed loss fits the budget. The cost per MAC comes from `sft.cost_table()` (Alosh's table for chip v4.9.2: energy at 130 nm or 2 nm, cycles or bus words, prefill or decode), read as given. The sum of single-layer losses is only an estimate (on Qwen it was off by up to 1.5x either way), so `fit_widths` measures each plan on the whole model and corrects the budget. Pass `fresh=` (a function that loads the model) to keep one model in memory.
+
+Measured on Qwen2.5-0.5B (WikiText-2, 2,040 tokens, energy at 130 nm):
+
+| Plan | Perplexity | MACs at sf8 | Energy vs all sf16 |
+| --- | --- | --- | --- |
+| all sf16 | +0.01% | 0% | 100% |
+| all sf8, LM head at sf16 (`keep_sf16="auto"`) | +10.4% | 72% | 60% |
+| `fit_widths`, budget +2%, sf8 / sf16 | +1.78% | 65% | 64% |
+
+Alosh's configuration chooser (`sft.plan_configs(model, tokens=1, model="llm")`, the rules of the v4.9.2 golden file) puts every layer at sf12 and the LM head at sf16: +0.99%, at 88% of all-sf16 decode cycles. The plans below measure each layer instead.
+
+Chosen for cycles instead (prefill, weights packed, `metric="cycles"`, `widths=(8, 10, 12, 16)`), the same +2% budget gives +1.22% with 56% of MACs at sf8, 37% at sf10 (the LM head among them), 4% at sf12 and 3% at sf16: 81% of all-sf16 cycles, against 77% for all sf8.
+
+The LM head is 27% of Qwen's MACs and costs 1.5% at sf8 but nothing measurable at sf10, so with `widths=(8, 10, 12, 16)` the chooser puts it at sf10. On the v0 table sf9 to sf15 save little energy over sf16 (sf10 is 77% of sf16's energy per MAC, sf8 45%), but packed even widths save cycles.
+
 **MoE models.** Hugging Face keeps every expert of an MoE block in one 3-D parameter (`gate_up_proj`, `down_proj`) and multiplies with a grouped matmul, so there is no `nn.Linear` to swap. `sft.convert` runs those experts itself, one SF linear per expert and projection, with the model's own layout (gate and up concatenated or interleaved, transposed weights, biases, its own gate function). Mixtral, Qwen2-MoE, Qwen3-MoE, DeepSeek-V3 and gpt-oss are covered.
 
 - The experts run at `dtype`; the router (which picks the experts) runs at sf16, like the LM head, and is listed in `kept_sf16`.
@@ -78,8 +125,20 @@ Each call is reported as `attention.0.scores` and `attention.0.pv`, then `attent
 | Weight | What `sft.convert` does |
 | --- | --- |
 | FP8 with scales per block or per tensor (`weight_scale_inv`, DeepSeek-V3 style, `transformers`' `FP8Linear`) | Dequantizes it (each block times its scale), then converts it like any float weight |
-| int8, packed 4-bit, GPTQ / AWQ `qweight` | Skips it with the reason; the layer runs as it was |
+| MXFP4 (`nn.Linear` with packed E2M1 weights and an E8M0 scale per block of 32) | Dequantizes it exactly, then converts it like any float weight |
+| int8, packed 4-bit, GPTQ / AWQ `qweight`, NVFP4 | Skips it with the reason; the layer runs as it was |
 | A subclass of `nn.Linear` with its own `forward` | Skips it: sf cannot tell what it computes from the weight alone |
+
+**gpt-oss and other MXFP4 checkpoints.** The gpt-oss checkpoints keep their experts in MXFP4: `<name>_blocks` (two E2M1 values per byte) and `<name>_scales` (E8M0). Load them into a float model, then convert:
+
+```python
+model = AutoModelForCausalLM.from_config(config)          # float skeleton, no quantization_config
+model.load_state_dict(other_tensors, strict=False)        # everything that is not MXFP4
+sft.load_mxfp4(model, "path/to/checkpoint")               # every *_blocks / *_scales pair, exactly
+model = sft.convert(model, dtype="sf16", accumulate="wide")
+```
+
+`sft.load_mxfp4` gives the values `transformers` gives when it dequantizes, bit for bit (gpt-oss stores experts as (E, out, in) and they are transposed, as `transformers` does). Loading with `transformers` and `Mxfp4Config(dequantize=True)` reaches the same weights. `sft.dequantize_mxfp4(blocks, scales)` and `sft.quantize_mxfp4(w)` are the decoder and encoder (OCP Microscaling v1.0: nearest E2M1, ties to even, saturating at ±6; shared exponent floor(log2 max) − 2). A module packed for GPU kernels (`Mxfp4GptOssExperts`) is skipped with a pointer to these.
 
 **The report covers every weight.** Besides converted and skipped layers, `sft.conversion_report(model)` lists any module that holds a 2-D (or larger) weight no rule converted, so nothing runs in float without a line saying so. Embedding tables are lookups, not matmuls, and are not listed. `widths` gives each converted module's width, and the first line counts them (`widths: sf8 x 96, sf16 x 25`).
 
