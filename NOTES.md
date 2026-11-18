@@ -55,7 +55,12 @@ them. Each one is a single place to change if the team decides differently.
   redos from 285k to 72k (q_proj 172,852 to 79, k_proj 40,155 to 0; the
   scores' 65k stay), perplexity 17.414 to 17.417 (float 17.399).  V's own per-channel quantization exponent still
   spans every key: a row is not yet fully invariant to masked keys appended
-  after it (question to Alosh).
+  after it (question to Alosh).  Measured: 128 keys, the last 28 with V 8x
+  larger; every earlier row changes when they are appended (932 of 932, up
+  to 7e-4), since V's per-channel exponent rises 3 bits for all rows.  K's
+  per-channel exponent in Q·Kᵀ does the same.  Full invariance needs K and V
+  quantized per block of keys (or re-quantized per prefix), not per channel
+  over the whole sequence.
 * Width per layer (`sf.torch._widths`): `cost_table_v0.json` packaged and
   read as given; `layer_sensitivity` (one layer at a time, rest float);
   `choose_widths` (greedy on loss saved per cost, from all-narrowest; widths
