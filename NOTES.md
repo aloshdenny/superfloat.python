@@ -61,7 +61,17 @@ them. Each one is a single place to change if the team decides differently.
   per-channel exponent in Q·Kᵀ does the same.  Full invariance needs K and V
   quantized per block of keys (or re-quantized per prefix), not per channel
   over the whole sequence.
-* Width per layer (`sf.torch._widths`): `cost_table_v0.json` packaged and
+* Configuration chooser (`sf.torch._configs`): the 56 cases of
+  `sf_golden_v4.9.2.json` (`heuristic.configuration`, the ones Alosh meant)
+  reproduced exactly (`tests/test_configs.py`).  Read from the file: cycles =
+  round(MACs x c), c per GEMV / GEMM and plain / packed sf8, sf10, sf12, times
+  1.066 for `tbl2`; bits kept = (bits - h(K) for `l2`) - 4.2.  Inferred, holds
+  on all 56: LM head and grouped conv at sf16 plain; `tbl2` measured from
+  sf12 for `llm` / `any`, every width for `other`; `l2` unmeasured; under 1
+  bit kept is lossy; deterministic needs no redo; speed by cycles then bits,
+  accuracy by bits then cycles, top 3.  On Qwen2.5-0.5B (decode, LLM, speed):
+  sf12 everywhere, LM head sf16, 88% of all-sf16 cycles.
+* Width per layer from measured accuracy (`sf.torch._widths`): `cost_table_v0.json` packaged and
   read as given; `layer_sensitivity` (one layer at a time, rest float);
   `choose_widths` (greedy on loss saved per cost, from all-narrowest; widths
   not measured count as no better than the next narrower measured width, 0
