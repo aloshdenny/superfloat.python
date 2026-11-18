@@ -44,16 +44,9 @@ class FloatMatmuls(TorchDispatchMode):
         self.calls = []
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        if func in FLOAT_MATMULS and _inner_dim(func, args) != 1:
+        if func in FLOAT_MATMULS:
             self.calls.append(str(func))
         return func(*args, **(kwargs or {}))
-
-
-def _inner_dim(func, args):
-    """K of a matmul call.  K = 1 is an outer product, no accumulation: transformers < 5.20 builds RoPE's angles
-    as inv_freq (d/2, 1) @ positions (1, T) with bmm, host-side position bookkeeping like the norms."""
-    a = args[1] if func in (aten.addmm.default, aten.baddbmm.default) else args[0]
-    return a.shape[-1] if isinstance(a, torch.Tensor) and a.dim() else None
 
 
 def float_matmuls(model, *a):
@@ -464,8 +457,12 @@ SMALL = dict(vocab_size=128, hidden_size=32, intermediate_size=64, num_hidden_la
              num_key_value_heads=2, max_position_embeddings=32)
 
 
+HF_MIN = "5.20"     # the Hugging Face integration is tested from here (env/dsl-test.txt); older versions build RoPE's
+                    # angles with a float bmm and some MoE experts with _grouped_mm, which these tests would count
+
+
 def _hf_models():
-    T = pytest.importorskip("transformers")
+    T = pytest.importorskip("transformers", minversion=HF_MIN)
     return {
         "mixtral": lambda: T.MixtralForCausalLM(T.MixtralConfig(**SMALL, num_local_experts=4, num_experts_per_tok=2)),
         "qwen3-moe": lambda: T.Qwen3MoeForCausalLM(T.Qwen3MoeConfig(**SMALL, num_experts=4, num_experts_per_tok=2,
