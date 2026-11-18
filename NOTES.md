@@ -50,7 +50,10 @@ them. Each one is a single place to change if the team decides differently.
   POP's exponent (l2 - h) ignores the bias added after it, so an output
   dominated by its bias saturates and is redone.  Taking the bias into the
   first exponent would remove most of these; left as is (the bias path is
-  Alosh's), raised with him.  V's own per-channel quantization exponent still
+  Alosh's), raised with him.  Measured (one window, `diag_bias.py` outside
+  the repo): first exponent max(l2 - h, pow2_exp(|b| + 2^(l2 - h))) takes
+  redos from 285k to 72k (q_proj 172,852 to 79, k_proj 40,155 to 0; the
+  scores' 65k stay), perplexity 17.414 to 17.417 (float 17.399).  V's own per-channel quantization exponent still
   spans every key: a row is not yet fully invariant to masked keys appended
   after it (question to Alosh).
 * Width per layer (`sf.torch._widths`): `cost_table_v0.json` packaged and
