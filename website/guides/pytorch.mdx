@@ -64,6 +64,25 @@ Each call is reported as `attention.0.scores` and `attention.0.pv`, then `attent
 
 `nn.MultiheadAttention` is converted too: its four projections become SF linears (`{name}.q`, `.k`, `.v`, `.out`), and in wide mode its attention runs on the MX engine (`{name}.scores`, `.pv`). Same call and returns as PyTorch, including `batch_first`, masks, `key_padding_mask`, `need_weights` and separate `kdim` / `vdim`. Layers with `bias_k` / `bias_v` or `add_zero_attn` stay in float, and the report says why.
 
+**Attention written with `torch.matmul`.** Some models do not call SDPA: Hugging Face models loaded with `attn_implementation="eager"`, Gemma 2 (logit soft-capping) and older code. In wide mode `sft.convert` watches every attention module (a class whose name ends in `Attention`): while it runs, each `torch.matmul` between two activations goes to the MX engine at sf16, and the one after a softmax runs as `P V` with V's exponent per channel. A rotary-embedding module inside it stays in float (its angles need float). Statuses: `{module}.scores` and `{module}.pv`.
+
+**MoE models.** Hugging Face keeps every expert of an MoE block in one 3-D parameter (`gate_up_proj`, `down_proj`) and multiplies with a grouped matmul, so there is no `nn.Linear` to swap. `sft.convert` runs those experts itself, one SF linear per expert and projection, with the model's own layout (gate and up concatenated or interleaved, transposed weights, biases, its own gate function). Mixtral, Qwen2-MoE, Qwen3-MoE, DeepSeek-V3 and gpt-oss are covered.
+
+- The experts run at `dtype`; the router (which picks the experts) runs at sf16, like the LM head, and is listed in `kept_sf16`.
+- Statuses per expert: `{experts}.gate_up_proj[3]`, `{experts}.down_proj[3]`.
+- Under `torch.compile`, each expert runs on every token, multiplied by that token's routing weight (0 where it was not routed). This way no shape depends on the routing, and every projection goes to the target. Each token's row is computed on its own, so the bits are the same as the eager loop; it costs `num_experts / top_k` times the host time.
+- The parameters and the state dict keys do not change.
+
+**Weights in other formats.** A weight that is not float is never read as if it were:
+
+| Weight | What `sft.convert` does |
+| --- | --- |
+| FP8 with scales per block or per tensor (`weight_scale_inv`, DeepSeek-V3 style, `transformers`' `FP8Linear`) | Dequantizes it (each block times its scale), then converts it like any float weight |
+| int8, packed 4-bit, GPTQ / AWQ `qweight` | Skips it with the reason; the layer runs as it was |
+| A subclass of `nn.Linear` with its own `forward` | Skips it: sf cannot tell what it computes from the weight alone |
+
+**The report covers every weight.** Besides converted and skipped layers, `sft.conversion_report(model)` lists any module that holds a 2-D (or larger) weight no rule converted, so nothing runs in float without a line saying so. Embedding tables are lookups, not matmuls, and are not listed. `widths` gives each converted module's width, and the first line counts them (`widths: sf8 x 96, sf16 x 25`).
+
 **Speed on the host.** Wide mode emulates the chip bit for bit, which costs time on a CPU. sf compiles a small C accumulator the first time it is used (with `cc`, `gcc` or `clang`), keeps it in a private per-user cache folder (`~/.cache/sf`, or `$SF_CACHE_DIR`), and splits rows across cores; GPT-2 small runs about 30 times faster than the plain NumPy model, with the same bits. With no C compiler sf uses the NumPy model; `SF_FAST_MX=0` forces it.
 
 **Weights are prepared once.** On the first call of each wide layer, sf quantizes its weight per channel and keeps it in a compact form (3 bytes per weight) with its norms; later calls reuse it, so a chat model spends its time on the chip arithmetic, not on preparing weights. Qwen2.5-0.5B: about 1 second per generated token instead of 20, with identical outputs. A weight changed in place (a training step) is prepared again. The cache holds up to `SF_WEIGHT_CACHE_MB` (default 4096); `0` turns it off. To try it: `python examples/chat_wide.py`.

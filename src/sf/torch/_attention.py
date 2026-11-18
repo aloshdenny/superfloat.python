@@ -42,6 +42,11 @@ def attention(query, key, value, attn_mask=None, dropout_p: float = 0.0, is_caus
         raise ValueError("sft.attention: query must have at least 2 dimensions")
     if attn_mask is not None and is_causal:
         raise ValueError("sft.attention: pass attn_mask or is_causal, not both (as PyTorch)")
+    if (not enable_gqa and query.dim() >= 3 and key.dim() >= 3 and key.shape[-3] != query.shape[-3]
+            and 1 not in (key.shape[-3], query.shape[-3])):
+        # PyTorch refuses this too; caught here so the error names the heads, not a numpy broadcast deep inside
+        raise ValueError(f"sft.attention: {query.shape[-3]} query heads and {key.shape[-3]} key heads without "
+                         "enable_gqa=True")
     if enable_gqa and query.dim() >= 3 and key.shape[-3] != query.shape[-3]:
         hq, hk = query.shape[-3], key.shape[-3]
         if hq % hk:

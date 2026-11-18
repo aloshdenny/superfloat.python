@@ -32,7 +32,7 @@ from .kernels import (HardwareAtreides, Kernel, LaunchResult, Limits, SimulatorA
                       arange, autotune, barrier, block_dim, block_idx, cdiv, constexpr, jit, kernel,
                       load, predicate, program_id, shared, store, synchronize, thread_idx)
 
-__version__ = "0.12.1"          # weights prepared once (cache); bias added on the chip in wide mode; every op at sf4-sf16 on Atreides; compiled MX accumulator
+__version__ = "0.13.0"          # every matmul on sf or a reason: MoE experts and routers, eager attention, FP8 block scales; weights prepared once
 
 # sf.sf4 .. sf.sf16
 globals().update({cls.__name__: cls for cls in DTYPES.values()})

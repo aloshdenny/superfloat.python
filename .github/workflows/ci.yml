@@ -27,6 +27,19 @@ jobs:
       - run: python examples/stage_3_tour.py                 # both kernel backends on the simulator
       - run: python tools/exhaustive.py --bits 12          # fast vectorised + Fraction boundary sweep
 
+  models:
+    # The pinned DSL test environment (env/dsl-test.txt): the Hugging Face model tests run here, which the
+    # commit job skips (it does not install transformers).  The chip-simulator bench uses the same pins.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install -e ".[test,hf,xdist]" -c env/dsl-test.txt --extra-index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pytest -q -n auto
+
   nightly:
     # Spec section 10: sf16 exhaustive over all 4.3 billion pairs per binary op.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

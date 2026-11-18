@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from . import _core
 from ._ops import call_linear
+from . import _scopes
 
 
 def _bits_of(dtype) -> int:
@@ -95,12 +96,41 @@ class SFLinear(nn.Module):
         new.train(m.training)
         return new
 
+    @classmethod
+    def from_weight(cls, m: nn.Module, weight: torch.Tensor, name: str, cfg: SFConfig) -> "SFLinear":
+        """An SF linear for ``m`` with ``weight`` read from another format (FP8
+        with block scales, dequantized to float).  The weight is a new frozen
+        parameter; the bias stays ``m``'s own."""
+        new = cls.__new__(cls)
+        nn.Module.__init__(new)
+        new.in_features, new.out_features = weight.shape[1], weight.shape[0]
+        new.sf = cfg
+        new.sf_name = name or f"linear_{id(new):x}"
+        new.weight = nn.Parameter(weight, requires_grad=False)
+        b = getattr(m, "bias", None)
+        new.bias = b if isinstance(b, torch.Tensor) and b.is_floating_point() else None
+        new.train(m.training)
+        return new
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return call_linear(x, self.weight, self.bias, self.sf, self.sf_name)
 
     def extra_repr(self) -> str:
         return (f"in_features={self.in_features}, out_features={self.out_features}, "
                 f"bias={self.bias is not None}, {self.sf.describe()}, name={self.sf_name!r}")
+
+
+def _float_weight(m: nn.Module, full: str, report) -> bool:
+    """False (and the reason in the report) when ``m``'s weight is not float."""
+    _, _, problem = _scopes.read_weight(m)
+    if problem is None and getattr(m, "weight", None) is not None and not m.weight.is_floating_point():
+        problem = f"weights stored as {m.weight.dtype}"
+    if problem is None and getattr(m, "weight", None) is not None and m.weight.dtype in _scopes._FP8:
+        problem = f"{m.weight.dtype} weights are read only for linear layers; runs as it was"
+    if problem is not None:
+        report.skipped.append((full, type(m).__name__, problem))
+        return False
+    return True
 
 
 def _pair(v):
@@ -192,14 +222,24 @@ class ConversionReport:
     shared: list = field(default_factory=list)        # (alias name, converted name): same module
     kept_sf16: list = field(default_factory=list)     # (name, why): converted at sf16, not the narrower dtype
     attention: str = "float (not converted)"          # where F.scaled_dot_product_attention runs
+    widths: dict = field(default_factory=dict)        # name -> bits, for every converted module
+    eager_attention: list = field(default_factory=list)  # attention modules whose torch.matmul calls run on MX
 
     def __repr__(self) -> str:
         lines = [f"ConversionReport: {len(self.converted)} converted, {len(self.skipped)} skipped"
                  + (f", {len(self.shared)} shared alias(es)" if self.shared else "")
                  + (f", {len(self.kept_sf16)} kept at sf16" if self.kept_sf16 else "")]
+        if self.widths:
+            per = {}
+            for b in self.widths.values():
+                per[b] = per.get(b, 0) + 1
+            lines += ["  widths: " + ", ".join(f"sf{b} x {k}" for b, k in sorted(per.items()))]
         lines += [f"  + {n} ({k})" for n, k in self.converted]
         lines += [f"  ^ {n} kept at sf16: {w}" for n, w in self.kept_sf16]
         lines += [f"  attention: {self.attention}"]
+        if self.eager_attention:
+            lines += [f"  attention written with torch.matmul (no SDPA): caught on the MX engine at sf16 in "
+                      f"{len(self.eager_attention)} attention module(s), when they use it"]
         lines += [f"  = {a} is {n} (shared module, converted once)" for a, n in self.shared]
         lines += [f"  - {n} ({k}): {r}" for n, k, r in self.skipped]
         return "\n".join(lines)
@@ -265,9 +305,22 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
     ``accumulate="wide"`` (``sft.attention``), named ``attention.0``,
     ``attention.1``, ... per forward; ``False`` leaves them in float.
 
+    MoE models: the experts Hugging Face keeps in one 3-D parameter run on
+    the MX engine (each expert's ``F.linear`` is taken while the experts
+    module runs), at ``dtype``; the router at sf16.  Attention written with
+    ``torch.matmul`` instead of SDPA (``attn_implementation="eager"``) is
+    caught the same way in wide mode.  See ``sf.torch._scopes``.
+
+    Weights in another format: FP8 with block scales (``weight_scale_inv``)
+    is dequantized, then converted; any other non-float weight (int8,
+    packed 4-bit, GPTQ / AWQ) is skipped with the reason, and so is a
+    subclass of ``nn.Linear`` with its own ``forward``, so those layers run
+    as they were instead of giving a wrong answer.
+
     Other modules (activations, normalisation, pooling, softmax, ...) stay as
     they are and run in float on the host; ``sft.conversion_report(model)``
-    lists what was converted and what was skipped, and why.
+    lists what was converted and what was skipped, and why, including any
+    module that holds weights no rule converted.
     """
     cfg = SFConfig(_bits_of(dtype), scale, headroom, accumulate, shift, calibration)
     if attention not in ("auto", False, None):
@@ -294,6 +347,11 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
                 raise ValueError(f"keep_sf16: no module named {', '.join(map(repr, missing))}")
 
     def cfg_for(child, full):
+        c = _cfg_for(child, full)
+        report.widths[full] = c.bits
+        return c
+
+    def _cfg_for(child, full):
         if cfg.bits >= 16:
             return cfg
         why = keep_ids.get(id(child)) or ("named in keep_sf16" if full in keep_names else None)
@@ -301,6 +359,8 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
             return cfg
         report.kept_sf16.append((full, why))
         return cfg16
+
+    wide_attention = attention == "auto" and cfg.accumulate == "wide"
     done: dict[int, tuple[str, nn.Module | None]] = {}     # id(source) -> (name, replacement)
     seen: set[int] = set()                                  # containers already visited
 
@@ -317,11 +377,25 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
         if isinstance(child, (SFLinear, SFConv2d, SFHFConv1D)):
             report.converted.append((full, type(child).__name__ + " (already SF)"))
         elif isinstance(child, nn.Linear):
-            rep = SFLinear.from_float(child, full, cfg_for(child, full))
-            report.converted.append((full, "Linear"))
-        elif is_hf_conv1d(child):
+            dq, note, problem = _scopes.read_weight(child)
+            if problem is None and dq is None and _scopes.custom_forward(child, nn.Linear):
+                problem = (f"a subclass of nn.Linear with its own forward ({type(child).__name__}); sf cannot "
+                           f"tell what it computes from the weight, so it runs as it was")
+            if problem is not None:
+                report.skipped.append((full, type(child).__name__, problem))
+            elif dq is not None:
+                rep = SFLinear.from_weight(child, dq, full, cfg_for(child, full))
+                report.converted.append((full, f"Linear ({note})"))
+            else:
+                rep = SFLinear.from_float(child, full, cfg_for(child, full))
+                report.converted.append((full, "Linear"))
+        elif is_hf_conv1d(child) and _float_weight(child, full, report):
             rep = SFHFConv1D(child, full, cfg_for(child, full))
             report.converted.append((full, "Conv1D (Hugging Face)"))
+        elif is_hf_conv1d(child):
+            pass
+        elif isinstance(child, nn.Conv2d) and not _float_weight(child, full, report):
+            pass
         elif isinstance(child, nn.Conv2d):
             ok, why = convertible_conv(child)
             if ok:
@@ -343,9 +417,48 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
             report.skipped.append((full, type(child).__name__, "no SF version yet; runs in float"))
         else:
             done[key] = (full, None)
+            scoped(child, full)
             return None, False                              # a container: recurse into it
         done[key] = (full, rep)
         return rep, True
+
+    def scoped(child: nn.Module, full: str):
+        """Modules that are not swapped but whose matmuls still run on sf."""
+        q = _scopes.quantized_storage(child)
+        if q is not None:
+            report.skipped.append((full, type(child).__name__, q))
+            return
+        ex = _scopes.experts_params(child)
+        if ex:
+            c = cfg_for(child, full)
+            n = getattr(child, "num_experts", None) or child._parameters[ex[0]].shape[0]
+            if _scopes.hf_experts(child):
+                _scopes.install_experts(child, full, c)
+                how = "each expert's projections as SF linears"
+            else:                                           # unknown layout: take its own F.linear calls
+                _scopes.add_scope(child, "experts", full, c)
+                _scopes.eager_experts(child)
+                how = "its F.linear calls taken while it runs"
+            report.converted.append((full, f"MoE experts ({n} experts: {', '.join(ex)}; {how})"))
+            return
+        if _scopes.is_router(child):
+            c = cfg_for(child, full) if cfg.bits >= 16 else cfg16
+            if cfg.bits < 16:
+                report.kept_sf16.append((full, "MoE router (picks the experts)"))
+                report.widths[full] = 16
+            _scopes.add_scope(child, "router", full, c)
+            report.converted.append((full, "MoE router"))
+            return
+        if wide_attention and _scopes.is_attention_scope(child):
+            _scopes.add_scope(child, "attention", full, cfg16)
+            report.eager_attention.append(full)
+        elif _scopes.is_rotary(child):
+            _scopes.add_suspend(child)
+        left = _scopes.unconverted_weights(child)
+        if left:
+            report.skipped.append((full, type(child).__name__,
+                                   f"holds weights sf does not convert ({', '.join(left)}); its own maths "
+                                   f"runs in float"))
 
     def visit(parent: nn.Module, prefix: str):
         if id(parent) in seen:
@@ -358,6 +471,8 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
             if child is None:
                 continue
             full = f"{prefix}.{child_name}" if prefix else child_name
+            if cfg.bits < 16 and _scopes.is_linear_router(parent, child_name, child) and keep_sf16 == "auto":
+                keep_ids.setdefault(id(child), "MoE router (picks the experts)")
             rep, leaf = replacement(child, full)
             if rep is not None:
                 setattr(parent, child_name, rep)
@@ -369,7 +484,7 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
         model = rep
     elif not leaf:
         visit(model, "")
-    if attention == "auto" and cfg.accumulate == "wide":
+    if wide_attention:
         from ._attention import install
         install(model)
         report.attention = "F.scaled_dot_product_attention on the MX engine at sf16 (attention.0, attention.1, ...)"

@@ -8,18 +8,23 @@ description: "What is implemented, what is verified, and what still needs the ha
 | Stage | What | Verified against |
 |---|---|---|
 | 1.0 Scalars | types sf4 to sf16, casts, `+ - * /`, `fma`, `sqrt`, comparisons, the error policy | exact-fraction oracle; every input pair for sf4 to sf10 on each commit, every sf16 pair nightly |
-| 1.1 Arrays | NumPy-style arrays, broadcasting, reductions, `dot`, `@`, elementary functions, the device path with pre-flight and status | the scalar rules element by element; host and mock device bit for bit |
-| 2 PyTorch | `quantize`, `convert`, `autocast`, `torch.compile(backend="superfloat")` | recomputed through the array API; compiled equals emulated bit for bit |
+| 1.1 Arrays | NumPy-style arrays, broadcasting, reductions, `dot`, `@`, elementary functions, the device path with pre-flight and status; wide accumulation (`accumulate="wide"`, the MX engine, shift arrays) | the scalar rules element by element; host and mock device bit for bit; the v4.9.2 golden file and the RTL vectors |
+| 2 PyTorch | `quantize`, `convert`, `autocast`, `torch.compile(backend="superfloat")`; wide mode with the shift rule, the bias added on the chip, attention on MX (SDPA and `torch.matmul`), MoE experts and routers, sf8 layers with the LM head and routers at sf16, FP8 block-scaled weights read with their scales, every unconverted weight reported | recomputed through the array API; compiled equals emulated bit for bit; golden files `spec/golden/wide/`; GPT-2 and Qwen2.5-0.5B perplexity |
 | 3 Kernels | thread and block kernels, the simulator with interpreter and C backends, autotune | the array built-ins; both backends identical in bits and event counts |
 
-Each stage went through an independent review and every finding is fixed with a regression test. 732 tests run on every commit.
+Each stage went through an independent review and every finding is fixed with a regression test. 1,698 tests run on every commit.
+
+**Model coverage** (Stage 2, wide mode): GPT-2, Llama, Qwen2, Gemma 2, Mixtral, Qwen2-MoE, Qwen3-MoE, DeepSeek-V3, gpt-oss, BERT, T5 and ViT run every matmul on sf. Measured on the host model: GPT-2 perplexity 60.70 in float and 60.71 at sf16; Qwen2.5-0.5B 22.415 and 22.417.
 
 ## Not yet done
 
 <Warning>
-**Silicon.** Everything above is proved on the host, a mock device and a simulator. Running the same cases on the chip needs the compiler, a driver, and the hardware team's answers to a few open questions (division and square-root fault values, accumulation order and width, flag readback). The hooks are in place; see [plugging in hardware](/reference/hardware).
+**Silicon.** Everything above is proved on the host, a mock device and a simulator. Running the same cases on the chip needs the driver, the compiler and the board. The hooks are in place; see [plugging in hardware](/reference/hardware).
 </Warning>
 
+- **Width per layer** (sf8 where it is safe, sf16 where it is not): today a model is one width, with the LM head and MoE routers kept at sf16. sf8 costs about 10% perplexity on Qwen2.5-0.5B.
+- **Ops outside the matmuls** (softmax, LayerNorm, RMSNorm, GELU, SiLU) run in float on the host: the chip has no exp, divide or square root.
+- **State-space models**: Mamba's depthwise Conv1d and selective scan stay in float (reported).
 - **Stage 1.2 diagnostics** (`sf.explain`): optional in the plan, deferred.
 - **Stage 2.3** (Atreides as a PyTorch device): deferred until the real transfer cost exists.
-- **Documentation for Stages 2 and 3** is being rewritten in this format; the current material is under Preview.
+- **Stage 3 at narrow widths and with wide mode**: user kernels run sf16 only, and `dot_wide` with a shift per output is not in the kernel language yet.

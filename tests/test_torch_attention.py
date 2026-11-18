@@ -49,6 +49,8 @@ def test_masks_and_gqa():
     q, k, v = _qkv(heads_kv=2)
     assert (sft.attention(q, k, v, enable_gqa=True)
             - F.scaled_dot_product_attention(q, k, v, enable_gqa=True)).abs().max() < 1e-3
+    with pytest.raises(ValueError, match="key heads without enable_gqa"):
+        sft.attention(q, k, v)
     with pytest.raises(ValueError, match="not both"):
         sft.attention(q, k, v, attn_mask=m, is_causal=True)
 
