@@ -3,6 +3,30 @@
 Decisions the spec left open or did not state, and how this code resolves
 them. Each one is a single place to change if the team decides differently.
 
+## Weights prepared once (0.12.1)
+
+* Generating text was about 20 s per token on Qwen2.5-0.5B (2 cores): every
+  call re-read the float weight, checked it for NaN, quantized it per channel,
+  took its norms and laid out its codes.  The arithmetic itself was a small
+  share.
+* `_core.PreparedWeight` / `prepare_weight`: per-channel exponents, the
+  dequantized column norms (for l2), the largest column norm (for the guard),
+  the weight-underflow count and the codes as the compiled loop reads them,
+  uint16 magnitudes and int8 signs (3 bytes per weight).  Built in the same
+  blocks of rows as `_wide_linear_blocks`.  `_heuristic.plan(nb=...)` takes
+  the norms; `_linalg.matmul_wide_acc_prepared` the codes.  The C loop now
+  reads B as uint16 / int8 for every call.
+* `sf.torch._ops.weight_cache`: LRU, keyed by storage, offset, shape,
+  strides, version counter, dtype, width and MX version, with a weak
+  reference to the tensor that owns the memory (a new tensor at a freed
+  address is a miss).  `SF_WEIGHT_CACHE_MB` (default 4096, 0 = off).  Host
+  only; device runners and non-finite weights take the old path.
+* Same bits: `tests/test_weight_cache.py` (31), and Qwen2.5-0.5B's logits
+  over all 151,936 tokens identical with the cache on and off.
+* Qwen2.5-0.5B decode: 20.5 s to 1.1 s per token; 18 s once to prepare;
+  1.4 GB of cache.  `examples/chat_wide.py`: chat with the model, optionally
+  next to float (`--compare`).
+
 ## Representation
 
 * Host codes are **signed Python ints** (`k` in `[-M, M]`), not sign-magnitude

@@ -65,17 +65,21 @@ class HostRunner:
         codes, ev = vec.add(fmt, ka, kb)
         return codes, {"saturated": ev["overflow"], "exact": True}
 
-    def matmul_wide(self, fmt, ka, kb, shift, shift_redo, mx, bias_at=None):
+    def matmul_wide(self, fmt, ka, kb, shift, shift_redo, mx, bias_at=None, b_prep=None):
         """POP at ``shift``; where an output's code reached +-max with a
         nonzero total, POP again at ``shift_redo`` (None: no redo).  The
         accumulation runs once, which gives the same bits as the chip
-        relaunching the tile.
+        relaunching the tile.  ``b_prep``: ``kb`` already prepared for the
+        compiled loop (a cached weight); ``kb`` is then not read.
 
         ``bias_at(used)``: (codes, clamped) of the bias aligned to each
         output's exponent for the shifts ``used``; the codes are added to the POP codes with the
         saturating sfN add (ACT on the chip), and an output whose POP or add
         reached +-max is redone too."""
-        acc, clipped, F = _linalg.matmul_wide_acc(fmt, ka, kb, mx)
+        if b_prep is not None:
+            acc, clipped, F = _linalg.matmul_wide_acc_prepared(fmt, ka, b_prep, mx)
+        else:
+            acc, clipped, F = _linalg.matmul_wide_acc(fmt, ka, kb, mx)
         q, over, under = _linalg.mx_pop(fmt, acc, shift, F)
         redo = np.zeros(q.shape, bool)
         used = np.broadcast_to(shift, q.shape)
@@ -465,15 +469,21 @@ def _wide(fmt, x_rows, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo=
     return _wide_cols(fmt, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo, raised, bias)
 
 
-def _wide_cols(fmt, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo=None, raised=0, bias=None):
-    """The wide step after the guard: plan, launch, bias, redo, dequantize."""
+def _wide_cols(fmt, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo=None, raised=0, bias=None,
+               prep=None):
+    """The wide step after the guard: plan, launch, bias, redo, dequantize.
+    ``prep``: a ``PreparedWeight`` block standing in for ``qb`` (host only)."""
     base = ea[..., :, None] + eb[..., None, :]
     if shift is None:
-        sh, sh_redo, h = _heuristic.plan(fmt, qa, ea, qb, eb, eo, None if bias is None else np.abs(bias))
+        sh, sh_redo, h = _heuristic.plan(fmt, qa, ea, qb, eb, eo, None if bias is None else np.abs(bias),
+                                         nb=None if prep is None else prep.nb)
     else:                                          # an explicit shift overrides the rule
         sh, sh_redo, h = _linalg.check_shift(shift, allow_array=False), None, None
     bias_at = None if bias is None else (lambda used: _bias_codes(fmt, bias, base - used))
-    q, ev = runner.matmul_wide(fmt, qa, qb, sh, sh_redo, mx, bias_at)
+    if prep is None:
+        q, ev = runner.matmul_wide(fmt, qa, qb, sh, sh_redo, mx, bias_at)
+    else:
+        q, ev = runner.matmul_wide(fmt, qa, None, sh, sh_redo, mx, bias_at, b_prep=(prep.m16, prep.s8))
     used = np.broadcast_to(ev["used"], q.shape)
     fe = base - used                                         # each output's exponent
     with np.errstate(over="ignore"):
@@ -488,8 +498,8 @@ def _wide_cols(fmt, qa, ea, qb, eb, in_under, w_under, shift, runner, mx, eo=Non
         flushed=_count(ev["flushed"]), acc_clipped=_count(ev["acc_clipped"]), guard_raised=raised)
 
 
-def wide_linear(x: np.ndarray, w: np.ndarray, b: np.ndarray | None, bits: int,
-                shift: int | None = None, runner=None, mx=None) -> CoreResult:
+def wide_linear(x: np.ndarray, w: np.ndarray | None, b: np.ndarray | None, bits: int,
+                shift: int | None = None, runner=None, mx=None, prepared=None) -> CoreResult:
     """``y = x W^T + b`` on the MX engine with the wide-mode rule.
 
     x: (R, K), w: (N, K), b: (N,) or None, all float64.  Activations get one
@@ -501,9 +511,14 @@ def wide_linear(x: np.ndarray, w: np.ndarray, b: np.ndarray | None, bits: int,
     with the saturating sfN add (one ACT per output), so the whole layer is
     SF arithmetic; an output whose add reaches +-max is redone at an
     exponent that bounds |x||w| + |b|.
+
+    ``prepared``: the weight prepared once by ``prepare_weight`` (then ``w``
+    is not read): what a model's forward reuses, call after call.
     """
     fmt = _check(bits)
     runner = runner or HostRunner()
+    if prepared is not None:
+        return _wide_linear_prepared(fmt, x, prepared, b, shift, runner, mx)
     x = sanitize(x, fmt, "linear input")
     w = sanitize(w, fmt, "linear weight")
     qa, ea, in_under = _heuristic.quantize_pow2(fmt, x, -1)
@@ -573,3 +588,98 @@ def _wide_linear_blocks(fmt, x, qa, ea, in_under, w, rows, shift, runner, mx, bi
                 outputs=sum(i["outputs"] for i in infos), exact=all(i["exact"] for i in infos),
                 shift_min=min(i["shift_min"] for i in infos), shift_max=max(i["shift_max"] for i in infos))
     return np.concatenate(ys, axis=1), info
+
+
+# --- weights prepared once ----------------------------------------------------------------------
+
+class PreparedWeight:
+    """A linear layer's weight, prepared once for the host's wide path.
+
+    Holds what every call needs and nothing it can recompute cheaply: each
+    output channel's exponent ``ew``, the dequantized column norms ``nb``
+    (for the rule's l2), the largest column norm ``bmax`` (for the guard),
+    the weight-underflow count, and the codes as the compiled loop reads
+    them (``m16`` uint16 magnitudes, ``s8`` int8 signs, (N, K)): 3 bytes per
+    weight.  Built a block of rows at a time, like ``_wide_linear_blocks``,
+    so the bits are those of the unprepared path."""
+
+    def __init__(self, ew, nb, bmax, w_under, m16, s8, bits):
+        self.ew, self.nb, self.bmax, self.w_under = ew, nb, bmax, w_under
+        self.m16, self.s8, self.bits = m16, s8, bits
+        self.N, self.K = m16.shape
+
+    @property
+    def nbytes(self) -> int:
+        return self.m16.nbytes + self.s8.nbytes + self.ew.nbytes + self.nb.nbytes
+
+    def rows(self, s):
+        return PreparedWeight(self.ew[s], self.nb[s], self.bmax, self.w_under, self.m16[s], self.s8[s], self.bits)
+
+
+def prepare_weight(w: np.ndarray, bits: int):
+    """``PreparedWeight`` for ``w`` (N, K), or None when the host cannot use
+    one (no compiled loop) or the weight holds NaN or inf (its events must
+    fire on every call, so it takes the unprepared path)."""
+    from .. import _fastmx
+    fmt = _check(bits)
+    if not (_linalg.FAST_MX and _fastmx.available()):
+        return None
+    w = np.asarray(w, dtype=np.float64)
+    if not np.isfinite(w).all():
+        return None
+    N, K = w.shape
+    rows = max(1, WIDE_BLOCK // max(1, K))
+    blk = _linalg.mx_block(fmt)
+    P = fmt.bits - 1
+    m16 = np.empty((N, K), dtype=np.uint16)
+    s8 = np.empty((N, K), dtype=np.int8)
+    ew = np.empty(N, dtype=np.int64)
+    nb = np.empty(N, dtype=np.float64)
+    bmax, w_under = 0.0, 0
+    for i in range(0, N, rows):
+        s = slice(i, min(N, i + rows))
+        qw, e, wu = _heuristic.quantize_pow2(fmt, w[s], -1)
+        qb = qw.T
+        bm, bs = _fastmx.prep_b(_linalg._mx_mags(fmt, qb, blk), qb < 0)
+        m16[s], s8[s], ew[s] = bm, bs, e
+        nb[s] = _heuristic._norms(fmt, qb, -2) * np.ldexp(1.0, (e - P).astype(np.int64))
+        bmax = max(bmax, float(_heuristic.col_norm_max(fmt, qb)[0]))
+        w_under += wu
+    return PreparedWeight(ew, nb, bmax, w_under, m16, s8, bits)
+
+
+def _wide_linear_prepared(fmt, x, pw, b, shift, runner, mx):
+    """``wide_linear`` with a ``PreparedWeight``: the same steps and bits, in
+    the same blocks of rows, without touching the float weight."""
+    if pw.bits != fmt.bits:
+        raise ValueError(f"prepared for sf{pw.bits}, called at {fmt.name}")
+    x = sanitize(x, fmt, "linear input")
+    bias = None if b is None else sanitize(b, fmt, "linear bias")
+    qa, ea, in_under = _heuristic.quantize_pow2(fmt, x, -1)
+    qa, ea, raised = _heuristic.acc_guard(fmt, x, qa, ea, None, mx, bmax=np.array([pw.bmax]))
+    rows = max(1, WIDE_BLOCK // max(1, pw.K))
+    ys, infos = [], []
+    for i in range(0, pw.N, rows):
+        s = slice(i, min(pw.N, i + rows))
+        part = pw.rows(s)
+        yb, ib = _wide_cols(fmt, qa, ea, None, part.ew, in_under, pw.w_under, shift, runner, mx, None, raised,
+                            None if bias is None else bias[s], prep=part)
+        ys.append(yb)
+        infos.append(ib)
+    if len(infos) == 1:
+        return CoreResult(y=ys[0], **infos[0])
+    return CoreResult(y=np.concatenate(ys, axis=1), **_merge_infos(infos))
+
+
+def _merge_infos(infos):
+    def total(key):
+        vals = [i[key] for i in infos]
+        return None if any(v is None for v in vals) else sum(vals)
+
+    info = dict(infos[0])
+    info.update(saturated=total("saturated"), underflow=total("underflow"), flushed=total("flushed"),
+                acc_clipped=total("acc_clipped"), redone=sum(i["redone"] for i in infos),
+                bias_saturated=sum(i["bias_saturated"] for i in infos),
+                outputs=sum(i["outputs"] for i in infos), exact=all(i["exact"] for i in infos),
+                shift_min=min(i["shift_min"] for i in infos), shift_max=max(i["shift_max"] for i in infos))
+    return info
