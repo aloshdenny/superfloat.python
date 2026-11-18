@@ -12,7 +12,7 @@ description: "What is implemented, what is verified, and what still needs the ha
 | 2 PyTorch | `quantize`, `convert`, `autocast`, `torch.compile(backend="superfloat")`; wide mode with the shift rule, the bias added on the chip, attention on MX (SDPA and `torch.matmul`), MoE experts and routers, sf8 layers with the LM head and routers at sf16, FP8 block-scaled weights read with their scales, every unconverted weight reported | recomputed through the array API; compiled equals emulated bit for bit; golden files `spec/golden/wide/`; GPT-2 and Qwen2.5-0.5B perplexity |
 | 3 Kernels | thread and block kernels, the simulator with interpreter and C backends, autotune | the array built-ins; both backends identical in bits and event counts |
 
-Each stage went through an independent review and every finding is fixed with a regression test. 1,698 tests run on every commit.
+Each stage went through an independent review and every finding is fixed with a regression test. 1,785 tests run on every commit.
 
 **Model coverage** (Stage 2, wide mode): GPT-2, Llama, Qwen2, Gemma 2, Mixtral, Qwen2-MoE, Qwen3-MoE, DeepSeek-V3, gpt-oss, BERT, T5 and ViT run every matmul on sf. Measured on the host model: GPT-2 perplexity 60.70 in float and 60.71 at sf16; Qwen2.5-0.5B 22.415 and 22.417.
 
