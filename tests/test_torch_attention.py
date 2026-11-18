@@ -55,17 +55,18 @@ def test_masks_and_gqa():
         sft.attention(q, k, v, attn_mask=m, is_causal=True)
 
 
-def test_pv_output_exponent_is_v_per_channel():
-    """Rows of P sum to 1, so the output's exponent per channel is V's own:
-    shift = the exponent of P's row, and nothing saturates."""
+def test_pv_output_exponent_bounds_the_product():
+    """The output exponent bounds (sum of the row's P) x max |V| over the row's keys: nothing saturates or is
+    redone.  V is quantized per key (prefix invariance, DSL 0.16), so a channel far below the key's largest
+    loses bits: the error is within a step of the largest |V| the row sees."""
     rng = np.random.default_rng(0)
     s = rng.normal(size=(3, 50))
     p = np.exp(s) / np.exp(s).sum(-1, keepdims=True)
     v = rng.normal(size=(50, 6)) * np.array([1e-3, 0.1, 1, 10, 100, 1000])   # very different channels
     r = _core.wide_matmul(p, v, 16, out_rule="max_b")
     assert r.saturated == 0 and r.redone == 0 and r.h is None
-    # the guarantee: error within a step of each channel's largest |V| (2^-15 of it, plus V's own rounding)
-    assert (np.abs(r.y - p @ v) / np.abs(v).max(axis=0)).max() < 2.0 ** -14
+    # the guarantee: error within a step of the largest |V| (2^-15 of it, plus V's own rounding)
+    assert (np.abs(r.y - p @ v) / np.abs(v).max()).max() < 2.0 ** -14
     with pytest.raises(ValueError, match="out_rule"):
         _core.wide_matmul(p, v, 16, out_rule="max")
 
@@ -271,3 +272,41 @@ def test_pv_is_never_redone():
     assert st.redone == 0 and (st.saturated or 0) == 0
     ref = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
     assert (out - ref).abs().max() < 2e-3
+
+
+@pytest.mark.parametrize("softmax", ["float", "integer"])
+def test_a_causal_row_does_not_change_when_keys_are_appended(softmax):
+    """Prefix invariance (Alosh, 2026-11-18): the first n rows give the same bits with or without keys appended
+    after them, even when the appended keys have K and V 8x larger.  Per-channel V (DSL <= 0.15) changed every
+    earlier row here, since the appended keys raised V's exponent for all of them."""
+    g = torch.Generator().manual_seed(7)
+    H, S, n, E = 2, 128, 100, 16
+    q, k, v = (torch.randn(1, H, S, E, generator=g) for _ in range(3))
+    k[..., n:, :] *= 8
+    v[..., n:, :] *= 8
+    full = sft.attention(q, k, v, is_causal=True, softmax=softmax)
+    short = sft.attention(q[..., :n, :], k[..., :n, :], v[..., :n, :], is_causal=True, softmax=softmax)
+    assert torch.equal(full[..., :n, :], short)
+
+
+def test_per_channel_v_was_not_prefix_invariant(monkeypatch):
+    """The same check against DSL 0.15's per-channel V: it fails, so the test above has teeth."""
+    monkeypatch.setattr(_core, "PV_PER_TOKEN", False)
+    g = torch.Generator().manual_seed(7)
+    H, S, n, E = 2, 128, 100, 16
+    q, k, v = (torch.randn(1, H, S, E, generator=g) for _ in range(3))
+    v[..., n:, :] *= 8
+    full = sft.attention(q, k, v, is_causal=True)
+    short = sft.attention(q[..., :n, :], k[..., :n, :], v[..., :n, :], is_causal=True)
+    assert not torch.equal(full[..., :n, :], short)
+
+
+def test_decode_with_a_growing_cache_gives_prefill_bits():
+    """One query at a time against the keys so far (a KV cache) gives the bits of the causal prefill."""
+    g = torch.Generator().manual_seed(8)
+    q, k, v = (torch.randn(1, 2, 24, 16, generator=g) for _ in range(3))
+    v[..., 12:, 3] *= 30                                                   # an outlier channel arriving late
+    pre = sft.attention(q, k, v, is_causal=True)
+    for t in range(24):
+        step = sft.attention(q[..., t:t + 1, :], k[..., :t + 1, :], v[..., :t + 1, :])
+        assert torch.equal(step, pre[..., t:t + 1, :]), t

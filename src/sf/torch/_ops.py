@@ -371,8 +371,8 @@ def matmul_wide_pv_impl(p, v, bits, name, runner):
 
 @torch.library.custom_op("sf::matmul_wide_pv", mutates_args=())
 def matmul_wide_pv(p: torch.Tensor, v: torch.Tensor, bits: int, name: str) -> torch.Tensor:
-    """Attention's P @ V on the MX engine: rows of P are probabilities, so
-    each output channel's exponent is V's, pow2_exp(max |V[:, c]|)."""
+    """Attention's P @ V on the MX engine, prefix-invariant: V per key, every
+    exponent of a row from the keys it can see (``_core._wide_pv``)."""
     return matmul_wide_pv_impl(p, v, bits, name, _core.HostRunner())
 
 
