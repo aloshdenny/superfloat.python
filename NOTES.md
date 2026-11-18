@@ -61,7 +61,11 @@ them. Each one is a single place to change if the team decides differently.
   top three layers lose only 1.1-1.3x less at sf10 than at sf8);
   `fit_widths` measures the plan on the whole model and corrects the budget,
   since the sum of single-layer losses is off by up to 1.5x on Qwen2.5-0.5B.
-  `convert(widths={name: dtype})` takes the plan.  Cycles and bus words use
+  `convert(widths={name: dtype})` takes the plan.  Qwen2.5-0.5B, +2% budget,
+  sf8 / sf16, energy at 130 nm, LM head free: round 1 predicted +1.99%,
+  measured +1.78% (65% of MACs at sf8, 64% of all-sf16 energy); round 2 at
+  +2.25% predicted +2.18%, measured +2.60% (rejected).  All sf8 with the LM
+  head at sf16: +10.4% at 60%.  Cycles and bus words use
   the better of plain and weights-packed (sf16 packed is slower than plain).
 
 ## dot_wide with a shift per output in kernels (0.14.0, spec 1.8.0)
