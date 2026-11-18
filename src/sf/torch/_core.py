@@ -539,27 +539,66 @@ def wide_matmul(a_val: np.ndarray, b_val: np.ndarray, bits: int, shift: int | No
     """(..., M, K) @ (..., K, N) of two activations on the MX engine: one
     exponent per row of ``a`` and per column of ``b``, shifts from the rule.
 
-    ``out_rule="max_b"`` (attention's P @ V, rows of ``a`` nonnegative): the
-    output exponent of row t, column c bounds the product exactly from the
-    quantized operands, (sum_k P[t, k]) * max |V[k, c]| over only the k the
-    row can see (``a[t, k] != 0``), with the margin that keeps POP's rounding
-    below the largest code.  Masked keys never change a row's result, and no
-    output can saturate, so P @ V is never redone."""
+    ``out_rule="max_b"`` (attention's P @ V, rows of ``a`` nonnegative): see
+    ``_wide_pv``.  Every exponent of row t comes from the keys row t can see
+    (``a[t, k] != 0``), so keys appended after it never change its result,
+    and no output can saturate, so P @ V is never redone."""
     fmt = _check(bits)
     runner = runner or HostRunner()
     a_val = sanitize(a_val, fmt, "matmul left operand")
     b_val = sanitize(b_val, fmt, "matmul right operand")
-    qa, ea, ua = _heuristic.quantize_pow2(fmt, a_val, -1)
-    qb, eb, ub = _heuristic.quantize_pow2(fmt, b_val, -2)
     if out_rule not in ("heuristic", "max_b"):
         raise ValueError(f"out_rule must be 'heuristic' or 'max_b', got {out_rule!r}")
-    eo = None
     if out_rule == "max_b":
-        P = fmt.bits - 1
-        pd = np.abs(qa) * np.ldexp(1.0, (ea - P).astype(np.int64))[..., None]     # P as the engine sees it
-        vd = np.abs(qb) * np.ldexp(1.0, (eb - P).astype(np.int64))[..., None, :]
-        eo = visible_max_exp(a_val, vd, pd.sum(axis=-1) * (2.0 ** P / (2.0 ** P - 1)))
-    y, info = _wide(fmt, a_val, qa, ea, qb, eb, ua + ub, 0, shift, runner, mx, eo)
+        return _wide_pv(fmt, a_val, b_val, shift, runner, mx)
+    qa, ea, ua = _heuristic.quantize_pow2(fmt, a_val, -1)
+    qb, eb, ub = _heuristic.quantize_pow2(fmt, b_val, -2)
+    y, info = _wide(fmt, a_val, qa, ea, qb, eb, ua + ub, 0, shift, runner, mx)
+    return CoreResult(y=y, **info)
+
+
+PV_PER_TOKEN = True     # V quantized per key (Alosh, 2026-11-18); False: per channel over every key (DSL <= 0.15.0)
+
+
+def _wide_pv(fmt, p, v, shift, runner, mx):
+    """Attention's P @ V (``p`` (..., M, S) nonnegative, 0 on masked keys; ``v`` (..., S, N)).
+
+    Prefix invariance (Alosh, 2026-11-18): row t's result depends only on the keys it can see, so appending
+    keys (a KV cache growing, more of a sequence in the batch) never changes it.
+      * V is quantized per key, one exponent e_k per row of V: written once, like a KV cache entry.
+      * Each row folds its keys' exponents into P, exactly (a power of two): P'[t, k] = P[t, k] 2^(e_k - E_t),
+        with E_t = max e_k over the keys row t sees.  The MX engine then runs one P' @ V matmul at one scale
+        per row, and E_t moves into the row's exponent.
+      * The output exponent bounds the product exactly from the quantized operands,
+        (sum_k |P'[t, k]|) * max |V[k, c]| over the visible k, with the margin that keeps POP's rounding
+        below the largest code: no P @ V output can saturate, none is redone.
+      * The accumulator guard bounds each row against the column norms of its visible keys only.
+    ``PV_PER_TOKEN = False`` keeps the per-channel V of DSL 0.15.0 (exponents over every key, not invariant)."""
+    P = fmt.bits - 1
+    vis = p != 0
+    lead = np.broadcast_shapes(p.shape[:-2], v.shape[:-2])
+    visb = np.broadcast_to(vis, lead + p.shape[-2:])
+    if PV_PER_TOKEN:
+        qv, ek, ub = _heuristic.quantize_pow2(fmt, v, -1)                       # (..., S, N), e per key (..., S)
+        ekb = np.broadcast_to(ek[..., None, :], lead + p.shape[-2:])           # (..., M, S)
+        E = np.where(visb, ekb, np.iinfo(np.int64).min).max(axis=-1) if visb.shape[-1] else \
+            np.zeros(visb.shape[:-1], np.int64)
+        E = np.where(visb.any(axis=-1), E, 0)                                   # (..., M)
+        rows = np.where(visb, np.ldexp(np.broadcast_to(p, visb.shape), np.where(visb, ekb - E[..., None], 0)), 0.0)
+        eb = np.zeros(v.shape[:-2] + v.shape[-1:], np.int64)
+    else:
+        qv, eb, ub = _heuristic.quantize_pow2(fmt, v, -2)
+        rows, E = p, 0
+    qa, ea, ua = _heuristic.quantize_pow2(fmt, rows, -1)
+    bmag = _linalg._mx_mags(fmt, qv, _linalg.mx_block(fmt)).astype(np.float64)
+    bmax = np.sqrt(np.matmul(visb.astype(np.float64), bmag * bmag)).max(axis=-1) if bmag.size else \
+        np.zeros(visb.shape[:-1])                                               # (..., M): visible keys only
+    qa, ea, raised = _heuristic.acc_guard(fmt, rows, qa, ea, None, mx, bmax=bmax)
+    ea = ea + E
+    pd = np.abs(qa) * np.ldexp(1.0, (ea - P).astype(np.int64))[..., None]       # P' as the engine sees it
+    vd = np.abs(qv) * np.ldexp(1.0, (eb - P).astype(np.int64))[..., None, :]
+    eo = visible_max_exp(visb, vd, pd.sum(axis=-1) * (2.0 ** P / (2.0 ** P - 1)))
+    y, info = _wide_cols(fmt, qa, ea, qv, eb, ua + ub, 0, shift, runner, mx, eo, raised)
     return CoreResult(y=y, **info)
 
 

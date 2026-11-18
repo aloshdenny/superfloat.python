@@ -129,9 +129,16 @@ def plan(fmt: SFFormat, qa, ea, qb, eb, eo=None, bias_abs=None, nb=None):
     whose rows of P sum to 1, takes ``eo`` from max|V| per channel.
 
     ``bias_abs``: |bias| per output column (N,), when a bias is added after
-    POP on the chip.  The first POP's exponent is unchanged; the redo
-    exponent bounds the dot product plus the bias, pow2_exp(|a||w| + |b|),
-    so a redone output can never clip in the POP or in the bias add.
+    POP on the chip.  The first POP's exponent counts the bias too (Alosh,
+    2026-11-18, raised by Poojith): max(l2 - h, pow2_exp(|b|)), so an output
+    dominated by its bias (Qwen's q_proj / k_proj) is not clipped and redone.
+    Measured on Qwen2.5-0.5B (2,048 WikiText-2 tokens, sf16): redos 2.32M to
+    0.87M (q_proj 1.39M to 225k), perplexity 22.417 to 22.415; GPT-2's small
+    biases never reach it.  pow2_exp(|b| + 2^(l2 - h)) removes more redos
+    (0.61M) but moves every biased output up one bit: +1.4% (Qwen) and +2.5%
+    (GPT-2) perplexity at sf8.  The redo exponent bounds the dot product plus
+    the bias, pow2_exp(|a||w| + |b|), so a redone output can never clip in
+    the POP or in the bias add.
 
     ``nb``: the dequantized column norms of ``qb`` (N,), when they were
     computed once ahead (a prepared weight); ``qb`` is then not read.  The
@@ -148,7 +155,14 @@ def plan(fmt: SFFormat, qa, ea, qb, eb, eo=None, bias_abs=None, nb=None):
     prod = na[..., :, None] * nb[..., None, :]
     l2 = pow2_exp(prod)
     base = ea[..., :, None] + eb[..., None, :]
-    target = (l2 - h) if eo is None else np.broadcast_to(eo, base.shape)
+    if eo is not None:
+        target = np.broadcast_to(eo, base.shape)
+    elif bias_abs is None:
+        target = l2 - h
+    else:                                          # the bias alone must fit at the first exponent
+        ba = np.broadcast_to(np.asarray(bias_abs, dtype=np.float64), base.shape)
+        # pow2_exp(0) is 0 by convention, not -inf: a zero bias must leave l2 - h as it is
+        target = np.where(ba > 0, np.maximum(l2 - h, pow2_exp(ba)), l2 - h)
     shift = np.clip(base - target, _linalg.SHIFT_MIN, _linalg.SHIFT_MAX)
     l2_redo = l2 if bias_abs is None else pow2_exp(prod + np.asarray(bias_abs, dtype=np.float64))
     shift_l2 = np.clip(base - l2_redo, _linalg.SHIFT_MIN, _linalg.SHIFT_MAX)

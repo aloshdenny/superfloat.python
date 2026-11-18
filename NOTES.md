@@ -3,6 +3,46 @@
 Decisions the spec left open or did not state, and how this code resolves
 them. Each one is a single place to change if the team decides differently.
 
+## Alosh's decisions on the 0.15.0 questions (0.16.0, spec 1.10.0)
+
+* Alosh (2026-11-18), on Poojith's four questions in PR 23; measured on GPT-2 and Qwen2.5-0.5B, 2,048
+  WikiText-2 tokens (8 windows of 256), at sf16 and sf8, on superfloat.sim's bench host (pinned env).
+* **softmax_row's three changes: signed off.**  On his example row the worst element goes from 0.0037 to
+  0.00056 (max-first scores, k = 5).  Left for later: 666 of its keys are below P's ulp, so P sums to 0.982
+  and P·V drops them (1.8% of that row's mass); perplexity does not see it.
+* **Max-first scores: adopted,** as an integer rule (website/reference/intops.mdx): align the row's codes
+  to its smallest exponent, subtract the max exactly, one round-half-to-even narrowing.  The float path
+  gives the same codes.
+* **The bias in the first POP exponent: max(l2 - h, pow2_exp(|b|)).**  Measured against the proposal
+  pow2_exp(|b| + 2^(l2 - h)), which moves every biased output up one bit even for a tiny bias:
+
+  | rule | Qwen sf16 ppl | Qwen sf8 ppl | GPT-2 sf8 ppl | Qwen sf16 redos |
+  |---|---|---|---|---|
+  | l2 - h (0.15) | 22.4166 | 24.983 | 50.119 | 2,321,793 |
+  | pow2_exp(\|b\| + 2^(l2 - h)) | 22.4167 | 25.340 | 51.371 | 607,141 |
+  | max(l2 - h, pow2_exp(\|b\|)) | 22.4149 | 24.275 | 50.119 | 872,649 |
+
+  (float: Qwen 22.414, GPT-2 49.538.)  q_proj redos 1.39M to 225k, k_proj 321k to 41k.  GPT-2's biases are
+  small enough that nothing changes there.  The scores are now the largest redo source (550k on Qwen, 802k
+  on GPT-2), a separate question.
+* **P·V prefix invariance: V per key, not per block.**  A per-block exponent still moves while its last
+  block fills, so V is quantized per key (one exponent per key, written once like a KV cache entry) and
+  each row folds its visible keys' exponents into P exactly: P'[t, k] = P[t, k] 2^(e_k - E_t), E_t = max
+  e_k over the keys row t sees; E_t joins the row's exponent, so P·V stays one matmul at one scale per row.
+  The accumulator guard bounds each row against its visible keys' column norms only.  K needed nothing:
+  the scores already take one exponent per key, and their guard cannot trigger on v4.9.2's 32-bit
+  accumulator for head dims up to 512 (|a||b| / 2^8 + K < 2^31).  Perplexity against per-channel V: GPT-2
+  sf16 49.531 to 49.527, Qwen sf16 22.4166 to 22.4147; at sf8 within noise (+0.007 +- 0.005 and
+  +0.005 +- 0.009 in NLL).  Cost: a channel far below its key's largest |V| loses bits (the old
+  per-channel test with channels 10^6 apart now bounds the error by the largest |V|).
+  Tests: appended keys with K and V 8x larger leave the first rows' bits unchanged (float and integer
+  softmax); decode one query at a time with a growing cache gives the prefill bits; per-channel V
+  (`_core.PV_PER_TOKEN = False`) fails the same check.
+* **Both together (0.16.0 as shipped), rerun after the zero-bias fix:** Qwen sf16 22.4168, sf8 24.425
+  (872,634 / 896,636 redos); GPT-2 sf16 49.527, sf8 50.466.  The bias-rule figures above did not move
+  with the fix.  superfloat.sim replay (v4.9.2, lockstep with the RTL): 8.53M outputs over GPT-2, Qwen
+  and 7 tiny models, 0 wrong, all 4,714 redos matched on the chip; tiny gpt-oss sf8 relative error 0.0154.
+
 ## Integer nonlinears, P·V over visible keys, a width per layer (0.15.0, spec 1.9.0)
 
 * Alosh (2026-11-18): port his `sf_intops_ref.py` (exp, softmax, GELU, SiLU,
@@ -14,7 +54,7 @@ them. Each one is a single place to change if the team decides differently.
   `softmax_row_v0`), compared on every input code (`tests/test_intops.py`);
   the original sits unchanged in `tests/data/sf_intops_ref_v0.py`.  Golden
   vectors: `spec/golden/intops/` from `tools/gen_golden_intops.py`.
-* sf's `softmax_row` = v0 with three changes, **pending Alosh's sign-off**:
+* sf's `softmax_row` = v0 with three changes, **signed off by Alosh (2026-11-18)**:
   (1) e_i flushed by the main exp get a second exp at d + 15 ln2 / 2^k and
   are summed in a third MX slot popped 15 lower; (2) q < 2^14 after
   normalising: pop once more one step higher; (3) P returned with the row's
@@ -28,8 +68,10 @@ them. Each one is a single place to change if the team decides differently.
   `softmax_rows_raw`): Qwen2.5-0.5B's attention scores reach 1728 (its sink
   token), 6% of rows saturate at 64, keys above 64 collapse, and perplexity
   doubles (17.40 to 36.9 on one window; with the max first, 17.41).  On the
-  chip this needs one max over the wide Q·Kᵀ output before narrowing
-  (question to Alosh).  A score at or below -10^4 is a mask (models mask
+  chip this needs one max over the wide Q·Kᵀ output before narrowing.
+  Alosh (2026-11-18): adopted, written as an integer rule (align the row's
+  codes to its smallest exponent, subtract the max exactly, one
+  round-half-to-even narrowing; website/reference/intops.mdx).  A score at or below -10^4 is a mask (models mask
   with `finfo.min` as well as -inf).
   GELU / SiLU rows: one exponent from max |x|, clamped to 0..6 (his tables),
   so |x| above 64 saturates.

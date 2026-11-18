@@ -20,7 +20,7 @@ description: "The chip's definitions of the nonlinear ops, on SF16 codes, bit fo
 | `norm_row(x, gamma, beta, ...)` | LayerNorm / RMSNorm, for reference only: norms stay on the host in float. |
 | `softmax_rows(x)`, `xsig_rows(x, cubic)` | Float rows through the integer definitions, for models on the host. Scores: the row max subtracted first, then k = 4, or 5 if a key is more than 16 below the max (`softmax_rows_raw`: Alosh's raw-score convention, k = 4 redone at 5, 6). GELU / SiLU: one exponent per row from max \|x\|, 0..6. |
 
-## sf's softmax: three changes to v0 (pending Alosh's sign-off)
+## sf's softmax: three changes to v0 (signed off by Alosh, 2026-11-18)
 
 Alosh's v0 loses mass on long causal rows: in his example row (942 visible keys) 660 probabilities are below one ulp, P sums to 0.9863, and the worst element is off by 0.0037. sf's `softmax_row` keeps his sequence with three changes:
 
@@ -31,6 +31,16 @@ Alosh's v0 loses mass on long causal rows: in his example row (942 visible keys)
 On his row: worst error 0.0037 to under 0.0003; P·V error 4x smaller or better. What remains: `mul` truncates, so each nonzero P can be up to 1 ulp low (as in v0).
 
 **Scores enter with their row max subtracted.** Quantizing raw scores (k ≤ 6) saturates any score above 64. Qwen2.5-0.5B's attention scores reach 1728 (the first-token sink): 6% of rows saturate, keys above 64 collapse onto one value, and perplexity doubles. Softmax does not change when a row's max is subtracted, and a key more than 32 below the max is under 2^-46, so with the max taken first k = 4 or 5 always suffices. On the chip this is one max over the wide Q·Kᵀ output before it is narrowed.
+
+The rule in integers (signed off by Alosh, 2026-11-18), which a lowering implements and the host's float path reproduces exactly:
+
+1. The row's scores arrive as codes c_i with their own exponents e_i (one per output, from Q·Kᵀ's POP). Masked keys are left out.
+2. Align them to the smallest exponent of the row, e₀, with exact left shifts in a wide integer: S_i = c_i · 2^(e_i − e₀).
+3. m = max S_i over the visible keys, and D_i = S_i − m (exact, at most 0).
+4. k = 4, or 5 if some visible D_i is below −16 in value (D_i · 2^(e₀ − 15) < −16).
+5. Narrow once: d_i = round_half_even(D_i · 2^(e₀ − k)), clamped to −32767. Those are the codes `softmax_row` takes, at scale 2^k.
+
+The float path (`softmax_rows`) gives the same codes: every S_i and D_i is a float64 integer times a power of two below 2^53, so the subtraction and the one rounding are exact.
 
 ## In PyTorch
 

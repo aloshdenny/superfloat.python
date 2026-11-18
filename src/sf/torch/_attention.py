@@ -6,10 +6,10 @@ and runs both of its matmuls on the MX engine at sf16:
 1. Scores ``(Q * scale) @ K^T``: one power-of-two exponent per query row
    and per key, output exponents from the wide-mode rule (``eo = l2 - h``).
 2. Mask and softmax in float on the host, like LayerNorm.
-3. ``P @ V``: one exponent per query row of P and per channel of V over the
-   keys.  Rows of P sum to 1, so |out[:, c]| <= max |V[:, c]|: the output
-   exponent per channel is V's own (``sf::matmul_wide_pv``), a tight bound
-   that needs no learning.  The redo at l2 stays as a guard.
+3. ``P @ V`` (``sf::matmul_wide_pv``): V quantized per key; each row folds
+   its visible keys' exponents into P exactly and takes the output exponent
+   from the exact bound over those keys, so nothing saturates and keys
+   appended after a row never change it (``_core._wide_pv``, DSL 0.16).
 
 ``sft.autocast(accumulate="wide")`` and ``sft.convert(..., accumulate="wide")``
 route a model's ``F.scaled_dot_product_attention`` calls here, so a Hugging

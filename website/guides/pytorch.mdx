@@ -58,13 +58,13 @@ A model with no embedding (a classifier) has no LM head, so nothing is kept. `sf
 
 1. Scores `Q Kᵀ`: one exponent per query row and per key, output exponents from the rule above.
 2. Mask and softmax: in float on the host, like LayerNorm.
-3. `P V`: one exponent per query row and per channel of V. Each row of P sums to 1, so no output can exceed its channel's largest |V|; that is the output exponent, and nothing can saturate.
+3. `P V`: one exponent per key of V, written once like a KV cache entry. Each row folds its keys' exponents into P exactly (a power of two) and takes the output exponent from the exact bound over the keys it can see, so nothing can saturate and keys appended after a row never change it (DSL 0.16).
 
 Each call is reported as `attention.0.scores` and `attention.0.pv`, then `attention.1...`, in the order the forward makes them. `attention=False` keeps attention in float. Called directly: `sft.attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, enable_gqa=False, name="attention")`.
 
 `nn.MultiheadAttention` is converted too: its four projections become SF linears (`{name}.q`, `.k`, `.v`, `.out`), and in wide mode its attention runs on the MX engine (`{name}.scores`, `.pv`). Same call and returns as PyTorch, including `batch_first`, masks, `key_padding_mask`, `need_weights` and separate `kdim` / `vdim`. Layers with `bias_k` / `bias_v` or `add_zero_attn` stay in float, and the report says why.
 
-**Attention written with `torch.matmul`.** Some models do not call SDPA: Hugging Face models loaded with `attn_implementation="eager"`, Gemma 2 (logit soft-capping) and older code. In wide mode `sft.convert` watches every attention module (a class whose name ends in `Attention`): while it runs, each `torch.matmul` between two activations goes to the MX engine at sf16, and the one after a softmax runs as `P V` with V's exponent per channel. A rotary-embedding module inside it stays in float (its angles need float). Statuses: `{module}.scores` and `{module}.pv`.
+**Attention written with `torch.matmul`.** Some models do not call SDPA: Hugging Face models loaded with `attn_implementation="eager"`, Gemma 2 (logit soft-capping) and older code. In wide mode `sft.convert` watches every attention module (a class whose name ends in `Attention`): while it runs, each `torch.matmul` between two activations goes to the MX engine at sf16, and the one after a softmax runs as `P V` (V's exponent per key, as above). A rotary-embedding module inside it stays in float (its angles need float). Statuses: `{module}.scores` and `{module}.pv`.
 
 **Softmax, GELU and SiLU on the chip's integer definitions.** `nonlinear="integer"` runs them through `sf.intops` instead of float on the host: attention's softmax (wide mode), GPT-2's tanh GELU and SiLU (MoE experts' activations too). GELU with erf has no integer form and stays float; LayerNorm and RMSNorm always stay on the host. `ConversionReport.nonlinear` lists what changed.
 
@@ -72,7 +72,7 @@ Each call is reported as `attention.0.scores` and `attention.0.pv`, then `attent
 fast = sft.convert(model, "sf16", accumulate="wide", nonlinear="integer")
 ```
 
-P·V's output exponent is the exact bound of the row's product over the keys it can see (P ≠ 0): a causal row's result does not depend on the masked keys after it, and P·V is never redone.
+P·V's exponents come only from the keys a row can see (P ≠ 0): V is quantized per key and the row's P carries its keys' exponents, so a causal row's result does not depend on the keys after it (prefill and decode with a growing KV cache give the same bits), and P·V is never redone. Measured on GPT-2 and Qwen2.5-0.5B, perplexity is unchanged against per-channel V.
 
 The scores enter the integer softmax with their row max subtracted. Quantizing raw scores would saturate Qwen2.5-0.5B's, which reach 1728 on its first token, and double its perplexity.
 

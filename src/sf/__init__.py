@@ -33,7 +33,7 @@ from .kernels import (HardwareAtreides, Kernel, LaunchResult, Limits, SimulatorA
                       arange, autotune, barrier, block_dim, block_idx, cdiv, constexpr, jit, kernel,
                       load, predicate, program_id, shared, store, synchronize, thread_idx)
 
-__version__ = "0.15.0"          # integer softmax / GELU / SiLU (sf.intops, convert(nonlinear="integer")); P·V exponent over visible keys; a width per layer (sft.choose_widths, convert(widths=...))
+__version__ = "0.16.0"          # P·V prefix-invariant (V per key); the bias in the first POP exponent
 
 # sf.sf4 .. sf.sf16
 globals().update({cls.__name__: cls for cls in DTYPES.values()})
