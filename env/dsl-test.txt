@@ -1,0 +1,15 @@
+# The DSL test environment: the exact versions every PR is tested with, in CI (job "models") and on the chip
+# simulator bench (superfloat.sim).  Python 3.10.  Build it with tools/test_env.sh.
+# Change a pin only in its own commit, with the full suite and the bench rerun on the new set.
+numpy==2.2.6
+torch==2.9.1
+transformers==5.20.2
+accelerate==1.15.0
+safetensors==0.8.0
+tokenizers==0.23.3
+huggingface_hub==2.4.0
+scipy==1.15.3
+scikit-learn==1.7.2
+hypothesis==6.168.5
+pytest==9.2.0
+pytest-xdist==3.8.0
