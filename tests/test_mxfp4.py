@@ -161,7 +161,12 @@ def test_matches_transformers_decoder():
     g = torch.Generator().manual_seed(3)
     blocks = torch.randint(0, 256, (3, 5, 4, 16), dtype=torch.uint8, generator=g)
     scales = torch.randint(100, 150, (3, 5, 4), dtype=torch.uint8, generator=g)
-    theirs = mx._convert_moe_packed_tensors(blocks, scales, dtype=torch.float32)
+    # transformers' decoder is private and has been renamed: _convert_moe_packed_tensors (5.x),
+    # convert_moe_packed_tensors (4.57)
+    conv = getattr(mx, "_convert_moe_packed_tensors", None) or getattr(mx, "convert_moe_packed_tensors", None)
+    if conv is None:
+        pytest.skip("this transformers has no MXFP4 decoder to compare with")
+    theirs = conv(blocks, scales, dtype=torch.float32)
     assert torch.equal(sft.dequantize_mxfp4(blocks, scales).transpose(1, 2), theirs)
 
 
