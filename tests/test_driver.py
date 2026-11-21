@@ -20,63 +20,12 @@ import pytest
 import sf
 from sf.kernels import _driver as D
 
+from atreides_toy import run_toy  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 SAMPLE = json.loads((HERE / "data" / "atreides_kernel_axpy_draft.json").read_text())
 FAKE = [sys.executable, str(HERE / "fake_superfloat_compile.py")]
 AXPY_IR = (HERE.parent / "examples" / "sfir" / "axpy" / "kernel.sfir.json").read_text()
-
-
-# --- a toy model of the 7 instructions axpy uses ------------------------------------------------
-
-def _sm(x):
-    return -(x & 0x7FFF) if x & 0x8000 else x & 0x7FFF
-
-
-def _mul(a, b):                       # fma.sv: magnitude truncated toward zero
-    m = ((a & 0x7FFF) * (b & 0x7FFF)) >> 15
-    return 0 if m == 0 else ((a ^ b) & 0x8000) | m
-
-
-def _add(a, b):                       # saturating sign-magnitude add
-    s = max(-32767, min(32767, _sm(a) + _sm(b)))
-    return 0x8000 | -s if s < 0 else s
-
-
-def run_toy(plan: D.LaunchPlan, memory: dict) -> dict:
-    mem = dict(memory)
-    for launch in plan.launches:
-        mem.update(launch.writes)
-        nblocks = -(-launch.threads // 8)
-        for blk in range(nblocks):                    # R13 restarts at 0 every launch
-            live = range(8 if blk < nblocks - 1 else launch.threads - 8 * (nblocks - 1))
-            R = [[0] * 16 for _ in range(8)]
-            for t in range(8):
-                R[t][13], R[t][14], R[t][15] = blk, 8, t
-            pc = 0
-            while True:
-                w = plan.program[pc]
-                op, a, b, c = w >> 12, (w >> 8) & 15, (w >> 4) & 15, w & 15
-                if op == 0xF:                         # RET
-                    break
-                for t in live:
-                    r = R[t]
-                    if op == 0x2:                     # CMP: sets NZP; axpy never branches
-                        pass
-                    elif op == 0x9:                   # CONST: sign-extended imm8
-                        imm = (b << 4) | c
-                        r[a] = (imm - 256 if imm & 0x80 else imm) & 0xFFFF
-                    elif op == 0x7:                   # LDR Rd, Ra (unwritten words read 0)
-                        r[a] = mem.get(r[b], 0)
-                    elif op == 0x3:                   # ADD mod 2^16
-                        r[a] = (r[b] + r[c]) & 0xFFFF
-                    elif op == 0xA:                   # FMA Rd = add(Rd, mul(Rs, Rt))
-                        r[a] = _add(r[a], _mul(r[b], r[c]))
-                    elif op == 0x8:                   # STR Ra, Rv
-                        mem[r[a]] = r[b]
-                    else:
-                        raise NotImplementedError(f"toy model: opcode {op:#x} at pc {pc}")
-                pc += 1
-    return mem
 
 
 def _axpy_args(n, seed=0):

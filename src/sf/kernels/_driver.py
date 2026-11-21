@@ -118,6 +118,29 @@ class LaunchPlan:
     target: str | None = None
 
 
+@dataclass
+class SFCodes:
+    """An sf buffer as raw codes: what the runtime hands a driver."""
+    codes: np.ndarray
+    bits: int
+
+
+@dataclass
+class SFCode:
+    """An sf scalar as a raw code."""
+    code: int
+    bits: int
+
+
+def _norm_arg(v):
+    """SFArray / SFScalar to raw codes; everything else unchanged."""
+    if isinstance(v, SFArray):
+        return SFCodes(np.asarray(v.codes, dtype=np.int64), v.dtype._fmt.bits)
+    if isinstance(v, SFScalar):
+        return SFCode(int(v.code), v._fmt.bits)
+    return v
+
+
 def _sf_word(code: int, bits: int) -> int:
     """Signed code -> the 16-bit word in memory: sign-magnitude, left-aligned."""
     return FORMATS[bits].to_bits(int(code)) << (16 - bits)
@@ -144,10 +167,12 @@ def _dtype_bits(dtype: str) -> int:
 def plan_launch(kernel: dict, args: dict) -> LaunchPlan:
     """Lay out memory and split launches for one call of ``kernel``.
 
-    ``args`` maps each parameter name to its value: an ``SFArray`` for an sf
-    pointer, a NumPy int array for an int table (``ptr<int>``), an
-    ``SFScalar`` for an sf scalar, an int for an int.
+    ``args`` maps each parameter name to its value: an ``SFArray`` (or
+    ``SFCodes``) for an sf pointer, a NumPy int array for an int table
+    (``ptr<int>``), an ``SFScalar`` (or ``SFCode``) for an sf scalar, an int
+    for an int.
     """
+    args = {n: _norm_arg(v) for n, v in args.items()}
     k = read_kernel(kernel)
     params, launch, mem_rules = k["params"], k["launch"], k.get("memory", {})
     base = _int(params.get("base_address", 0))
@@ -173,10 +198,9 @@ def plan_launch(kernel: dict, args: dict) -> LaunchPlan:
             continue
         v = args[name]
         if kind == "ptr":
-            is_sf = isinstance(v, SFArray)
-            if is_sf:
+            if isinstance(v, SFCodes):
                 data = np.asarray(v.codes, dtype=np.int64).reshape(-1)
-                bits = v.dtype._fmt.bits
+                bits = v.bits
                 dtype = f"sf{bits}"
                 if s.get("dtype") not in (None, dtype):
                     raise SFLaunchError(f"{name}: the kernel wants {s['dtype']}, got {dtype}")
@@ -200,10 +224,9 @@ def plan_launch(kernel: dict, args: dict) -> LaunchPlan:
             memory[addr] = nxt
             nxt += n
         elif kind == "sf":
-            if not isinstance(v, SFScalar):
+            if not isinstance(v, SFCode):
                 raise SFLaunchError(f"{name}: an sf parameter takes an SFScalar")
-            bits = v._fmt.bits
-            memory[addr] = _sf_word(v.code, bits)
+            memory[addr] = _sf_word(v.code, v.bits)
         elif kind == "int":
             memory[addr] = _int_word(v, name)
         else:
@@ -311,3 +334,50 @@ def compile_kernel(ir: KernelIR | str, target: str = DEFAULT_TARGET, options=(),
         if os.path.exists(tmp):
             os.unlink(tmp)
     return k
+
+
+# --- the driver HardwareAtreides calls ---------------------------------------------------------
+
+class AtreidesDriver:
+    """The object ``HardwareAtreides.attach`` takes: compile, plan, run, read back.
+
+    ``runner(plan) -> memory`` executes a ``LaunchPlan`` and returns the data
+    memory after the last launch (``{address: word}``).  It is the one part
+    that changes with what runs the program: a toy model in the tests, then
+    Kartik's ISA model, Alosh's testbench, or the board.
+
+    The launch grid is not sent to the compiler: the kernel file's launch rule
+    (``total_threads``) sets the thread count.  The chip has no event flags,
+    so the returned counters leave every event unknown (``None``);
+    ``sf.config(status="replay")`` recomputes them on the host and checks the
+    output bits.
+    """
+
+    def __init__(self, runner, target: str = DEFAULT_TARGET, options=(), compiler=None) -> None:
+        self.runner = runner
+        self.target = target
+        self.options = tuple(options)
+        self.compiler = compiler
+        self.last_plan: LaunchPlan | None = None
+
+    def launch(self, ir, grid, block, buffers, scalars):
+        from ._interp import Counters
+        kernel = compile_kernel(ir, self.target, self.options, self.compiler)
+        args = {}
+        for p in ir.params:
+            if p.kind == "constexpr":
+                continue
+            if p.kind == "ptr":
+                b = buffers[p.name]
+                args[p.name] = SFCodes(b, p.type.bits) if p.type.bits else np.asarray(b, dtype=np.int64)
+            elif p.kind == "sf":
+                args[p.name] = SFCode(scalars[p.name], p.type.bits)
+            else:
+                args[p.name] = scalars[p.name]
+        plan = plan_launch(kernel, args)
+        self.last_plan = plan
+        memory = self.runner(plan)
+        for name, codes in read_back(plan, memory).items():
+            buffers[name][...] = codes.reshape(buffers[name].shape)
+        return Counters(programs=len(plan.launches), saturated=None, underflow=None,
+                        div0=None, invalid=None)
