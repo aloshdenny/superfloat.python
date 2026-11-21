@@ -208,6 +208,7 @@ class Kernel:
         self.autotune_configs = None
         self.autotune_key = ()
         self.tuned: dict = {}
+        self.def_loc = _def_loc(fn)
 
     def __repr__(self):
         return f"<sf {'kernel' if self.style == 'thread' else 'jit'} {self.name}>"
@@ -229,6 +230,7 @@ class Kernel:
         b.ir.constexpr = dict(constexpr)
         call_args = []
         given = dict(args)
+        b.fixed_loc = self.def_loc                     # param ops point at the ``def`` line
         with trace_context(b):
             for name in self.sig.parameters:               # signature order, configs included
                 if name in constexpr:
@@ -255,6 +257,7 @@ class Kernel:
                     v = b.emit("param", [], {"param": name, "kind": "int"}, INT, ())
                     b.ir.params.append(Param(name, "int", INT, vid=v.id))
                     call_args.append(Sym(v))
+            b.fixed_loc = None                         # body ops: the user's own line
             out = self.fn(*call_args)
             if out is not None:
                 raise SFCompileError("a kernel must not return a value; write results with "
@@ -273,6 +276,22 @@ class Kernel:
             with _cache_lock:
                 self.cache[key] = ir
         return ir
+
+
+def _def_loc(fn) -> tuple:
+    """(file name, line) of the kernel's ``def`` line, past any decorators."""
+    import os
+    code = fn.__code__
+    line = code.co_firstlineno
+    try:
+        src, first = inspect.getsourcelines(fn)
+        for i, text in enumerate(src):
+            if text.lstrip().startswith(("def ", "async def ")):
+                line = first + i
+                break
+    except (OSError, TypeError):
+        pass                                           # no source (exec, REPL): the first line
+    return (os.path.basename(code.co_filename), line)
 
 
 def _constexpr_cls():

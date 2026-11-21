@@ -20,6 +20,8 @@ side effects and events (if-conversion).  Loops over Python ints and
 from __future__ import annotations
 
 import contextvars
+import os
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -92,6 +94,7 @@ class Op:
     attrs: dict
     result: Value | None
     pred: Value | None = None      # predicate mask in force (if-conversion)
+    loc: tuple | None = None       # (file name, line) of the user's code that made the op
 
     def __repr__(self):
         a = ", ".join(repr(x) for x in self.args)
@@ -146,6 +149,17 @@ class KernelIR:
         lines += ["  " + repr(op) for op in self.ops]
         return "\n".join(lines)
 
+    def to_json(self) -> str:
+        """The kernel as SF IR JSON, the compiler's input (see ``_irjson``)."""
+        from ._irjson import dumps
+        return dumps(self)
+
+    @classmethod
+    def from_json(cls, text: str) -> "KernelIR":
+        """Read a kernel back from ``to_json`` text."""
+        from ._irjson import loads
+        return loads(text)
+
 
 # --- builder (the trace context) ---------------------------------------------------------------
 
@@ -154,11 +168,29 @@ _FIXED_SHAPE = frozenset({"param", "program_id", "thread_idx", "arange", "broadc
                           "transpose", "sum", "max", "min", "dot", "dot_wide"})
 
 
+_SF_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep   # .../sf/
+
+
+def _user_loc() -> tuple | None:
+    """(file name, line) of the first caller outside the sf package: the user's line.
+
+    Only the file's base name is kept, never its full path, so an exported IR
+    names no folder (and so no user) and hashes the same on every machine."""
+    f = sys._getframe(2)
+    while f is not None:
+        path = f.f_code.co_filename
+        if not os.path.abspath(path).startswith(_SF_DIR):
+            return (os.path.basename(path), f.f_lineno)
+        f = f.f_back
+    return None
+
+
 class Builder:
     def __init__(self, name: str, style: str) -> None:
         self.ir = KernelIR(name, style)
         self.pred_stack: list[Value] = []
         self._next = 0
+        self.fixed_loc: tuple | None = None   # set while ``Kernel.trace`` emits the params
 
     def value(self, type_, shape) -> Value:
         v = Value(self._next, type_, tuple(int(s) for s in shape))
@@ -177,7 +209,8 @@ class Builder:
                 raise SFCompileError(f"{name}: a value of shape {tuple(shape)} cannot be computed "
                                      f"under a predicate of shape {pred.shape}") from None
         result = self.value(type_, shape) if type_ is not None else None
-        self.ir.ops.append(Op(name, list(args), dict(attrs or {}), result, pred))
+        loc = self.fixed_loc if self.fixed_loc is not None else _user_loc()
+        self.ir.ops.append(Op(name, list(args), dict(attrs or {}), result, pred, loc))
         return result
 
     def current_pred(self) -> Value | None:

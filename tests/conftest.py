@@ -24,6 +24,23 @@ EXHAUSTIVE_WIDTHS = list(range(4, 11))
 SAMPLED_WIDTHS = list(range(11, 17))
 ALL_WIDTHS = EXHAUSTIVE_WIDTHS + SAMPLED_WIDTHS
 
+if os.environ.get("SF_IR_ROUNDTRIP") == "1":
+    # Send every traced kernel through SF IR JSON and back before it runs, so every
+    # bit-exact kernel test in the suite also checks that the JSON loses nothing.
+    from sf.kernels._ir import KernelIR             # noqa: E402
+    from sf.kernels._runtime import Kernel          # noqa: E402
+
+    _trace = Kernel.trace
+
+    def _round_trip_trace(self, *a, **k):
+        ir = _trace(self, *a, **k)
+        text = ir.to_json()
+        back = KernelIR.from_json(text)
+        assert back.to_json() == text, f"{ir.name}: SF IR JSON round trip changed the file"
+        return back
+
+    Kernel.trace = _round_trip_trace
+
 SEED = int(os.environ.get("SF_TEST_SEED", "20261017"))
 N_RANDOM = int(os.environ.get("SF_TEST_RANDOM_PAIRS", "20000"))
 
