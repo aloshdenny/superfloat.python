@@ -46,24 +46,31 @@ def hw(tmp_path, monkeypatch):
     return driver
 
 
-def _launch(device, n, seed):
+def _launch(device, n, seed, grid=None):
     rng = np.random.default_rng(seed)
     with sf.errstate(all="ignore"):
         x = sf.asarray(rng.uniform(-0.9, 0.9, n), dtype=sf.sf16, device=device)
         y = sf.asarray(rng.uniform(-0.9, 0.9, n), dtype=sf.sf16, device=device)
         a = sf.sf16(float(rng.uniform(-0.9, 0.9)))
         out = sf.zeros(n, "sf16", device=device)
-        res = axpy[(sf.cdiv(n, 8),)](a, x, y, out, n, BLOCK=8)
+        res = axpy[grid or (sf.cdiv(n, 8),)](a, x, y, out, n, BLOCK=8)
     return out, res
 
 
 @pytest.mark.parametrize("n", [5, 20, 248, 600])
 def test_axpy_on_hardware_matches_the_simulator(hw, n):
     out_hw, res = _launch("atreides-hw", n, seed=n)
-    out_sim, _ = _launch("atreides-sim", n, seed=n)
+    out_sim, res_sim = _launch("atreides-sim", n, seed=n)
     assert np.array_equal(out_hw.codes, out_sim.codes)
     assert res.device == "atreides-hw"
-    assert res.counters.programs == len(hw.last_plan.launches) == -(-n // 248)
+    assert res.counters.programs == res_sim.counters.programs == -(-n // 8)   # counted the same way
+    assert len(hw.last_plan.launches) == -(-n // 248)
+
+
+@pytest.mark.parametrize("grid", [(1,), (4,), (3, 2)])
+def test_a_grid_that_does_not_match_the_threads_is_refused(hw, grid):
+    with pytest.raises(sf.SFLaunchError, match="programs"):     # n = 20 needs exactly 3 programs of 8
+        _launch("atreides-hw", 20, seed=8, grid=grid)
 
 
 def test_events_are_unknown_on_hardware(hw):

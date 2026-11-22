@@ -59,6 +59,8 @@ def test_still_reads_the_first_draft():
     (lambda k: k["program"].update(words=[0x10000]), "0xFFFF"),
     (lambda k: k["launch"].update(max_blocks_per_launch=32), "255 threads"),
     (lambda k: k["params"]["slots"].append({"offset": 1, "name": "z", "kind": "int"}), "share an offset"),
+    (lambda k: k["params"]["slots"].append({"offset": 7, "name": "z", "kind": "int"}), "does not cover"),
+    (lambda k: k["launch"].update(total_threads="N"), "not one of the kernel's arguments"),
 ])
 def test_rejects_bad_kernel_files(change, msg):
     k = copy.deepcopy(SAMPLE)
@@ -81,6 +83,14 @@ def test_layout_of_axpy():
                                                      for c in args["x_ptr"].codes]
     assert not any(45 <= addr < 65 for addr in p.memory)          # the output is not uploaded
     assert [(L.threads, L.block_offset, L.writes) for L in p.launches] == [(20, 0, {0: 0})]
+
+
+def test_buffers_start_after_the_last_slot_even_with_gaps():
+    k = copy.deepcopy(SAMPLE)
+    k["params"]["slots"].append({"offset": 7, "name": "m", "kind": "int"})   # offsets 5 and 6 unused
+    del k["memory"]["reserved_words"]
+    p = D.plan_launch(k, _axpy_args(8) | {"m": 3})
+    assert p.memory[7] == 3 and min(b.base for b in p.buffers.values()) == 8
 
 
 def test_launches_split_at_31_blocks():
@@ -170,6 +180,11 @@ def test_cache_key_covers_all_four_parts():
     base = D.cache_key("ir", "v1", "t", ())
     assert len({base, D.cache_key("ir2", "v1", "t", ()), D.cache_key("ir", "v2", "t", ()),
                 D.cache_key("ir", "v1", "t2", ()), D.cache_key("ir", "v1", "t", ("-O1",))}) == 5
+
+
+def test_cache_key_keeps_the_order_of_options():
+    assert (D.cache_key("ir", "v1", "t", ("--unroll", "4", "--regs", "8"))
+            != D.cache_key("ir", "v1", "t", ("--unroll", "8", "--regs", "4")))
 
 
 def test_compiler_failure_is_a_clean_error(cache, monkeypatch):

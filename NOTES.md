@@ -21,6 +21,11 @@ them. Each one is a single place to change if the team decides differently.
 * The driver (`src/sf/kernels/_driver.py`) reads his kernel file format 0.2-draft (0.1 still read),
   and refuses a compiled kernel whose target is not the one asked for.  Our own choice, not his: a file
   that does not say whether pointers are compared with CMP is treated as if they are.
+* The chip runs `total_threads` threads whatever grid the user wrote, so the driver refuses a grid
+  whose program count is not ceil(threads / lanes per program): otherwise atreides-hw and
+  atreides-sim would compute different things.  Lanes per program: `launch.lanes_per_program` if the
+  file gives it (to ask Kartik), else the block size (thread kernels) or `threads_per_block`.
+  `Counters.programs` on the hardware is that program count, as on the simulator.
 * His hand-written axpy is checked on a toy model of its 7 instructions only (no MX), so wide kernels
   cannot run end to end yet.
 

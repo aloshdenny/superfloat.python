@@ -109,6 +109,17 @@ def test_dump_is_unchanged_by_locations():
     assert os.path.basename(__file__) not in ir.dump()
 
 
+def test_loc_skips_only_sf_machinery():
+    from sf.kernels import _ir
+    sf_dir = _ir._SF_DIR
+    assert _ir._is_machinery(os.path.join(sf_dir, "kernels", "_lang.py"))
+    assert _ir._is_machinery(os.path.join(sf_dir, "_functions.py"))
+    assert _ir._is_machinery(os.path.join(sf_dir, "__init__.py"))
+    # a kernel written inside sf (as sf.torch's will be) keeps its own line
+    assert not _ir._is_machinery(os.path.join(sf_dir, "torch", "_offload.py"))
+    assert not _ir._is_machinery(__file__)
+
+
 # --- writing ----------------------------------------------------------------------------------
 
 def test_json_fields():

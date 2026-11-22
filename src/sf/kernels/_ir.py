@@ -168,19 +168,31 @@ _FIXED_SHAPE = frozenset({"param", "program_id", "thread_idx", "arange", "broadc
                           "transpose", "sum", "max", "min", "dot", "dot_wide"})
 
 
-_SF_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep   # .../sf/
+_SF_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # .../sf
+_KERNELS_DIR = os.path.join(_SF_DIR, "kernels")
+_machinery: dict[str, bool] = {}       # co_filename -> is it sf's DSL machinery
+
+
+def _is_machinery(path: str) -> bool:
+    """True for the files between an op and the code that asked for it: sf/kernels/*
+    and sf's private top-level modules (sf/_functions.py, sf/_array.py, sf/__init__.py,
+    ...).  A kernel defined anywhere else, sf.torch included, keeps its own lines."""
+    hit = _machinery.get(path)
+    if hit is None:
+        d, name = os.path.split(os.path.abspath(path))
+        hit = _machinery[path] = d == _KERNELS_DIR or (d == _SF_DIR and name.startswith("_"))
+    return hit
 
 
 def _user_loc() -> tuple | None:
-    """(file name, line) of the first caller outside the sf package: the user's line.
+    """(file name, line) of the first caller that is not sf's DSL machinery: the user's line.
 
     Only the file's base name is kept, never its full path, so an exported IR
     names no folder (and so no user) and hashes the same on every machine."""
     f = sys._getframe(2)
     while f is not None:
-        path = f.f_code.co_filename
-        if not os.path.abspath(path).startswith(_SF_DIR):
-            return (os.path.basename(path), f.f_lineno)
+        if not _is_machinery(f.f_code.co_filename):
+            return (os.path.basename(f.f_code.co_filename), f.f_lineno)
         f = f.f_back
     return None
 

@@ -79,3 +79,8 @@ def _op(d, name):
 def test_checker_finds_broken_files(change, msg):
     errs = _broken(change)
     assert any(msg in e for e in errs), errs
+
+
+def test_one_bad_op_gives_one_error():
+    errs = _broken(lambda d: _op(d, "arange").update(comment="x"))    # later ops use its id
+    assert len(errs) == 1 and "fields" in errs[0], errs

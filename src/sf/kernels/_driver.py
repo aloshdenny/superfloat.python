@@ -84,10 +84,21 @@ def read_kernel(k: dict) -> dict:
         bad("two parameter slots share an offset")
     if sum(s["kind"] == "block_offset" for s in slots) > 1:
         bad("more than one block_offset slot")
+    reserved = k.get("memory", {}).get("reserved_words")
+    if reserved is not None and slots:
+        base = _int(k.get("params", {}).get("base_address", 0))
+        last = base + max(offsets)
+        if _int(reserved[0]) > base or _int(reserved[1]) < last:
+            bad(f"reserved_words {reserved} does not cover the parameter slots (last at word {last})")
     launch = k.get("launch", {})
     for key in ("threads_per_block", "max_blocks_per_launch", "total_threads"):
         if key not in launch:
             bad(f"launch has no {key!r}")
+    total = launch["total_threads"]
+    if isinstance(total, str):
+        names = {s["name"] for s in slots} | {p["name"] for p in k.get("params", {}).get("not_in_block", [])}
+        if total not in names:
+            bad(f"launch total_threads names {total!r}, which is not one of the kernel's arguments")
     if launch["threads_per_block"] * launch["max_blocks_per_launch"] > 255:
         bad("one launch can run at most 255 threads (an 8-bit count)")
     return k
@@ -182,8 +193,9 @@ def plan_launch(kernel: dict, args: dict) -> LaunchPlan:
     slots = sorted(params.get("slots", []), key=lambda s: s["offset"])
     below = _int(mem_rules.get("buffers_below", 0xFFC0))
     no_cross = bool(mem_rules.get("pointers_compared_with_cmp", True))   # our choice: strict when missing
-    reserved = mem_rules.get("reserved_words", [base, base + (slots[-1]["offset"] if slots else 0)])
-    nxt = max(_int(reserved[1]) + 1, base + len(slots))
+    last_slot = base + (slots[-1]["offset"] if slots else -1)        # slots are sorted by offset
+    reserved = mem_rules.get("reserved_words", [base, last_slot])
+    nxt = max(_int(reserved[1]), last_slot) + 1                       # buffers start after both
 
     known = {s["name"] for s in slots} | {p["name"] for p in params.get("not_in_block", [])}
     missing = sorted(n for n in known if n not in args and not n.startswith("__"))
@@ -298,7 +310,7 @@ def compiler_version(compiler=None) -> str:
 
 def cache_key(ir_json: str, version: str, target: str, options=()) -> str:
     """Kartik's key: the SF IR JSON, the compiler version, the target and the options."""
-    parts = [ir_json, version, target, json.dumps(sorted(options))]
+    parts = [ir_json, version, target, json.dumps(list(options))]   # order kept: "-x 1 -y 2" != "-x 2 -y 1"
     return hashlib.sha256("\0".join(parts).encode()).hexdigest()
 
 
@@ -345,6 +357,34 @@ def compile_kernel(ir: KernelIR | str, target: str = DEFAULT_TARGET, options=(),
 
 # --- the driver HardwareAtreides calls ---------------------------------------------------------
 
+def check_grid(kernel: dict, plan: LaunchPlan, ir: KernelIR, grid, block) -> int:
+    """Refuse a launch whose grid does not match the threads the chip will run.
+
+    The chip runs ``total_threads`` threads (for axpy, ``n``) whatever grid the
+    user wrote, so a grid that covers more or fewer programs than that would
+    give other results than atreides-sim.  One program covers
+    ``launch.lanes_per_program`` threads if the file says so; otherwise the
+    block size for thread kernels and ``threads_per_block`` for block kernels.
+    Returns the number of programs (grid points).
+    """
+    programs = int(np.prod(grid))
+    launch = kernel["launch"]
+    if "lanes_per_program" in launch:
+        lanes = int(launch["lanes_per_program"])
+    elif ir.style == "thread":
+        lanes = int(np.prod(block))
+    else:
+        lanes = int(launch["threads_per_block"])
+    threads = sum(L.threads for L in plan.launches)
+    want = -(-threads // lanes)
+    if programs != want:
+        raise SFLaunchError(f"{plan.kernel}: the grid {tuple(grid)} has {programs} programs, but the chip will "
+                            f"run {threads} threads ({launch['total_threads']!r}), which is {want} programs "
+                            f"of {lanes}; atreides-sim would compute something else")
+    return programs
+
+
+
 class AtreidesDriver:
     """The object ``HardwareAtreides.attach`` takes: compile, plan, run, read back.
 
@@ -382,9 +422,11 @@ class AtreidesDriver:
             else:
                 args[p.name] = scalars[p.name]
         plan = plan_launch(kernel, args)
+        programs = check_grid(kernel, plan, ir, grid, block)
         self.last_plan = plan
         memory = self.runner(plan)
         for name, codes in read_back(plan, memory).items():
             buffers[name][...] = codes.reshape(buffers[name].shape)
-        return Counters(programs=len(plan.launches), saturated=None, underflow=None,
+        # programs as the simulator counts them (one per grid point); chip launches: len(plan.launches)
+        return Counters(programs=programs, saturated=None, underflow=None,
                         div0=None, invalid=None)

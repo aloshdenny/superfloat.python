@@ -64,6 +64,8 @@ def check(d: dict, spec: dict | None = None) -> list[str]:
         where = f"op {n} ({o.get('op')})"
         if set(o) != set(sfir["op_fields"]):
             errs.append(f"{where}: fields {sorted(set(o) ^ set(sfir['op_fields']))} differ from the spec")
+            if isinstance(o.get("id"), int):          # still defined: later uses are not new errors
+                defined[o["id"]] = o.get("type")
             continue
         rule = ops.get(o["op"])
         if rule is None:
