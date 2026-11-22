@@ -161,6 +161,9 @@ class Emitter:
             w(f"    C->ops++; C->lane_ops += {r.size};")
         else:
             w("    C->ops++;")
+        if op.body is not None:
+            self.for_loop(op)
+            return
 
         def ev(e):
             # per-lane event block, counted only where the predicate holds
@@ -366,6 +369,30 @@ class Emitter:
             w("    C->barriers++;")
             return
         raise SFCompileError(f"C backend: unknown op {n}")
+
+    def for_loop(self, op) -> None:
+        """A ``for`` op as a C loop: the carried values live in arrays declared before it."""
+        w, L, at = self.w, op.body, op.attrs
+        for r in L.results:
+            w(f"    {self.decl(r)};")
+        w("    {")
+        for c, a in zip(L.carried, op.args):
+            w(f"    {self.decl(c)}; memcpy(v{c.id}, v{a.id}, sizeof(v{c.id}));")
+        i = f"i{L.iv.id}"
+        cond = f"{i} < {at['stop']}" if at["step"] > 0 else f"{i} > {at['stop']}"
+        w(f"    for (int64_t {i} = {at['start']}; {cond}; {i} += {at['step']}) {{")
+        w(f"    int64_t v{L.iv.id}[1] = {{{i}}};")
+        for o in L.ops:
+            self.op(o)
+        # copy through temporaries: a yield may be another carried value (a swap)
+        for c, y in zip(L.carried, L.yields):
+            w(f"    {self.decl(c).replace(f'v{c.id}[', f't{c.id}[', 1)}; memcpy(t{c.id}, v{y.id}, sizeof(t{c.id}));")
+        for c in L.carried:
+            w(f"    memcpy(v{c.id}, t{c.id}, sizeof(v{c.id}));")
+        w("    }")
+        for r, c in zip(L.results, L.carried):
+            w(f"    memcpy(v{r.id}, v{c.id}, sizeof(v{r.id}));")
+        w("    }")
 
     def reduce(self, op, kind) -> None:
         r = op.result

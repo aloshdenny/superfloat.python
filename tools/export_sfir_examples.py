@@ -11,7 +11,8 @@ Each kernel folder holds three files:
   the wide kernels model (v4.9.2).
 
 The kernels: axpy, an elementwise add, a dot chain (``sf.dot``, chain
-accumulation), a wide gemv and a wide gemm (``sf.dot`` on the MX engine, one
+accumulation), a k-tiled matmul whose k loop is one ``for`` op
+(``sf.fori_loop``, SF IR format_version 2), a wide gemv and a wide gemm (``sf.dot`` on the MX engine, one
 POP shift per output from an int table).  The wide shifts are the tightest
 that do not saturate, so each output uses its full range.
 
@@ -70,6 +71,22 @@ def dot_chain(a_ptr, b_ptr, c_ptr, M: sf.constexpr, K: sf.constexpr, N: sf.const
 
 
 @sf.jit
+def dot_k_tiles(a_ptr, b_ptr, c_ptr, M: sf.constexpr, K: sf.constexpr, N: sf.constexpr, BK: sf.constexpr):
+    i = sf.arange(0, M)[:, None]
+    kk = sf.arange(0, BK)
+    j = sf.arange(0, N)[None, :]
+
+    def k_tile(t, acc):                                # one trip per BK columns of a: the loop is in the file once
+        k = t * BK + kk
+        x = sf.load(a_ptr + i * K + k[None, :])
+        w = sf.load(b_ptr + k[:, None] * N + j)
+        return acc + sf.dot(x, w, accumulate="chain")
+
+    acc = sf.fori_loop(0, K // BK, k_tile, sf.zeros((M, N)))
+    sf.store(c_ptr + i * N + j, acc)
+
+
+@sf.jit
 def matmul_wide(a_ptr, b_ptr, s_ptr, c_ptr, M: sf.constexpr, K: sf.constexpr, N: sf.constexpr):
     i = sf.arange(0, M)[:, None]
     k = sf.arange(0, K)
@@ -123,6 +140,17 @@ def _cases():
                args=[("a_ptr", "ptr", A.reshape(-1)), ("b_ptr", "ptr", B.reshape(-1)),
                      ("c_ptr", "ptr", np.zeros(M * N, np.int64))],
                outputs=["c_ptr"], reference={"c_ptr": ref.reshape(-1)})
+
+    M, K, N, BK = 8, 32, 8, 8
+    A, B = _codes(rng, (M, K), -0.3, 0.3), _codes(rng, (K, N), -0.3, 0.3)
+    with sf.errstate(all="ignore"):
+        ref = sf.zeros((M, N), "sf16")
+        for t in range(K // BK):                       # the host reference: tile by tile, in order
+            ref = ref + (sf.from_codes(A[:, t * BK:(t + 1) * BK], sf.sf16) @ sf.from_codes(B[t * BK:(t + 1) * BK], sf.sf16))
+    yield dict(kernel=dot_k_tiles, name="dot_k_tiles", grid=(1,), constexpr={"M": M, "K": K, "N": N, "BK": BK},
+               args=[("a_ptr", "ptr", A.reshape(-1)), ("b_ptr", "ptr", B.reshape(-1)),
+                     ("c_ptr", "ptr", np.zeros(M * N, np.int64))],
+               outputs=["c_ptr"], reference={"c_ptr": ref.codes.reshape(-1)})
 
     for name, M in (("gemv_wide", 1), ("gemm_wide", 8)):
         K, N = 64, 8

@@ -1,6 +1,11 @@
 {
- "spec_version": "1.10.1",
+ "spec_version": "1.11.0",
  "changelog": [
+  [
+   "1.11.0",
+   "2026-11-23",
+   "A `for` op: a loop with a constant trip count whose body is in the IR once (sf.fori_loop in kernels), so a loop such as a matmul's k-tile loop is no longer unrolled into the file. It carries values from trip to trip (scf.for with iter_args) and gives exactly the bits of the unrolled loop. SF IR JSON format_version 2 adds it; it is the only op with a `body` field, and a kernel with no loop is still written as format_version 1. Plain Python loops still unroll."
+  ],
   [
    "1.10.1",
    "2026-11-22",
@@ -120,10 +125,14 @@
  },
  "sfir": {
   "format": "sfir",
-  "format_version": 1,
+  "format_version": 2,
+  "format_versions": [
+   1,
+   2
+  ],
   "fields": {
    "format": "always \"sfir\"",
-   "format_version": "1; a reader refuses a version it does not know",
+   "format_version": "2 if the kernel has a for op, else 1 (version 1 has no for op); a reader refuses a version it does not know",
    "spec_version": "this spec's version; a reader refuses a different major version",
    "kernel": "the kernel's name",
    "style": "\"block\" (one program is a vector of lanes) or \"thread\" (CUDA style)",
@@ -143,6 +152,13 @@
    "pred": "id of the bool mask the op runs under, or null",
    "loc": "{file, line, col}: base name of the source file (never a path), the line and the 1-based column (col may be null); every op has one, ops sf adds itself give the user line that caused them, param ops give the def"
   },
+  "for_body": {
+   "iv": "the loop index's value id: int, shape [], start + trip * step",
+   "carried": "one value id per arg: the value inside the body, with that arg's type and shape",
+   "ops": "the body's ops, in the same form as the top-level ops; they may use values made before the loop",
+   "yield": "one id per arg, a value the body can see: the carried value for the next trip",
+   "results": "one id per arg: the value after the loop (the arg itself if there are no trips)"
+  },
   "types": {
    "sfN": "^sf([4-9]|1[0-6])$",
    "int": "^int$",
@@ -155,9 +171,7 @@
    "the kernel's source text",
    "full paths, timestamps or anything else that varies between runs"
   ],
-  "planned": [
-   "format_version 2: a `for` op with a constant trip count and a nested body of ops, so a loop such as dot's k loop is not unrolled in the file (Kartik's review, 2026-11-22)"
-  ]
+  "planned": []
  },
  "ops": [
   {
@@ -2504,6 +2518,72 @@
    }
   },
   {
+   "name": "for",
+   "version": "1.11",
+   "category": "control",
+   "signature": "%r0, ... = for %i = start to stop step s iter_args(%c0 = %x0, ...) { ...; yield %y0, ... }",
+   "operands": [
+    "x0, x1, ...: the carried values' initial values (any types)"
+   ],
+   "attrs": {
+    "start": "int, fixed at compile time",
+    "stop": "int (excluded), fixed at compile time",
+    "step": "int, not 0, fixed at compile time"
+   },
+   "result": "one result per carried value, with that value's type and shape (in JSON: body.results; the op's own id is null)",
+   "shape": "each result has the shape of its initial value",
+   "semantics": "i takes start, start + step, ... while i < stop (i > stop for a negative step); no trips if the range is empty, and then the results are the initial values. Each trip binds the iv to i and the carried values to the previous trip's yields (the initial values on the first trip), then runs the body in order. After the last trip the results are the last yields. Exactly the unrolled loop: same ops, same order, same bits, same events.",
+   "predication": "pure",
+   "hw_v1": "a counted BR loop: the trip counter in a register, the carried values in registers or memory",
+   "mlir": {
+    "name": "scf.for with iter_args (index bounds; the iv is cast to the int type)",
+    "traits": [
+     "RecursiveMemoryEffects"
+    ]
+   },
+   "python": [
+    "sf.fori_loop(start, stop, body, init, step=1)"
+   ],
+   "rewrites": [
+    "unrolling (fully or by a factor) is legal: the body has no loop-carried state other than the carried values",
+    "do not reorder trips, and do not split a carried sum across trips (no reassociation, see add)",
+    "the trip count is known at compile time: a loop of 0 or 1 trips may be removed"
+   ],
+   "notes": [
+    "the ops inside the body follow their own predication rules; the for op itself has no effect of its own",
+    "a predicate in force when the loop starts stays in force on every body op (each op's own pred says so)",
+    "body ops may use values made before the loop; values made in the body are seen after it only through the results"
+   ],
+   "events": [],
+   "memory": "none",
+   "faults": [],
+   "ir": {
+    "args": [
+     0,
+     64
+    ],
+    "attrs": {
+     "start": {
+      "type": "int"
+     },
+     "stop": {
+      "type": "int"
+     },
+     "step": {
+      "type": "int"
+     }
+    },
+    "result": [
+     null
+    ]
+   },
+   "v481": {
+    "verdict": "expand",
+    "lowering": "(suggested) a counted loop: the counter in a register, the body once, then ADD the step, CMP with the bound and BR back while it holds (ISA s1.2: thread 0's NZP steers, so the count must be uniform, which a constant trip count is). Carried values stay in registers, or memory when they do not fit. Keep a hot body to 32 instructions for the instruction cache (ISA s1.4); unrolling is always a legal fallback",
+    "cost": "about 3 instructions per trip plus the body"
+   }
+  },
+  {
    "name": "barrier",
    "category": "sync",
    "signature": "barrier",
@@ -2674,8 +2754,8 @@
     "ISA s5, s7"
    ],
    [
-    "Unrolled loops",
-    "The SF IR is straight-line: Python loops are unrolled when a kernel is traced. With 512 program words the compiler must re-roll loops into BR loops (uniform trip counts only)",
+    "Loops",
+    "Plain Python loops are unrolled when a kernel is traced; sf.fori_loop gives a for op with a constant trip count, which lowers to a BR loop. With 512 program words, prefer the for op for long loops; an unrolled loop must otherwise be re-rolled by the compiler (uniform trip counts only)",
     "ISA s1.4, s4.2"
    ],
    [
@@ -2930,6 +3010,12 @@
    "runs": "trace",
    "lowers_to": "shared_load / shared_store / barrier",
    "notes": ""
+  },
+  {
+   "python": "sf.fori_loop",
+   "runs": "trace",
+   "lowers_to": "for",
+   "notes": "the body is traced once; plain Python loops unroll instead"
   },
   {
    "python": "sf.predicate (with block)",

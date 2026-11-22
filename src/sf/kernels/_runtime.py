@@ -30,7 +30,7 @@ from .._scalar import SFScalar
 from .._status import SFStatus
 from . import _ir
 from ._interp import Counters, Interpreter
-from ._ir import INT, Builder, KernelIR, Param, PtrType, SFType, trace_context
+from ._ir import INT, Builder, KernelIR, Param, PtrType, SFType, trace_context, walk
 from ._sym import Ptr, Sym
 
 WIDTH = 256          # lanes per vector op in the cost model
@@ -95,7 +95,7 @@ class KernelDevice(_device.MockAtreides):
         # before launch, never run on the host behind the user's back (Atreides has no SF divide
         # and no square root).  Integer '//' for index arithmetic is a separate op ("idiv")
         if self.supported_ops is not None:
-            for op in ir.ops:
+            for op in walk(ir.ops):
                 if op.name in _SF_HEAVY and op.name not in self.supported_ops:
                     raise SFUnsupportedError(
                         f"kernel {ir.name!r} uses {_SF_HEAVY[op.name]}, which {self.name} has no instruction "

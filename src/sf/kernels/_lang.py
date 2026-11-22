@@ -104,6 +104,77 @@ def cdiv(a, b):
     return -(-int(a) // int(b))
 
 
+
+def _static_int(x, what: str) -> int:
+    if isinstance(x, (Sym, Ptr)) or isinstance(x, (bool, np.bool_)) or not isinstance(x, (int, np.integer)):
+        raise SFCompileError(f"sf.fori_loop: {what} must be a Python int or an sf.constexpr argument "
+                             f"(the trip count is fixed when the kernel is compiled), got {x!r}")
+    return int(x)
+
+
+def fori_loop(start, stop, body, init, *, step: int = 1):
+    """A loop the compiler keeps as a loop: ``for i in range(start, stop, step): carry = body(i, carry)``.
+
+    ``body(i, carry)`` is traced once, with ``i`` a traced int, and becomes the
+    body of one ``for`` op, so the kernel file holds the loop once however many
+    trips it makes (a plain Python ``for`` unrolls every trip into the file).
+    ``carry`` is one traced value or a tuple of them; ``body`` returns new
+    values of the same types and shapes, and ``fori_loop`` returns the values
+    after the last trip (``init`` itself when the loop makes no trips).
+    ``start``, ``stop`` and ``step`` are Python ints or ``sf.constexpr``
+    arguments.  The bits are exactly those of the unrolled loop.
+
+        acc = sf.zeros((BM, BN))
+        def k_tile(k, acc):
+            a = sf.load(a_ptr + offs_m[:, None] * K + (k * BK + offs_k)[None, :])
+            b = sf.load(b_ptr + (k * BK + offs_k)[:, None] * N + offs_n[None, :])
+            return acc + sf.dot(a, b)
+        acc = sf.fori_loop(0, K // BK, k_tile, acc)
+
+    A value made inside ``body`` is only seen after the loop by being returned.
+    """
+    b = builder()
+    start, stop = _static_int(start, "start"), _static_int(stop, "stop")
+    step = _static_int(step, "step")
+    if step == 0:
+        raise SFCompileError("sf.fori_loop: step must not be 0")
+    single = not isinstance(init, (tuple, list))
+    inits = [init] if single else list(init)
+    for i, v in enumerate(inits):
+        if not isinstance(v, Sym):
+            raise SFCompileError(
+                f"sf.fori_loop: carried value {i} is {type(v).__name__}, not a traced sf / int / bool value"
+                + (" (carry the offsets and add them to the pointer inside the body)" if isinstance(v, Ptr) else
+                   " (make it one with sf.full / sf.zeros, or an int expression of sf.program_id)"))
+    if not range(start, stop, step):
+        return init
+    from ._ir import Loop
+    loop = Loop(None, [], [], [], [])
+    with b.loop_body(loop.ops):
+        loop.iv = b.value(INT, ())
+        loop.carried = [b.value(v.type, v.shape) for v in inits]
+        args = [Sym(c) for c in loop.carried]
+        out = body(Sym(loop.iv), args[0] if single else tuple(args))
+        if single:
+            outs = None if isinstance(out, (tuple, list)) else [out]
+        else:
+            outs = list(out) if isinstance(out, (tuple, list)) else None
+        if outs is None or len(outs) != len(inits):
+            raise SFCompileError(f"sf.fori_loop: the body must return {len(inits)} carried value(s), "
+                                 f"in the same structure as init, got {out!r}")
+        for i, (v, o) in enumerate(zip(inits, outs)):
+            if not isinstance(o, Sym) or o.type != v.type or o.shape != v.shape:
+                got = f"{o.type}{list(o.shape)}" if isinstance(o, Sym) else repr(o)
+                raise SFCompileError(f"sf.fori_loop: carried value {i} goes in as {v.type}{list(v.shape)} and the "
+                                     f"body returns {got}; it must keep its type and shape (cast or broadcast it)")
+            if o.v.scope not in b.scopes:
+                raise SFCompileError("sf.fori_loop: the body returns a value made inside another loop's body")
+        loop.yields = [o.v for o in outs]
+    loop.results = [b.value(v.type, v.shape) for v in inits]
+    b.emit("for", [v.v for v in inits], {"start": start, "stop": stop, "step": step}, body=loop)
+    res = [Sym(r) for r in loop.results]
+    return res[0] if single else tuple(res)
+
 # --- memory ------------------------------------------------------------------------------
 
 def load(ptr: Ptr, mask=None, other: Any = 0) -> Sym:

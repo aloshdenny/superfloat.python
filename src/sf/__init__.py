@@ -31,7 +31,7 @@ from ._scalar import DTYPES, SFScalar
 from ._status import SFStatus
 from .kernels import (HardwareAtreides, Kernel, LaunchResult, Limits, SimulatorAtreides,  # noqa: F401
                       arange, autotune, barrier, block_dim, block_idx, cdiv, constexpr, jit, kernel,
-                      load, predicate, program_id, shared, store, synchronize, thread_idx)
+                      load, predicate, program_id, shared, store, synchronize, thread_idx, fori_loop)
 
 __version__ = "0.16.0"          # P·V prefix-invariant (V per key); the bias in the first POP exponent
 
@@ -82,7 +82,7 @@ __all__ = (
      "Device", "MockAtreides", "devices", "get_device", "register_device", "device",
      "sum", "max", "min", "argmax", "argmin", "dot", "matmul", "addmm", "__version__",
      "kernel", "jit", "autotune", "constexpr", "program_id", "block_idx", "thread_idx", "block_dim",
-     "arange", "load", "store", "shared", "barrier", "predicate", "cdiv", "synchronize",
+     "arange", "load", "store", "shared", "barrier", "predicate", "cdiv", "fori_loop", "synchronize",
      "Kernel", "LaunchResult", "Limits", "SimulatorAtreides", "HardwareAtreides"]
     + [cls.__name__ for cls in dtypes]
     + list(_errors_all) + list(_functions_all)

@@ -4,7 +4,8 @@
 
 This is what an importer (superfloat-compile) is expected to check: the file
 layout, the type names, each op's arg count, attributes and result type, and
-that every id refers to an earlier result.  It does not check shapes or
+that every id refers to an earlier result (inside a for op's body, also the
+body's own values; outside it, not those).  It does not check shapes or
 semantics; the reference interpreter does that.
 """
 from __future__ import annotations
@@ -47,59 +48,111 @@ def _attr_ok(v, rule: dict) -> bool:
     raise ValueError(f"unknown attribute type {t!r} in the spec")
 
 
+def _check_ops(ops_list, seen, where, version, ops, sfir, types, defined, errs) -> None:
+    """Check one list of ops (the kernel's, or a for op's body); ``seen``: the ids they may use."""
+    for n, o in enumerate(ops_list):
+        here = f"op {n}{where} ({o.get('op')})"
+        want = set(sfir["op_fields"]) | ({"body"} if o.get("op") == "for" else set())
+        if set(o) != want:
+            errs.append(f"{here}: fields {sorted(set(o) ^ want)} differ from the spec")
+            if isinstance(o.get("id"), int):          # still defined: later uses are not new errors
+                defined[o["id"]] = (o.get("type"), o.get("shape"))
+                seen.add(o["id"])
+            continue
+        rule = ops.get(o["op"])
+        if rule is None:
+            errs.append(f"{here}: not an op in spec/ops.json")
+            continue
+        lo, hi = rule["args"]
+        if not lo <= len(o["args"]) <= hi:
+            errs.append(f"{here}: {len(o['args'])} args, the spec allows {lo} to {hi}")
+        for a in o["args"] + ([o["pred"]] if o["pred"] is not None else []):
+            if a not in seen:
+                errs.append(f"{here}: refers to value {a}, which no earlier op made"
+                            + (" (it was made inside a loop body)" if a in defined else ""))
+        if set(o["attrs"]) != set(rule["attrs"]):
+            errs.append(f"{here}: attrs {sorted(o['attrs'])}, the spec has {sorted(rule['attrs'])}")
+        for k, v in o["attrs"].items():
+            if k in rule["attrs"] and not _attr_ok(v, rule["attrs"][k]):
+                errs.append(f"{here}: attr {k}={v!r} does not match {rule['attrs'][k]}")
+        if o["id"] is None:
+            if None not in rule["result"] or o["type"] is not None or o["shape"] is not None:
+                errs.append(f"{here}: no result, but the spec gives it one (or type / shape is set)")
+        else:
+            name = _type_name(o["type"], types) if isinstance(o["type"], str) else None
+            if name not in rule["result"]:
+                errs.append(f"{here}: result type {o['type']!r}, the spec allows {rule['result']}")
+            if o["id"] in defined:
+                errs.append(f"{here}: value {o['id']} is defined twice")
+            if not (isinstance(o["shape"], list) and len(o["shape"]) <= 3):
+                errs.append(f"{here}: shape {o['shape']!r} is not a list of rank <= 3")
+            defined[o["id"]] = (o["type"], o["shape"])
+            seen.add(o["id"])
+        loc = o["loc"]
+        if not isinstance(loc, dict) or set(loc) != {"file", "line", "col"}:
+            errs.append(f"{here}: loc {loc!r} is not {{file, line, col}}")
+        elif "/" in loc["file"] or "\\" in loc["file"]:
+            errs.append(f"{here}: loc file {loc['file']!r} is a path, not a base name")
+        if o["op"] == "for":
+            _check_for(o, here, seen, version, ops, sfir, types, defined, errs)
+
+
+def _check_for(o, here, seen, version, ops, sfir, types, defined, errs) -> None:
+    if version < 2:
+        errs.append(f"{here}: a for op needs format_version 2")
+    if o["attrs"].get("step") == 0:
+        errs.append(f"{here}: step is 0")
+    B = o["body"]
+    if not isinstance(B, dict) or set(B) != set(sfir["for_body"]):
+        errs.append(f"{here}: body is not {{{', '.join(sorted(sfir['for_body']))}}}")
+        return
+    n = len(o["args"])
+    if not all(isinstance(B[k], list) and len(B[k]) == n for k in ("carried", "yield", "results")):
+        errs.append(f"{here}: {n} args, so carried, yield and results need {n} ids each")
+        return
+    init = [defined.get(a, (None, None)) for a in o["args"]]
+    inner = set(seen)
+
+    def define(i, ts, what):
+        if isinstance(i, bool) or not isinstance(i, int):
+            errs.append(f"{here}: {what} id {i!r} is not an int")
+            return
+        if i in defined:
+            errs.append(f"{here}: value {i} is defined twice")
+        defined[i] = ts
+        return i
+
+    for i in [define(B["iv"], ("int", []), "iv")] + [define(c, ts, "carried") for c, ts in zip(B["carried"], init)]:
+        if i is not None:
+            inner.add(i)
+    _check_ops(B["ops"], inner, f" in the body of {here}", version, ops, sfir, types, defined, errs)
+    for y, ts in zip(B["yield"], init):
+        if y not in inner:
+            errs.append(f"{here}: yield {y}, which the body cannot see")
+        elif defined.get(y) != ts:
+            errs.append(f"{here}: yield {y} is {defined.get(y)}, the carried value is {ts}")
+    for r, ts in zip(B["results"], init):
+        if define(r, ts, "results") is not None:
+            seen.add(r)
+
+
 def check(d: dict, spec: dict | None = None) -> list[str]:
     """Every problem found in the SF IR dict ``d`` (empty when it passes)."""
     spec = spec or load_spec()
     sfir, ops = spec["sfir"], {o["name"]: o["ir"] for o in spec["ops"]}
     types = sfir["types"]
     errs = []
-    if d.get("format") != sfir["format"] or d.get("format_version") != sfir["format_version"]:
-        return [f"not SF IR format {sfir['format']} version {sfir['format_version']}"]
+    version = d.get("format_version")
+    if d.get("format") != sfir["format"] or isinstance(version, bool) or version not in sfir["format_versions"]:
+        return [f"not SF IR format {sfir['format']} version {' or '.join(map(str, sfir['format_versions']))}"]
     if set(d) != set(sfir["fields"]):
         errs.append(f"top-level fields {sorted(set(d) ^ set(sfir['fields']))} differ from the spec")
     if str(d.get("spec_version", "")).split(".")[0] != spec["spec_version"].split(".")[0]:
         errs.append(f"spec_version {d.get('spec_version')!r}: different major version from {spec['spec_version']}")
-    defined: dict[int, str] = {}
-    for n, o in enumerate(d.get("ops", [])):
-        where = f"op {n} ({o.get('op')})"
-        if set(o) != set(sfir["op_fields"]):
-            errs.append(f"{where}: fields {sorted(set(o) ^ set(sfir['op_fields']))} differ from the spec")
-            if isinstance(o.get("id"), int):          # still defined: later uses are not new errors
-                defined[o["id"]] = o.get("type")
-            continue
-        rule = ops.get(o["op"])
-        if rule is None:
-            errs.append(f"{where}: not an op in spec/ops.json")
-            continue
-        lo, hi = rule["args"]
-        if not lo <= len(o["args"]) <= hi:
-            errs.append(f"{where}: {len(o['args'])} args, the spec allows {lo} to {hi}")
-        for a in o["args"] + ([o["pred"]] if o["pred"] is not None else []):
-            if a not in defined:
-                errs.append(f"{where}: refers to value {a}, which no earlier op made")
-        if set(o["attrs"]) != set(rule["attrs"]):
-            errs.append(f"{where}: attrs {sorted(o['attrs'])}, the spec has {sorted(rule['attrs'])}")
-        for k, v in o["attrs"].items():
-            if k in rule["attrs"] and not _attr_ok(v, rule["attrs"][k]):
-                errs.append(f"{where}: attr {k}={v!r} does not match {rule['attrs'][k]}")
-        if o["id"] is None:
-            if None not in rule["result"] or o["type"] is not None or o["shape"] is not None:
-                errs.append(f"{where}: no result, but the spec gives it one (or type / shape is set)")
-        else:
-            name = _type_name(o["type"], types) if isinstance(o["type"], str) else None
-            if name not in rule["result"]:
-                errs.append(f"{where}: result type {o['type']!r}, the spec allows {rule['result']}")
-            if o["id"] in defined:
-                errs.append(f"{where}: value {o['id']} is defined twice")
-            if not (isinstance(o["shape"], list) and len(o["shape"]) <= 3):
-                errs.append(f"{where}: shape {o['shape']!r} is not a list of rank <= 3")
-            defined[o["id"]] = o["type"]
-        loc = o["loc"]
-        if not isinstance(loc, dict) or set(loc) != {"file", "line", "col"}:
-            errs.append(f"{where}: loc {loc!r} is not {{file, line, col}}")
-        elif "/" in loc["file"] or "\\" in loc["file"]:
-            errs.append(f"{where}: loc file {loc['file']!r} is a path, not a base name")
-    param_ids = {o["id"]: o for o in d.get("ops", []) if o.get("op") == "param"}
+    defined: dict[int, tuple] = {}         # every value in the file: (type, shape)
+    if d.get("ops") is not None:
+        _check_ops(d["ops"], set(), "", version, ops, sfir, types, defined, errs)
+    param_ids = {o.get("id"): o for o in d.get("ops", []) if o.get("op") == "param"}
     for p in d.get("params", []):
         po = param_ids.get(p.get("id"))
         if p.get("kind") not in ("ptr", "sf", "int"):

@@ -3,7 +3,7 @@
 Decisions the spec left open or did not state, and how this code resolves
 them. Each one is a single place to change if the team decides differently.
 
-## SF IR JSON and the Atreides driver (spec 1.10.1, not released yet)
+## SF IR JSON and the Atreides driver (spec 1.10.1 and 1.11.0, not released yet)
 
 * sf writes each traced kernel as SF IR JSON (`src/sf/kernels/_irjson.py`, format "sfir" version 1),
   the file `superfloat-compile` reads.  Examples with inputs and expected outputs: `examples/sfir/`.
@@ -14,8 +14,8 @@ them. Each one is a single place to change if the team decides differently.
   buffer (tested; the spec's param entry said the opposite and is fixed).  (3) Each op's args, attribute
   types and result types are in spec/ops.json (`ir` per op, `sfir` for the file); `tools/check_sfir.py`
   checks a file, and `SF_IR_ROUNDTRIP=1 pytest` checks every kernel the suite traces.  This found that
-  `reshape` writes a `shape` attribute the spec did not list.  (4) A `for` op (constant trip count,
-  nested body) is planned for format_version 2; not started.
+  `reshape` writes a `shape` attribute the spec did not list.  (4) A `for` op: done in spec 1.11.0
+  (below), waiting for his review.
 * Also from him: the grid stays out of the file, no source text in it, the compiler CLI (stdin to
   stdout, `--target`, `--version`) and 16-bit two's complement ints are confirmed.
 * The driver (`src/sf/kernels/_driver.py`) reads his kernel file format 0.3-draft (0.1 and 0.2 still read),
@@ -41,6 +41,19 @@ them. Each one is a single place to change if the team decides differently.
   expected output words from atreides-sim.  It is for a chip or RTL testbench we do not drive: whoever
   runs it sends back the data memory and `check_dump` (or `tools/make_chip_run.py --check RUN DUMP`)
   names every word that differs.  Example: `examples/chip_run/axpy_n600.run.json` (3 launches).
+* The `for` op (spec 1.11.0, SF IR format_version 2), from `sf.fori_loop(start, stop, body, init, step=1)`.
+  Tracing, not AST rewriting, so the loop is a function call: the body is traced once with a traced
+  int index, and the carried values go in as `init` and come back as the body's return value (the JAX
+  `fori_loop` shape, with a step).  Why not a Python `for` over `sf.range`: a tracer cannot see which
+  local names the body rebinds, and AST rewriting is what Triton does and we decided against.  The op
+  is MLIR's `scf.for` with `iter_args`: in JSON `args` are the initial values and a `body` field holds
+  `iv`, `carried`, `ops`, `yield` and `results` (types and shapes come from the args).  Values made in
+  the body are refused after the loop at trace time, in the reader and in the checker.  Bounds are
+  compile-time ints (the chip branches on thread 0 only, so the trip count must be uniform).  A kernel
+  with no loop is still written as format_version 1, so Kartik's reader keeps working until he adds
+  version 2.  Interpreter and C backend run it; both give the unrolled loop's bits and events (tested,
+  tests/test_fori_loop.py).  Example for him: `examples/sfir/dot_k_tiles/` (4 k tiles, 16 top-level
+  ops plus a 19-op body).  Plain Python loops still unroll.
 * His hand-written axpy is checked on a toy model of its 7 instructions only (no MX), so wide kernels
   cannot run end to end yet.
 

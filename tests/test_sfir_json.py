@@ -244,7 +244,7 @@ def test_round_trip_same_bits(kernel, args, monkeypatch):
 def test_rejects_bad_files():
     d = json.loads(_traced(axpy, *_axpy_args(), BLOCK=8).to_json())
     for key, value, msg in [("format", "atreides-kernel", "format"),
-                            ("format_version", 2, "format_version"),
+                            ("format_version", 3, "format_version"),
                             ("spec_version", "2.0.0", "major")]:
         with pytest.raises(sf.SFCompileError, match=msg):
             _irjson.from_dict({**d, key: value})

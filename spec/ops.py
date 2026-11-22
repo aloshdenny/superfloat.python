@@ -20,9 +20,10 @@ Versioning (see website/compiler/versioning.mdx):
     example a move to the v4.8.1 wide accumulator).
 """
 
-SPEC_VERSION = "1.10.1"
+SPEC_VERSION = "1.11.0"
 
 CHANGELOG = [
+    ("1.11.0", "2026-11-23", "A `for` op: a loop with a constant trip count whose body is in the IR once (sf.fori_loop in kernels), so a loop such as a matmul's k-tile loop is no longer unrolled into the file. It carries values from trip to trip (scf.for with iter_args) and gives exactly the bits of the unrolled loop. SF IR JSON format_version 2 adds it; it is the only op with a `body` field, and a kernel with no loop is still written as format_version 1. Plain Python loops still unroll."),
     ("1.10.1", "2026-11-22", "From Kartik's review of the SF IR JSON file. No op changes behaviour. Every op now has an `ir` entry: how many args it takes, each attribute's JSON type and the result types it can have, so an importer can check a file; the top-level `sfir` section gives the file layout and the type names (ptr<int> added to the types). param's result was written wrong: pointer params do produce a value (type ptr<sfN> or ptr<int>), and its id is the first argument of every load and store on that buffer. reshape has a `shape` attribute (the result shape); it was missing. A `for` loop op is planned for SF IR JSON format_version 2."),
     ("1.10.0", "2026-11-18", "Decisions by Alosh on the 1.9.0 questions. Attention's P @ V is prefix-invariant: V is quantized per key (one exponent per key, written once like a KV cache entry), each row folds its keys' exponents into P exactly (P'[t, k] = P[t, k] 2^(e_k - E_t), E_t the largest e_k among the keys the row sees) and the accumulator guard bounds each row against its visible keys only, so keys appended after a row never change it (per-channel V over every key did). Measured on GPT-2 and Qwen2.5-0.5B (2,048 WikiText-2 tokens): perplexity unchanged within noise. A linear layer's bias counts in the first POP exponent: max(l2 - h, pow2_exp(|b|)); Qwen2.5-0.5B sf16 redos 2.32M to 0.87M, perplexity 22.417 to 22.415. The three softmax_row changes of 1.9.0 are signed off, and the max-first score rule is written as an integer rule (align to the row's smallest exponent, subtract the max exactly, one round-half-to-even narrowing). sft_wide.json regenerated. DSL 0.16.0."),
     ("1.9.0", "2026-11-18", "Attention's P @ V takes each output's exponent from the exact bound of the quantized product, (sum of the row's P) times max |V| over only the keys that row uses (P != 0), with POP's rounding margin: masked keys never change a row's output exponent and no P @ V output is ever redone (sft_wide.json regenerated: its causal cases change). Integer definitions of exp, softmax, GELU, SiLU, reciprocal and rsqrt (Alosh's sf_intops_ref.py, ported bit for bit as sf.intops) with golden vectors in spec/golden/intops/. sf's softmax_row is Alosh's sequence with three changes, pending his sign-off: e_i flushed by the main exp are summed with 15 more fraction bits (a second exp at d + 15 ln2 / 2^k, a third MX slot popped 15 lower), q below 2^14 after normalising is popped once more one step higher, and P keeps the row's own exponent instead of being shifted to scale 1. DSL 0.15.0."),
@@ -381,6 +382,30 @@ OPS = [
        memory="WRITE block-local shared buffer. Shared memory is zeroed at the start of every program.",
        predication="memory", faults=["live lane out of bounds faults"], hw_v1="tile-local SRAM",
        mlir={"name": "memref.store on workgroup memory", "traits": ["MemWrite"]}, python=["buf[idx] = val"]),
+    _e(name="for", version="1.11", category="control",
+       signature="%r0, ... = for %i = start to stop step s iter_args(%c0 = %x0, ...) { ...; yield %y0, ... }",
+       operands=["x0, x1, ...: the carried values' initial values (any types)"],
+       attrs={"start": "int, fixed at compile time", "stop": "int (excluded), fixed at compile time",
+              "step": "int, not 0, fixed at compile time"},
+       result="one result per carried value, with that value's type and shape (in JSON: body.results; the op's own id is null)",
+       shape="each result has the shape of its initial value",
+       semantics="i takes start, start + step, ... while i < stop (i > stop for a negative step); no trips if the range "
+                 "is empty, and then the results are the initial values. Each trip binds the iv to i and the carried "
+                 "values to the previous trip's yields (the initial values on the first trip), then runs the body in "
+                 "order. After the last trip the results are the last yields. Exactly the unrolled loop: same ops, "
+                 "same order, same bits, same events.",
+       predication="pure",
+       hw_v1="a counted BR loop: the trip counter in a register, the carried values in registers or memory",
+       mlir={"name": "scf.for with iter_args (index bounds; the iv is cast to the int type)", "traits": ["RecursiveMemoryEffects"]},
+       python=["sf.fori_loop(start, stop, body, init, step=1)"],
+       rewrites=["unrolling (fully or by a factor) is legal: the body has no loop-carried state other than the "
+                 "carried values", "do not reorder trips, and do not split a carried sum across trips "
+                 "(no reassociation, see add)", "the trip count is known at compile time: a loop of 0 or 1 trips "
+                 "may be removed"],
+       notes=["the ops inside the body follow their own predication rules; the for op itself has no effect of its own",
+              "a predicate in force when the loop starts stays in force on every body op (each op's own pred says so)",
+              "body ops may use values made before the loop; values made in the body are seen after it only "
+              "through the results"]),
     _e(name="barrier", category="sync", signature="barrier", operands=[], result="none", shape="-",
        semantics="All lanes of the block reach this point before any continues. In lockstep IR this orders shared-memory "
                  "accesses; nothing may be moved across it.",
@@ -419,6 +444,7 @@ PUBLIC = [
     ("sf.program_id / block_idx / thread_idx / block_dim / arange / cdiv", "trace", "program_id / thread_idx / arange / idiv", "block_dim is a trace-time int"),
     ("sf.load / sf.store", "trace", "load / store", ""),
     ("sf.shared / sf.barrier", "trace", "shared_load / shared_store / barrier", ""),
+    ("sf.fori_loop", "trace", "for", "the body is traced once; plain Python loops unroll instead"),
     ("sf.predicate (with block)", "trace", "and (predicate combine), then every op inside carries pred", ""),
     ("sf.torch.convert / backend='superfloat'", "host + device", "dot (Linear/Conv2d as matmul) + add", "per-layer scale chosen on host"),
     ("sf.torch.convert(accumulate='wide') / backend='superfloat'", "host + device", "dot_wide (Linear/Conv2d/Conv1D), shift per token and column",
@@ -505,14 +531,17 @@ IR = {
     "shared_load": _ir(2, [_SF], buf={"type": "int", "min": 0}),
     "shared_store": _ir(3, [None], buf={"type": "int", "min": 0}),
     "barrier": _ir(0, [None]),
+    "for": _ir((0, 64), [None], start={"type": "int"}, stop={"type": "int"}, step={"type": "int"}),
 }
 
 SFIR = {
     "format": "sfir",
-    "format_version": 1,
+    "format_version": 2,
+    "format_versions": [1, 2],
     "fields": {
         "format": "always \"sfir\"",
-        "format_version": "1; a reader refuses a version it does not know",
+        "format_version": "2 if the kernel has a for op, else 1 (version 1 has no for op); a reader refuses "
+                          "a version it does not know",
         "spec_version": "this spec's version; a reader refuses a different major version",
         "kernel": "the kernel's name",
         "style": "\"block\" (one program is a vector of lanes) or \"thread\" (CUDA style)",
@@ -535,12 +564,18 @@ SFIR = {
                "(col may be null); every op has one, ops sf adds itself give the user line that caused them, "
                "param ops give the def",
     },
+    "for_body": {
+        "iv": "the loop index's value id: int, shape [], start + trip * step",
+        "carried": "one value id per arg: the value inside the body, with that arg's type and shape",
+        "ops": "the body's ops, in the same form as the top-level ops; they may use values made before the loop",
+        "yield": "one id per arg, a value the body can see: the carried value for the next trip",
+        "results": "one id per arg: the value after the loop (the arg itself if there are no trips)",
+    },
     "types": {"sfN": "^sf([4-9]|1[0-6])$", "int": "^int$", "bool": "^bool$",
               "ptr<sfN>": "^ptr<sf([4-9]|1[0-6])>$", "ptr<int>": "^ptr<int>$"},
     "not_in_the_file": ["the grid (it changes with every launch and the file is the compile cache key)",
                         "the kernel's source text", "full paths, timestamps or anything else that varies between runs"],
-    "planned": ["format_version 2: a `for` op with a constant trip count and a nested body of ops, so a loop "
-                "such as dot's k loop is not unrolled in the file (Kartik's review, 2026-11-22)"],
+    "planned": [],
 }
 
 assert set(IR) == {o["name"] for o in OPS}, set(IR) ^ {o["name"] for o in OPS}

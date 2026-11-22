@@ -47,6 +47,7 @@ kernel must not return a value.
 | `sf.barrier()` | Block-wide barrier. |
 | `with sf.predicate(mask):` | Stores and event counts inside are masked by `mask` (and any enclosing predicate). Values are still computed on every lane. Nested predicates AND. |
 | `sf.where(cond, x, y)` | Select per lane. |
+| `sf.fori_loop(start, stop, body, init, step=1)` | A loop kept as a loop: `carry = body(i, carry)` for `i` in `range(start, stop, step)`, returning the last carry. The body is traced once (`i` is a traced int) and becomes one `for` op. `init` is a traced value or a tuple of them, and `body` returns the same types and shapes. The bounds are Python ints or constexprs. Same bits as the unrolled loop. |
 | `sf.fma(a, b, c)`, `sf.sqrt(a)`, `sf.maximum(a, b)`, `sf.minimum(a, b)`, `sf.clip(x, lo, hi)`, `sf.cast(x, dtype)` | Same semantics as the host versions. `sf.sqrt` is refused on the Atreides targets (no instruction). |
 | `sf.dot(a, b, accumulate=None, shift=None)` | 2-D tile matmul. Default: a sequential fma chain per output (op `dot`). `accumulate="wide"`: the MX engine, one rounding at `2^shift` (op `dot_wide`); `shift` is one int or an int block broadcastable to the output (one per output; outside -32..31 faults). `None` uses the `sf.accumulate` setting when the kernel is traced; `a @ b` does the same. [Wide mode →](/arrays/wide-mode) |
 | `sf.sum(x, axis=None)`, `sf.max(x, axis=None)`, `sf.min(x, axis=None)` | Tile reductions; `sum` is the sequential saturating chain. |
@@ -59,6 +60,22 @@ kernel must not return a value.
 a traced value in `range()`, raise `SFCompileError` at trace time. Use
 `sf.where` for a value and `sf.predicate` for statements. Loops run over
 Python ints or constexprs and are unrolled.
+
+**Loops that stay loops.** A plain Python loop writes every trip into the
+kernel, which is fine for a few trips. For a long loop, such as a matmul's
+k tiles, use `sf.fori_loop`. The kernel then holds the body once, as a `for`
+op the compiler lowers to a branch loop (the chip holds 512 instructions).
+Values made inside the body leave it only by being returned:
+
+```python
+def k_tile(t, acc):
+    k = t * BK + sf.arange(0, BK)
+    a = sf.load(a_ptr + i * K + k[None, :])
+    b = sf.load(b_ptr + k[:, None] * N + j)
+    return acc + sf.dot(a, b)
+
+acc = sf.fori_loop(0, K // BK, k_tile, sf.zeros((M, N)))
+```
 
 **Divide and square root.** Atreides has no SF divide and no square root, so `atreides-sim` and `atreides-hw` refuse a kernel that uses SF `/` or `sf.sqrt` with `SFUnsupportedError`, before anything is launched (the same rule as device arrays). Compute those values on the host, for example a reciprocal to multiply by.
 

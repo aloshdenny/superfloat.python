@@ -33,8 +33,8 @@ def test_pack_ir_reads_back(name):
     assert KernelIR.from_json(text).to_json() == text
 
 
-def test_pack_has_the_five_kernels_and_a_shift_table():
-    assert sorted(PACK) == ["add", "axpy", "dot_chain", "gemm_wide", "gemv_wide"]
+def test_pack_has_the_six_kernels_and_a_shift_table():
+    assert sorted(PACK) == ["add", "axpy", "dot_chain", "dot_k_tiles", "gemm_wide", "gemv_wide"]
     ins = json.loads(PACK["gemm_wide"]["inputs.json"])
     table = next(a for a in ins["args"] if a["name"] == "s_ptr")
     assert table["type"] == "ptr<int>" and len(table["values"]) == 64
