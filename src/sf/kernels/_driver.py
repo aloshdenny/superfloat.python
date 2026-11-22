@@ -17,11 +17,18 @@ as a list of 16-bit words and the data memory as ``{address: word}``
 (compiler_v4.8.1.md, section 6), plus the thread count and block offset of
 each launch.  Running it (testbench, ISA model or board) is a separate step.
 
-Kernel file format: "atreides-kernel" 0.2-draft (Kartik, 2026-11-22; 0.1 is
-still read).  Confirmed by Kartik: the compiler is called as described in
-``compile_kernel``; ints and int tables are 16-bit two's complement words.
-One choice is still ours: a file that does not say whether pointers are
-compared with CMP is treated as if they are (no buffer crosses 0x8000).
+Kernel file format: "atreides-kernel" 0.3-draft (Kartik, 2026-11-22; 0.1 and
+0.2 are still read, any other version is refused).  From his answers:
+* the compiler is called as described in ``compile_kernel``;
+* ints and int tables are 16-bit two's complement words (int tables:
+  ``dtype "int16"``); sf values below sf16 are left-aligned in their word;
+* ``lanes_per_program`` (BLOCK as written in Python) is what the user's grid
+  is checked against, ``threads_per_program`` (the compiler's choice) is what
+  launches are planned from; a launch holds whole programs;
+* 2-D grids run as row launches with both indices written to the parameter
+  block (his draft, to fix once gemm compiles);
+* the compiler always writes ``pointers_compared_with_cmp``; when missing,
+  the driver assumes true (no buffer crosses 0x8000).
 """
 from __future__ import annotations
 
@@ -45,7 +52,7 @@ from .._scalar import SFScalar
 from ._ir import KernelIR
 
 KERNEL_FORMAT = "atreides-kernel"
-KERNEL_FORMAT_VERSIONS = ("0.1", "0.2")   # accepted major.minor (any suffix, e.g. "-draft")
+KERNEL_FORMAT_VERSIONS = ("0.1", "0.2", "0.3")   # accepted major.minor (any suffix, e.g. "-draft")
 DEFAULT_TARGET = "atreides-v4.9.2"
 PROGRAM_WORDS = 512                        # program memory, words
 WORD = 1 << 16
@@ -91,16 +98,31 @@ def read_kernel(k: dict) -> dict:
         if _int(reserved[0]) > base or _int(reserved[1]) < last:
             bad(f"reserved_words {reserved} does not cover the parameter slots (last at word {last})")
     launch = k.get("launch", {})
-    for key in ("threads_per_block", "max_blocks_per_launch", "total_threads"):
+    axes = int(launch.get("grid_axes", 1))
+    for key in ("threads_per_block", "max_blocks_per_launch") + (("total_threads",) if axes == 1 else ("axes",)):
         if key not in launch:
             bad(f"launch has no {key!r}")
-    total = launch["total_threads"]
-    if isinstance(total, str):
-        names = {s["name"] for s in slots} | {p["name"] for p in k.get("params", {}).get("not_in_block", [])}
-        if total not in names:
+    names = {s["name"] for s in slots} | {p["name"] for p in k.get("params", {}).get("not_in_block", [])}
+    if axes == 1:
+        total = launch["total_threads"]
+        if isinstance(total, str) and total not in names:
             bad(f"launch total_threads names {total!r}, which is not one of the kernel's arguments")
+    elif axes == 2:
+        if len(launch["axes"]) != 2:
+            bad("a 2-D launch needs 2 entries in launch.axes")
+        for a in launch["axes"]:
+            if a.get("param_slot") not in offsets:
+                bad(f"launch axis writes slot {a.get('param_slot')!r}, which is not a parameter slot")
+    else:
+        bad(f"grid_axes {axes}: the driver runs 1-D and 2-D grids")
     if launch["threads_per_block"] * launch["max_blocks_per_launch"] > 255:
         bad("one launch can run at most 255 threads (an 8-bit count)")
+    lanes = launch.get("lanes_per_program")
+    tpp = launch.get("threads_per_program", lanes)
+    if lanes is not None and (int(lanes) < 1 or int(tpp) < 1 or int(lanes) % int(tpp)):
+        bad(f"lanes_per_program {lanes} must be a whole number of threads_per_program {tpp}")
+    if tpp is not None and int(tpp) > launch["threads_per_block"] * launch["max_blocks_per_launch"]:
+        bad(f"threads_per_program {tpp} does not fit in one launch")
     return k
 
 
@@ -111,7 +133,7 @@ class Buffer:
     name: str
     base: int                              # first word address
     length: int                            # words
-    dtype: str                             # "sf16", ..., or "int" for a read-only int table
+    dtype: str                             # "sf16", ..., or "int16" for a read-only int table
     access: str                            # "read", "write" or "readwrite"
 
 
@@ -130,6 +152,8 @@ class LaunchPlan:
     buffers: dict                          # {param name: Buffer}
     launches: list                         # [Launch], run in order
     target: str | None = None
+    grid: tuple = ()                       # programs per axis the chip covers; the user's grid must match
+    lanes: int = 0                         # lanes per program (BLOCK as written in Python)
 
 
 @dataclass
@@ -178,13 +202,19 @@ def _dtype_bits(dtype: str) -> int:
     return int(dtype[2:])
 
 
-def plan_launch(kernel: dict, args: dict) -> LaunchPlan:
+def plan_launch(kernel: dict, args: dict, constexpr: dict | None = None,
+                default_lanes: int | None = None) -> LaunchPlan:
     """Lay out memory and split launches for one call of ``kernel``.
 
     ``args`` maps each parameter name to its value: an ``SFArray`` (or
     ``SFCodes``) for an sf pointer, a NumPy int array for an int table
     (``ptr<int>``), an ``SFScalar`` (or ``SFCode``) for an sf scalar, an int
     for an int.
+
+    ``constexpr`` (the kernel's constexpr values) is for size expressions such
+    as ``cdiv(M, BM)`` in a 2-D launch.  ``default_lanes`` is the lanes per
+    program when the file does not say (the block size for thread kernels);
+    otherwise ``threads_per_block``.
     """
     args = {n: _norm_arg(v) for n, v in args.items()}
     k = read_kernel(kernel)
@@ -205,27 +235,33 @@ def plan_launch(kernel: dict, args: dict) -> LaunchPlan:
     memory: dict[int, int] = {}
     buffers: dict[str, Buffer] = {}
     offset_slot = None
+    axis_slots = {a["param_slot"] for a in launch.get("axes", [])} if launch.get("grid_axes", 1) == 2 else set()
     for s in slots:
         addr = base + s["offset"]
         kind, name = s["kind"], s["name"]
         if kind == "block_offset":
             offset_slot = addr
             continue
+        if s["offset"] in axis_slots:                   # written per launch by the 2-D launch rule
+            continue
         v = args[name]
         if kind == "ptr":
             if isinstance(v, SFCodes):
                 data = np.asarray(v.codes, dtype=np.int64).reshape(-1)
                 bits = v.bits
-                dtype = f"sf{bits}"
-                if s.get("dtype") not in (None, dtype):
-                    raise SFLaunchError(f"{name}: the kernel wants {s['dtype']}, got {dtype}")
+                dtype, encoding = f"sf{bits}", "sign_magnitude"
                 words = [_sf_word(c, bits) for c in data]
             else:
                 data = np.asarray(v).reshape(-1)
                 if not np.issubdtype(data.dtype, np.integer):
                     raise SFLaunchError(f"{name}: a pointer argument is an SFArray or an int array")
-                dtype = "int"
+                dtype, encoding = "int16", "twos_complement"
                 words = [_int_word(x, f"{name}[{i}]") for i, x in enumerate(data)]
+            if s.get("dtype") not in (None, dtype):
+                raise SFLaunchError(f"{name}: the kernel wants {s['dtype']}, got {dtype}")
+            if s.get("encoding") not in (None, encoding):
+                raise SFLaunchError(f"{name}: the kernel file says {s['encoding']} for {dtype}; "
+                                    f"this driver writes {encoding}")
             n = len(words)
             if no_cross and nxt < _CMP_SPLIT < nxt + n:
                 nxt = _CMP_SPLIT                       # signed pointer compares: stay in one half
@@ -247,23 +283,75 @@ def plan_launch(kernel: dict, args: dict) -> LaunchPlan:
         else:
             raise SFLaunchError(f"{k['kernel']}: unknown parameter kind {kind!r} in slot {s['offset']}")
 
-    total = launch["total_threads"]
-    total = int(args[total]) if isinstance(total, str) else int(total)
-    if total < 1:
-        raise SFLaunchError(f"{k['kernel']}: {total} threads; a launch needs at least 1")
     tpb, max_blocks = launch["threads_per_block"], launch["max_blocks_per_launch"]
-    per = tpb * max_blocks
+    lanes = int(launch.get("lanes_per_program", default_lanes or tpb))
+    tpp = int(launch.get("threads_per_program", lanes))     # the compiler's choice; lanes is the user's BLOCK
+    per_launch = (tpb * max_blocks) // tpp                  # whole programs in one launch
+    if per_launch < 1 or lanes % tpp:
+        raise SFLaunchError(f"{k['kernel']}: {lanes} lanes on {tpp} threads per program does not fit a launch")
     launches = []
-    for start in range(0, total, per):
-        threads = min(per, total - start)
-        first_block = start // tpb
-        writes = {offset_slot: _int_word(first_block, "block offset")} if offset_slot is not None else {}
-        if offset_slot is None and start > 0:
+    if int(launch.get("grid_axes", 1)) == 1:
+        size = launch["total_threads"]                      # lanes in all (axpy: n)
+        size = int(args[size]) if isinstance(size, str) else int(size)
+        if size < 1:
+            raise SFLaunchError(f"{k['kernel']}: {size} threads; a launch needs at least 1")
+        grid = (-(-size // lanes),)
+        total = -(-size * tpp // lanes)                     # chip threads: the tail program may be short
+        if offset_slot is None and total > per_launch * tpp:
             raise SFLaunchError(f"{k['kernel']}: {total} threads need several launches, but the kernel "
                                 f"has no block_offset slot")
-        launches.append(Launch(threads, first_block, writes))
+        for start in range(0, total, per_launch * tpp):
+            first_block = start // tpb
+            writes = {offset_slot: _int_word(first_block, "block offset")} if offset_slot is not None else {}
+            launches.append(Launch(min(per_launch * tpp, total - start), first_block, writes))
+    else:
+        # 2-D (Kartik's draft, to fix once gemm compiles): the chip has only a 1-D block index, so run
+        # row launches: at most per_launch programs along axis 0, one axis-1 index each, and write the
+        # first axis-0 program index and the axis-1 index into their parameter slots
+        env = {**{n: v for n, v in args.items() if isinstance(v, (int, np.integer))}, **(constexpr or {})}
+        ax0, ax1 = launch["axes"]
+        grid = (_size(ax0["size"], env, k["kernel"]), _size(ax1["size"], env, k["kernel"]))
+        a0, a1 = base + ax0["param_slot"], base + ax1["param_slot"]
+        for y in range(grid[1]):
+            for x0 in range(0, grid[0], per_launch):
+                count = min(per_launch, grid[0] - x0)
+                launches.append(Launch(count * tpp, x0, {a0: _int_word(x0, "axis 0 index"),
+                                                         a1: _int_word(y, "axis 1 index")}))
     return LaunchPlan(k["kernel"], list(k["program"]["words"]), memory, buffers, launches,
-                      k.get("target", {}).get("isa"))
+                      k.get("target", {}).get("isa"), grid, lanes)
+
+
+_SIZE_FUNCS = {"cdiv": lambda a, b: -(-a // b)}
+
+
+def _size(expr, env: dict, kernel: str) -> int:
+    """A launch size: an int, an argument name, or an expression such as ``cdiv(M, BM)``
+    (ints, names, + - * //, cdiv).  Parsed, never eval'd."""
+    import ast
+    import operator as op
+    if isinstance(expr, int):
+        return expr
+    bins = {ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.FloorDiv: op.floordiv}
+
+    def ev(n):
+        if isinstance(n, ast.Constant) and isinstance(n.value, int):
+            return n.value
+        if isinstance(n, ast.Name) and n.id in env:
+            return int(env[n.id])
+        if isinstance(n, ast.BinOp) and type(n.op) in bins:
+            return bins[type(n.op)](ev(n.left), ev(n.right))
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in _SIZE_FUNCS
+                and not n.keywords):
+            return _SIZE_FUNCS[n.func.id](*[ev(a) for a in n.args])
+        raise SFLaunchError(f"{kernel}: cannot work out the launch size {expr!r} "
+                            f"(unknown name or form; known names: {sorted(env)})")
+    try:
+        v = ev(ast.parse(str(expr), mode="eval").body)
+    except SyntaxError:
+        raise SFLaunchError(f"{kernel}: launch size {expr!r} is not an expression") from None
+    if v < 1:
+        raise SFLaunchError(f"{kernel}: launch size {expr!r} is {v}; it must be at least 1")
+    return v
 
 
 def read_back(plan: LaunchPlan, memory: dict) -> dict:
@@ -273,7 +361,7 @@ def read_back(plan: LaunchPlan, memory: dict) -> dict:
         if b.access == "read":
             continue
         words = [memory.get(a, 0) for a in range(b.base, b.base + b.length)]
-        if b.dtype == "int":
+        if b.dtype == "int16":
             out[b.name] = np.array([w - WORD if w & 0x8000 else w for w in words], dtype=np.int64)
         else:
             bits = _dtype_bits(b.dtype)
@@ -308,31 +396,47 @@ def compiler_version(compiler=None) -> str:
     return _versions[key]
 
 
-def cache_key(ir_json: str, version: str, target: str, options=()) -> str:
-    """Kartik's key: the SF IR JSON, the compiler version, the target and the options."""
-    parts = [ir_json, version, target, json.dumps(list(options))]   # order kept: "-x 1 -y 2" != "-x 2 -y 1"
+def cache_key(ir_json: str, version: str, argv) -> str:
+    """The SF IR JSON, the compiler's version line and the exact argument list passed to it
+    (Kartik: hash the arguments as given, so no option can be left out of the key)."""
+    parts = [ir_json, version, json.dumps(list(argv))]               # order kept: "-x 1 -y 2" != "-x 2 -y 1"
     return hashlib.sha256("\0".join(parts).encode()).hexdigest()
+
+
+def is_dirty(version: str) -> bool:
+    """``superfloat-compile <semver> (<git hash>-dirty)``: a build with uncommitted changes.
+    Two different dirty builds can print the same line, so their output is never cached."""
+    return version.rstrip().endswith("-dirty)")
 
 
 def compile_kernel(ir: KernelIR | str, target: str = DEFAULT_TARGET, options=(), compiler=None) -> dict:
     """The kernel file for ``ir``, from the disk cache or a run of the compiler.
 
-    The interface (confirmed by Kartik): ``superfloat-compile --target
-    <target> [options]`` reads SF IR JSON on stdin, writes the kernel file
-    JSON on stdout, and exits non-zero with a message on stderr on failure.
-    The file must be for the target asked for.
+    The interface (Kartik, 2026-11-22): ``superfloat-compile --target=<target>
+    [-O0|-O1|-O2]`` reads SF IR JSON on stdin, writes the kernel file JSON on
+    stdout, and on failure prints ``file:line: error: ...`` on stderr and
+    exits non-zero.  The file must be for the target asked for.  Debug options
+    (``--emit=...``) are refused: their output is not a kernel file.  A dirty
+    compiler build (version ending in ``-dirty``) is never cached.
     """
     ir_json = ir if isinstance(ir, str) else ir.to_json()
+    options = list(options)
+    debug = [o for o in options if str(o).startswith("--emit")]
+    if debug:
+        raise SFUnsupportedError(f"compiler debug options {debug} are not for the driver; run "
+                                 f"superfloat-compile by hand to see that output")
+    argv = [f"--target={target}", *options]
     cmd = _command(compiler)
-    key = cache_key(ir_json, compiler_version(cmd), target, options)
+    version = compiler_version(cmd)
+    cacheable = not is_dirty(version)
+    key = cache_key(ir_json, version, argv)
     cache = _cache.private_dir("kernels-atreides") if _CACHE_DIR is None else _cache.ensure_private(_CACHE_DIR)
     path = os.path.join(cache, f"{key[:32]}.json")
-    if os.path.exists(path):
+    if cacheable and os.path.exists(path):
         _cache.check_file(path)
         with open(path) as f:
             return read_kernel(json.load(f))
-    proc = subprocess.run([*cmd, "--target", target, *options], input=ir_json,
-                          capture_output=True, text=True)
+    proc = subprocess.run([*cmd, *argv], input=ir_json, capture_output=True, text=True)
     if proc.returncode != 0:
         name = json.loads(ir_json).get("kernel", "?")
         raise SFCompileError(f"{cmd[0]} failed on kernel {name!r} (exit {proc.returncode}):\n{proc.stderr}")
@@ -344,6 +448,8 @@ def compile_kernel(ir: KernelIR | str, target: str = DEFAULT_TARGET, options=(),
     got = (k.get("target") or {}).get("isa")
     if got != target:
         raise SFCompileError(f"{cmd[0]} was asked for target {target!r} but wrote a kernel for {got!r}")
+    if not cacheable:
+        return k
     fd, tmp = tempfile.mkstemp(suffix=".json", prefix=f".{key[:12]}-", dir=cache)
     try:                                            # publish atomically: no half-written cache file
         with os.fdopen(fd, "w") as f:
@@ -357,32 +463,24 @@ def compile_kernel(ir: KernelIR | str, target: str = DEFAULT_TARGET, options=(),
 
 # --- the driver HardwareAtreides calls ---------------------------------------------------------
 
-def check_grid(kernel: dict, plan: LaunchPlan, ir: KernelIR, grid, block) -> int:
-    """Refuse a launch whose grid does not match the threads the chip will run.
+def check_grid(plan: LaunchPlan, grid) -> int:
+    """Refuse a launch whose grid is not the grid of programs the chip will run.
 
-    The chip runs ``total_threads`` threads (for axpy, ``n``) whatever grid the
-    user wrote, so a grid that covers more or fewer programs than that would
-    give other results than atreides-sim.  One program covers
-    ``launch.lanes_per_program`` threads if the file says so; otherwise the
-    block size for thread kernels and ``threads_per_block`` for block kernels.
-    Returns the number of programs (grid points).
+    The chip's thread count comes from the kernel file (for axpy, ``n``
+    lanes in programs of ``lanes_per_program``), not from the grid the user
+    wrote, so any other grid would give other results than atreides-sim.
+    Returns the number of programs.
     """
-    programs = int(np.prod(grid))
-    launch = kernel["launch"]
-    if "lanes_per_program" in launch:
-        lanes = int(launch["lanes_per_program"])
-    elif ir.style == "thread":
-        lanes = int(np.prod(block))
-    else:
-        lanes = int(launch["threads_per_block"])
-    threads = sum(L.threads for L in plan.launches)
-    want = -(-threads // lanes)
-    if programs != want:
-        raise SFLaunchError(f"{plan.kernel}: the grid {tuple(grid)} has {programs} programs, but the chip will "
-                            f"run {threads} threads ({launch['total_threads']!r}), which is {want} programs "
-                            f"of {lanes}; atreides-sim would compute something else")
-    return programs
-
+    def trim(g):
+        g = tuple(int(x) for x in g)
+        while len(g) > 1 and g[-1] == 1:
+            g = g[:-1]
+        return g
+    if trim(grid) != trim(plan.grid):
+        raise SFLaunchError(f"{plan.kernel}: the grid {tuple(grid)} does not match the chip's grid of programs "
+                            f"{plan.grid} ({plan.lanes} lanes per program); atreides-sim would compute "
+                            f"something else")
+    return int(np.prod(plan.grid))
 
 
 class AtreidesDriver:
@@ -421,8 +519,9 @@ class AtreidesDriver:
                 args[p.name] = SFCode(scalars[p.name], p.type.bits)
             else:
                 args[p.name] = scalars[p.name]
-        plan = plan_launch(kernel, args)
-        programs = check_grid(kernel, plan, ir, grid, block)
+        lanes = int(np.prod(block)) if ir.style == "thread" else None
+        plan = plan_launch(kernel, args, ir.constexpr, lanes)
+        programs = check_grid(plan, grid)
         self.last_plan = plan
         memory = self.runner(plan)
         for name, codes in read_back(plan, memory).items():

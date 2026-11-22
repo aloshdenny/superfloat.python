@@ -93,6 +93,73 @@ def test_buffers_start_after_the_last_slot_even_with_gaps():
     assert p.memory[7] == 3 and min(b.base for b in p.buffers.values()) == 8
 
 
+def _v03(lanes=16, tpp=16):
+    k = copy.deepcopy(SAMPLE)
+    k["format_version"] = "0.3-draft"
+    k["launch"].update(lanes_per_program=lanes, threads_per_program=tpp)
+    return k
+
+
+def test_reads_format_0_3_and_refuses_unknown_versions():
+    assert D.read_kernel(_v03())["format_version"] == "0.3-draft"
+    with pytest.raises(sf.SFCompileError, match="format_version"):
+        D.read_kernel(_v03() | {"format_version": "0.4-draft"})
+
+
+def test_lanes_and_threads_per_program():
+    p = D.plan_launch(_v03(16, 16), _axpy_args(20))               # BLOCK 16 on 16 threads
+    assert p.grid == (2,) and p.lanes == 16 and sum(L.threads for L in p.launches) == 20
+    p = D.plan_launch(_v03(16, 8), _axpy_args(20))                # 2 lanes per thread: 10 threads
+    assert p.grid == (2,) and sum(L.threads for L in p.launches) == 10
+    p = D.plan_launch(_v03(16, 16), _axpy_args(600))              # launches hold whole programs
+    assert [L.threads for L in p.launches] == [240, 240, 120]
+    assert [L.block_offset for L in p.launches] == [0, 30, 60]
+    with pytest.raises(sf.SFCompileError, match="whole number"):
+        D.read_kernel(_v03(16, 6))
+
+
+def test_grid_must_match_the_programs():
+    p = D.plan_launch(_v03(16, 16), _axpy_args(20))
+    assert D.check_grid(p, (2,)) == 2 and D.check_grid(p, (2, 1, 1)) == 2
+    for g in [(1,), (3,), (2, 2)]:
+        with pytest.raises(sf.SFLaunchError, match="does not match"):
+            D.check_grid(p, g)
+
+
+def _gemm_2d():
+    k = copy.deepcopy(SAMPLE)
+    k["format_version"] = "0.3-draft"
+    k["params"]["slots"] = [{"offset": 0, "name": "__pid0", "kind": "block_offset"},
+                            {"offset": 1, "name": "a_ptr", "kind": "ptr", "dtype": "sf16", "access": "read"},
+                            {"offset": 2, "name": "c_ptr", "kind": "ptr", "dtype": "sf16", "access": "write"},
+                            {"offset": 3, "name": "__pid1", "kind": "axis_index"}]
+    k["params"]["not_in_block"] = []
+    k["memory"]["reserved_words"] = [0, 3]
+    k["launch"] = {"threads_per_block": 8, "max_blocks_per_launch": 31, "grid_axes": 2,
+                   "lanes_per_program": 8, "threads_per_program": 8,
+                   "axes": [{"size": "cdiv(M, BM)", "param_slot": 0}, {"size": "cdiv(N, BN)", "param_slot": 3}]}
+    return k
+
+
+def test_2d_grid_runs_as_row_launches():
+    a = sf.zeros(8, "sf16")
+    args = {"a_ptr": a, "c_ptr": sf.zeros(8, "sf16")}
+    p = D.plan_launch(_gemm_2d(), args, {"M": 40 * 8, "BM": 8, "N": 24, "BN": 8})
+    assert p.grid == (40, 3)                                      # 40 programs on axis 0, 3 on axis 1
+    assert [(L.threads, L.writes) for L in p.launches[:3]] == [
+        (31 * 8, {0: 0, 3: 0}), (9 * 8, {0: 31, 3: 0}), (31 * 8, {0: 0, 3: 1})]
+    assert len(p.launches) == 6
+    with pytest.raises(sf.SFLaunchError, match="cdiv"):
+        D.plan_launch(_gemm_2d(), args, {"M": 8})                 # BM, N, BN unknown
+
+
+def test_2d_launch_needs_real_slots():
+    k = _gemm_2d()
+    k["launch"]["axes"][1]["param_slot"] = 9
+    with pytest.raises(sf.SFCompileError, match="not a parameter slot"):
+        D.read_kernel(k)
+
+
 def test_launches_split_at_31_blocks():
     p = D.plan_launch(SAMPLE, _axpy_args(600))
     assert [(L.threads, L.block_offset) for L in p.launches] == [(248, 0), (248, 31), (104, 62)]
@@ -121,7 +188,8 @@ def test_sf_words_round_trip_left_aligned(bits):
 
 def test_int_tables_and_ints_are_16_bit_twos_complement():
     k = copy.deepcopy(SAMPLE)
-    k["params"]["slots"] += [{"offset": 5, "name": "s_ptr", "kind": "ptr", "access": "read"},
+    k["params"]["slots"] += [{"offset": 5, "name": "s_ptr", "kind": "ptr", "dtype": "int16",
+                              "encoding": "twos_complement", "access": "read"},
                              {"offset": 6, "name": "m", "kind": "int"}]
     k["memory"]["reserved_words"] = [0, 6]
     args = _axpy_args(8) | {"s_ptr": np.array([-32, -1, 0, 31]), "m": -5}
@@ -129,8 +197,15 @@ def test_int_tables_and_ints_are_16_bit_twos_complement():
     s = p.buffers["s_ptr"]
     assert [p.memory[s.base + i] for i in range(4)] == [0xFFE0, 0xFFFF, 0, 31]
     assert p.memory[6] == 0xFFFB
+    assert s.dtype == "int16"
     with pytest.raises(sf.SFLaunchError, match="16-bit"):
         D.plan_launch(k, args | {"m": 40000})
+    k["params"]["slots"][5]["dtype"] = "int"                         # Kartik: the file names the real width
+    with pytest.raises(sf.SFLaunchError, match="wants int, got int16"):
+        D.plan_launch(k, args)
+    k["params"]["slots"][5].update(dtype="int16", encoding="sign_magnitude")
+    with pytest.raises(sf.SFLaunchError, match="twos_complement"):
+        D.plan_launch(k, args)
 
 
 def test_memory_limits():
@@ -176,15 +251,35 @@ def test_compile_runs_once_then_hits_the_cache(cache):
     assert cache() == 3
 
 
-def test_cache_key_covers_all_four_parts():
-    base = D.cache_key("ir", "v1", "t", ())
-    assert len({base, D.cache_key("ir2", "v1", "t", ()), D.cache_key("ir", "v2", "t", ()),
-                D.cache_key("ir", "v1", "t2", ()), D.cache_key("ir", "v1", "t", ("-O1",))}) == 5
+def test_cache_key_covers_the_ir_the_version_and_the_exact_arguments():
+    base = D.cache_key("ir", "v1", ["--target=t"])
+    assert len({base, D.cache_key("ir2", "v1", ["--target=t"]), D.cache_key("ir", "v2", ["--target=t"]),
+                D.cache_key("ir", "v1", ["--target=t2"]), D.cache_key("ir", "v1", ["--target=t", "-O1"])}) == 5
+
+
+def test_compiler_gets_target_equals_and_the_options(cache, tmp_path):
+    D.compile_kernel(AXPY_IR, options=["-O1"], compiler=FAKE)
+    assert (tmp_path / "count").read_text().split() == ["axpy", "--target=atreides-v4.9.2", "-O1"]
+
+
+def test_dirty_compiler_builds_are_not_cached(cache, monkeypatch):
+    monkeypatch.setattr(D, "_versions", {})
+    monkeypatch.setenv("FAKE_COMPILE_VERSION", "superfloat-compile 0.1.0 (3f2a9c1-dirty)")
+    D.compile_kernel(AXPY_IR, compiler=FAKE)
+    D.compile_kernel(AXPY_IR, compiler=FAKE)
+    assert cache() == 2                                          # compiled both times
+    assert D.is_dirty("superfloat-compile 0.1.0 (3f2a9c1-dirty)")
+    assert not D.is_dirty("superfloat-compile 0.1.0 (3f2a9c1)")
+
+
+def test_debug_options_are_refused(cache):
+    with pytest.raises(sf.SFUnsupportedError, match="debug options"):
+        D.compile_kernel(AXPY_IR, options=["--emit=mlir"], compiler=FAKE)
 
 
 def test_cache_key_keeps_the_order_of_options():
-    assert (D.cache_key("ir", "v1", "t", ("--unroll", "4", "--regs", "8"))
-            != D.cache_key("ir", "v1", "t", ("--unroll", "8", "--regs", "4")))
+    assert (D.cache_key("ir", "v1", ["--unroll", "4", "--regs", "8"])
+            != D.cache_key("ir", "v1", ["--unroll", "8", "--regs", "4"]))
 
 
 def test_compiler_failure_is_a_clean_error(cache, monkeypatch):

@@ -11,7 +11,7 @@ read one back.  The layout (format "sfir", version 1):
      "shared": [{"id": 0, "type": "sf16", "shape": [8, 8]}],
      "ops": [{"id": 15, "op": "fma", "args": [0, 12, 14], "attrs": {},
               "type": "sf16", "shape": [8], "pred": null,
-              "loc": {"file": "axpy.py", "line": 8}}, ...]}
+              "loc": {"file": "axpy.py", "line": 8, "col": 5}}, ...]}
 
 Rules:
 
@@ -25,8 +25,10 @@ Rules:
   ``spec/ops.json``.  Ops with no result (``store``, ``shared_store``,
   ``barrier``) have ``id``, ``type`` and ``shape`` null.
 * ``pred`` is the id of the mask in force, or null.
-* ``loc`` is the file's base name and line, never a full path.  Param ops
-  point at the kernel's ``def`` line.
+* ``loc`` is the file's base name, line and 1-based column (null on Python
+  3.10), never a full path.  Every op has one, including ops sf adds itself:
+  they point at the user's code that caused them.  Param ops point at the
+  kernel's ``def``.
 * SF constants are integer codes (``const`` with ``kind`` "sf"), never floats.
 * Types are ``sf<N>``, ``int`` (int64 here, 16 bits on the chip), ``bool``,
   ``ptr<sf<N>>`` and ``ptr<int>`` (a read-only int table, e.g. per-output
@@ -59,6 +61,21 @@ from ._ir import BOOL, INT, KernelIR, Op, Param, PtrType, SFType, SharedBuf, Val
 FORMAT = "sfir"
 FORMAT_VERSION = 1
 SPEC_VERSION = "1.10.1"          # must equal spec/ops.py (checked by tests/test_sfir_json.py)
+
+# every op the reader accepts (equal to spec/ops.json's ops; tests/test_sfir_json.py checks it)
+OPS = frozenset({
+    "abs", "add", "and", "arange", "barrier", "bool_to_int", "broadcast", "cmp",
+    "cmp_lit", "const", "div", "dot", "dot_wide", "fma", "iabs", "iadd",
+    "icmp", "idiv", "imod", "imul", "ineg", "isub", "load", "max",
+    "maximum", "min", "minimum", "mul", "narrow", "neg", "not", "or",
+    "param", "program_id", "reshape", "shared_load", "shared_store", "sqrt", "store", "sub",
+    "sum", "thread_idx", "transpose", "where", "widen", "xor",
+})
+FIELDS = frozenset({"format", "format_version", "spec_version", "kernel", "style", "block", "constexpr",
+                    "params", "shared", "ops"})
+OP_FIELDS = frozenset({"id", "op", "args", "attrs", "type", "shape", "pred", "loc"})
+PARAM_FIELDS = frozenset({"name", "kind", "type", "id"})
+LOC_FIELDS = frozenset({"file", "line", "col"})
 
 _PTR = re.compile(r"ptr<(sf(\d+)|int)>")
 _SF = re.compile(r"sf(\d+)")
@@ -102,7 +119,7 @@ def to_dict(ir: KernelIR) -> dict:
             "type": _type_str(r.type) if r is not None else None,
             "shape": list(r.shape) if r is not None else None,
             "pred": op.pred.id if op.pred is not None else None,
-            "loc": {"file": op.loc[0], "line": op.loc[1]} if op.loc is not None else None,
+            "loc": {"file": op.loc[0], "line": op.loc[1], "col": op.loc[2]} if op.loc is not None else None,
         })
     # constexpr values live only in the top-level map, not here (one place, Kartik's review)
     params = [{"name": p.name, "kind": p.kind, "type": _type_str(p.type), "id": p.vid}
@@ -149,6 +166,16 @@ def _tuples(x):
     return tuple(_tuples(v) for v in x) if isinstance(x, list) else x
 
 
+def _exact_fields(obj: dict, want: frozenset, what: str) -> None:
+    """Unknown or missing fields are errors: a reader never guesses (Kartik, 2026-11-22)."""
+    got = set(obj)
+    if got != want:
+        extra, missing = sorted(got - want), sorted(want - got)
+        raise SFCompileError(f"SF IR JSON: {what} has " + "; ".join(
+            x for x in (f"unknown fields {extra}" if extra else "", f"missing fields {missing}" if missing else "")
+            if x))
+
+
 def from_dict(d: dict) -> KernelIR:
     """Rebuild a ``KernelIR`` from ``to_dict`` output."""
     if d.get("format") != FORMAT:
@@ -160,6 +187,7 @@ def from_dict(d: dict) -> KernelIR:
     if major != SPEC_VERSION.split(".")[0]:
         raise SFCompileError(f"SF IR JSON: spec_version {d.get('spec_version')!r} has a different major "
                              f"version than this sf's {SPEC_VERSION}")
+    _exact_fields(d, FIELDS, "the file")
     ir = KernelIR(d["kernel"], d["style"])
     ir.block_dim = tuple(d["block"])
     ir.constexpr = {k: _tuples(v) for k, v in d["constexpr"].items()}
@@ -170,7 +198,10 @@ def from_dict(d: dict) -> KernelIR:
             raise SFCompileError(f"SF IR JSON: {what} refers to value {i}, which no earlier op made")
         return values[i]
 
-    for o in d["ops"]:
+    for n, o in enumerate(d["ops"]):
+        _exact_fields(o, OP_FIELDS, f"op {n}")
+        if o["op"] not in OPS:
+            raise SFCompileError(f"SF IR JSON: op {n} is {o['op']!r}, which is not an SF IR op")
         args = [ref(i, o["op"]) for i in o["args"]]
         pred = ref(o["pred"], o["op"]) if o["pred"] is not None else None
         result = None
@@ -179,11 +210,18 @@ def from_dict(d: dict) -> KernelIR:
                 raise SFCompileError(f"SF IR JSON: value {o['id']} is defined twice")
             result = Value(o["id"], _parse_type(o["type"]), tuple(o["shape"]))
             values[o["id"]] = result
-        loc = (o["loc"]["file"], o["loc"]["line"]) if o["loc"] is not None else None
+        loc = None
+        if o["loc"] is not None:
+            _exact_fields(o["loc"], LOC_FIELDS, f"op {n} loc")
+            loc = (o["loc"]["file"], o["loc"]["line"], o["loc"]["col"])
         attrs = {k: _tuples(v) for k, v in o["attrs"].items()}
         ir.ops.append(Op(o["op"], args, attrs, result, pred, loc))
     ir.values = [values[i] for i in sorted(values)]
     for p in d["params"]:
+        if p.get("kind") == "constexpr":
+            raise SFCompileError(f"SF IR JSON: param {p.get('name')!r} has kind 'constexpr'; constexpr "
+                                 "values belong in the top-level constexpr map")
+        _exact_fields(p, PARAM_FIELDS, f"param {p.get('name')!r}")
         if p["kind"] not in ("ptr", "sf", "int"):
             raise SFCompileError(f"SF IR JSON: param {p['name']!r} has kind {p['kind']!r}; constexpr "
                                  "values belong in the top-level constexpr map")

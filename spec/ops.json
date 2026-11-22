@@ -141,7 +141,7 @@
    "type": "the result type (a name from `types`), null with no result",
    "shape": "the result's static shape, a list of rank <= 3 ([] for a scalar); null with no result",
    "pred": "id of the bool mask the op runs under, or null",
-   "loc": "{file, line}: base name of the source file (never a path) and the line; param ops give the def line"
+   "loc": "{file, line, col}: base name of the source file (never a path), the line and the 1-based column (col may be null); every op has one, ops sf adds itself give the user line that caused them, param ops give the def"
   },
   "types": {
    "sfN": "^sf([4-9]|1[0-6])$",

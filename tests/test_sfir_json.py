@@ -101,7 +101,16 @@ def test_param_ops_point_at_the_def_line():
     ir = _traced(axpy, *_axpy_args(), BLOCK=8)
     params = [op for op in ir.ops if op.name == "param"]
     assert len(params) == 5
-    assert all(op.loc == (os.path.basename(__file__), _line("L-def")) for op in params)
+    assert all(op.loc == (os.path.basename(__file__), _line("L-def"), 1) for op in params)
+
+
+def test_loc_has_the_column():
+    ir = _traced(axpy, *_axpy_args(), BLOCK=8)
+    text = open(__file__).read().splitlines()
+    for name, marker, code in [("load", "L-loadx", "sf.load("), ("store", "L-store", "sf.store(")]:
+        op = next(o for o in ir.ops if o.name == name)
+        assert op.loc[1] == _line(marker)
+        assert op.loc[2] == text[op.loc[1] - 1].index(code) + 1      # 1-based, where the call starts
 
 
 def test_dump_is_unchanged_by_locations():
@@ -238,8 +247,23 @@ def test_rejects_bad_files():
     bad["params"].append({"name": "BLOCK", "kind": "constexpr", "value": 8})
     with pytest.raises(sf.SFCompileError, match="top-level constexpr map"):
         _irjson.from_dict(bad)
+    for change, msg in [(lambda x: x.update(grid=[1, 1, 1]), r"the file has unknown fields \['grid'\]"),
+                        (lambda x: x.pop("shared"), r"missing fields \['shared'\]"),
+                        (lambda x: x["ops"][3].update(note="hi"), r"op 3 has unknown fields \['note'\]"),
+                        (lambda x: x["ops"][3].update(op="frobnicate"), "not an SF IR op"),
+                        (lambda x: x["params"][0].update(dtype="sf16"), "unknown fields")]:
+        bad = json.loads(json.dumps(d))
+        change(bad)
+        with pytest.raises(sf.SFCompileError, match=msg):
+            _irjson.from_dict(bad)
     bad = json.loads(json.dumps(d))
     bad["params"][1]["id"] = 77
     with pytest.raises(sf.SFCompileError, match="no param op made"):
         _irjson.from_dict(bad)
 
+
+
+def test_reader_knows_exactly_the_spec_ops():
+    spec = json.loads(open(os.path.join(ROOT, "spec", "ops.json")).read())
+    assert _irjson.OPS == {o["name"] for o in spec["ops"]}
+    assert _irjson.FIELDS == set(spec["sfir"]["fields"]) and _irjson.OP_FIELDS == set(spec["sfir"]["op_fields"])

@@ -20,6 +20,7 @@ side effects and events (if-conversion).  Loops over Python ints and
 from __future__ import annotations
 
 import contextvars
+import itertools
 import os
 import sys
 from dataclasses import dataclass, field
@@ -94,7 +95,7 @@ class Op:
     attrs: dict
     result: Value | None
     pred: Value | None = None      # predicate mask in force (if-conversion)
-    loc: tuple | None = None       # (file name, line) of the user's code that made the op
+    loc: tuple | None = None       # (file name, line, column or None) of the user's code that made the op
 
     def __repr__(self):
         a = ", ".join(repr(x) for x in self.args)
@@ -184,15 +185,24 @@ def _is_machinery(path: str) -> bool:
     return hit
 
 
+def _column(f) -> int | None:
+    """1-based column where the expression running in frame ``f`` starts (Python 3.11+)."""
+    try:
+        pos = next(itertools.islice(f.f_code.co_positions(), f.f_lasti // 2, None))
+    except (AttributeError, StopIteration):
+        return None
+    return pos[2] + 1 if pos[2] is not None else None
+
+
 def _user_loc() -> tuple | None:
-    """(file name, line) of the first caller that is not sf's DSL machinery: the user's line.
+    """(file name, line, column) of the first caller that is not sf's DSL machinery: the user's code.
 
     Only the file's base name is kept, never its full path, so an exported IR
     names no folder (and so no user) and hashes the same on every machine."""
     f = sys._getframe(2)
     while f is not None:
         if not _is_machinery(f.f_code.co_filename):
-            return (os.path.basename(f.f_code.co_filename), f.f_lineno)
+            return (os.path.basename(f.f_code.co_filename), f.f_lineno, _column(f))
         f = f.f_back
     return None
 

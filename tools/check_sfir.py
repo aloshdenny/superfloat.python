@@ -94,8 +94,11 @@ def check(d: dict, spec: dict | None = None) -> list[str]:
             if not (isinstance(o["shape"], list) and len(o["shape"]) <= 3):
                 errs.append(f"{where}: shape {o['shape']!r} is not a list of rank <= 3")
             defined[o["id"]] = o["type"]
-        if o["loc"] is not None and ("/" in o["loc"]["file"] or "\\" in o["loc"]["file"]):
-            errs.append(f"{where}: loc file {o['loc']['file']!r} is a path, not a base name")
+        loc = o["loc"]
+        if not isinstance(loc, dict) or set(loc) != {"file", "line", "col"}:
+            errs.append(f"{where}: loc {loc!r} is not {{file, line, col}}")
+        elif "/" in loc["file"] or "\\" in loc["file"]:
+            errs.append(f"{where}: loc file {loc['file']!r} is a path, not a base name")
     param_ids = {o["id"]: o for o in d.get("ops", []) if o.get("op") == "param"}
     for p in d.get("params", []):
         po = param_ids.get(p.get("id"))

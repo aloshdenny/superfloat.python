@@ -21,6 +21,7 @@
    },
    "id": 0,
    "loc": {
+    "col": 1,
     "file": "export_sfir_examples.py",
     "line": 73
    },
@@ -37,6 +38,7 @@
    },
    "id": 1,
    "loc": {
+    "col": 1,
     "file": "export_sfir_examples.py",
     "line": 73
    },
@@ -53,6 +55,7 @@
    },
    "id": 2,
    "loc": {
+    "col": 1,
     "file": "export_sfir_examples.py",
     "line": 73
    },
@@ -69,6 +72,7 @@
    },
    "id": 3,
    "loc": {
+    "col": 1,
     "file": "export_sfir_examples.py",
     "line": 73
    },
@@ -85,6 +89,7 @@
    },
    "id": 4,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 74
    },
@@ -107,6 +112,7 @@
    },
    "id": 5,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 74
    },
@@ -126,6 +132,7 @@
    },
    "id": 6,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 75
    },
@@ -144,6 +151,7 @@
    },
    "id": 7,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 76
    },
@@ -166,6 +174,7 @@
    },
    "id": 8,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 76
    },
@@ -185,6 +194,7 @@
    },
    "id": 9,
    "loc": {
+    "col": 25,
     "file": "export_sfir_examples.py",
     "line": 77
    },
@@ -201,6 +211,7 @@
    "attrs": {},
    "id": 10,
    "loc": {
+    "col": 25,
     "file": "export_sfir_examples.py",
     "line": 77
    },
@@ -224,6 +235,7 @@
    },
    "id": 11,
    "loc": {
+    "col": 33,
     "file": "export_sfir_examples.py",
     "line": 77
    },
@@ -243,6 +255,7 @@
    "attrs": {},
    "id": 12,
    "loc": {
+    "col": 17,
     "file": "export_sfir_examples.py",
     "line": 77
    },
@@ -262,6 +275,7 @@
    },
    "id": 13,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 77
    },
@@ -278,6 +292,7 @@
    },
    "id": 14,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 77
    },
@@ -296,6 +311,7 @@
    "attrs": {},
    "id": 15,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 77
    },
@@ -319,6 +335,7 @@
    },
    "id": 16,
    "loc": {
+    "col": 25,
     "file": "export_sfir_examples.py",
     "line": 78
    },
@@ -338,6 +355,7 @@
    },
    "id": 17,
    "loc": {
+    "col": 25,
     "file": "export_sfir_examples.py",
     "line": 78
    },
@@ -354,6 +372,7 @@
    "attrs": {},
    "id": 18,
    "loc": {
+    "col": 25,
     "file": "export_sfir_examples.py",
     "line": 78
    },
@@ -373,6 +392,7 @@
    "attrs": {},
    "id": 19,
    "loc": {
+    "col": 17,
     "file": "export_sfir_examples.py",
     "line": 78
    },
@@ -392,6 +412,7 @@
    },
    "id": 20,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 78
    },
@@ -408,6 +429,7 @@
    },
    "id": 21,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 78
    },
@@ -426,6 +448,7 @@
    "attrs": {},
    "id": 22,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 78
    },
@@ -445,6 +468,7 @@
    },
    "id": 23,
    "loc": {
+    "col": 25,
     "file": "export_sfir_examples.py",
     "line": 79
    },
@@ -461,6 +485,7 @@
    "attrs": {},
    "id": 24,
    "loc": {
+    "col": 25,
     "file": "export_sfir_examples.py",
     "line": 79
    },
@@ -480,6 +505,7 @@
    "attrs": {},
    "id": 25,
    "loc": {
+    "col": 17,
     "file": "export_sfir_examples.py",
     "line": 79
    },
@@ -499,6 +525,7 @@
    },
    "id": 26,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 79
    },
@@ -515,6 +542,7 @@
    },
    "id": 27,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 79
    },
@@ -533,6 +561,7 @@
    "attrs": {},
    "id": 28,
    "loc": {
+    "col": 9,
     "file": "export_sfir_examples.py",
     "line": 79
    },
@@ -552,6 +581,7 @@
    },
    "id": 29,
    "loc": {
+    "col": 22,
     "file": "export_sfir_examples.py",
     "line": 80
    },
@@ -568,6 +598,7 @@
    "attrs": {},
    "id": 30,
    "loc": {
+    "col": 22,
     "file": "export_sfir_examples.py",
     "line": 80
    },
@@ -587,6 +618,7 @@
    "attrs": {},
    "id": 31,
    "loc": {
+    "col": 14,
     "file": "export_sfir_examples.py",
     "line": 80
    },
@@ -609,6 +641,7 @@
    },
    "id": 32,
    "loc": {
+    "col": 33,
     "file": "export_sfir_examples.py",
     "line": 80
    },
@@ -628,6 +661,7 @@
    },
    "id": 33,
    "loc": {
+    "col": 5,
     "file": "export_sfir_examples.py",
     "line": 80
    },
@@ -646,6 +680,7 @@
    "attrs": {},
    "id": null,
    "loc": {
+    "col": 5,
     "file": "export_sfir_examples.py",
     "line": 80
    },

@@ -71,7 +71,7 @@ def _op(d, name):
     (lambda d: _op(d, "fma").update(type="float32"), "float32"),
     (lambda d: _op(d, "fma")["args"].__setitem__(0, 999), "value 999"),
     (lambda d: _op(d, "store").update(type="sf16"), "no result"),
-    (lambda d: _op(d, "fma").update(loc={"file": "/home/me/axpy.py", "line": 3}), "a path"),
+    (lambda d: _op(d, "fma").update(loc={"file": "/home/me/axpy.py", "line": 3, "col": 1}), "a path"),
     (lambda d: d["params"].append({"name": "BLOCK", "kind": "constexpr", "value": 8}), "constexpr map"),
     (lambda d: d["params"][1].update(id=0), "no matching param op"),
     (lambda d: d.update(grid=[3, 1, 1]), "top-level fields"),

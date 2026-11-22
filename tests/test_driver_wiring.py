@@ -105,3 +105,23 @@ def test_no_driver_is_a_clear_error(monkeypatch):
     monkeypatch.setattr(HardwareAtreides, "_driver", None)
     with pytest.raises(sf.SFDeviceError, match="no Atreides hardware is attached"):
         _launch("atreides-hw", 8, seed=7)
+
+
+def test_block_16_with_lanes_per_program(hw, monkeypatch):
+    """Kartik's 0.3 rule: the grid is checked against lanes_per_program (BLOCK as written)."""
+    monkeypatch.setenv("FAKE_COMPILE_LAUNCH", '{"lanes_per_program": 16, "threads_per_program": 16}')
+    rng = np.random.default_rng(9)
+    n = 300
+    outs = []
+    for dev in ("atreides-hw", "atreides-sim"):
+        with sf.errstate(all="ignore"):
+            x = sf.asarray(rng.uniform(-0.9, 0.9, n), dtype=sf.sf16, device=dev)
+            y = sf.asarray(rng.uniform(-0.9, 0.9, n), dtype=sf.sf16, device=dev)
+            out = sf.zeros(n, "sf16", device=dev)
+            axpy[(sf.cdiv(n, 16),)](sf.sf16(0.5), x, y, out, n, BLOCK=16)
+        outs.append(out.codes)
+        rng = np.random.default_rng(9)
+    assert np.array_equal(*outs)
+    assert [L.threads for L in hw.last_plan.launches] == [240, 60]
+    with pytest.raises(sf.SFLaunchError, match="does not match"):
+        _launch("atreides-hw", 20, seed=10)                       # BLOCK 8 grid on a 16-lane kernel

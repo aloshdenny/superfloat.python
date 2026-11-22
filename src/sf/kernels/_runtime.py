@@ -279,19 +279,19 @@ class Kernel:
 
 
 def _def_loc(fn) -> tuple:
-    """(file name, line) of the kernel's ``def`` line, past any decorators."""
+    """(file name, line, column) of the kernel's ``def``, past any decorators."""
     import os
     code = fn.__code__
-    line = code.co_firstlineno
+    line, col = code.co_firstlineno, None
     try:
         src, first = inspect.getsourcelines(fn)
         for i, text in enumerate(src):
             if text.lstrip().startswith(("def ", "async def ")):
-                line = first + i
+                line, col = first + i, len(text) - len(text.lstrip()) + 1
                 break
     except (OSError, TypeError):
         pass                                           # no source (exec, REPL): the first line
-    return (os.path.basename(code.co_filename), line)
+    return (os.path.basename(code.co_filename), line, col)
 
 
 def _constexpr_cls():
