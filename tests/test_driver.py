@@ -124,6 +124,48 @@ def test_lanes_and_threads_per_program():
         D.read_kernel(_v03(16, 6))
 
 
+@pytest.mark.parametrize("lanes,tpp", [(6, 6), (12, 12), (4, 4), (16, 8)])
+def test_launches_end_on_block_boundaries(lanes, tpp):
+    """The chip numbers threads from 0 in every block, so a launch that ended mid-block would
+    start the next one on the wrong element.  Runs the real axpy on the toy model to check."""
+    n = 600
+    args = _axpy_args(n, seed=lanes)
+    plan = D.plan_launch(_v03(lanes, tpp), args)
+    assert all(L.threads % 8 == 0 for L in plan.launches[:-1])
+    if lanes == tpp:                                   # Kartik's axpy maps one lane to one thread
+        got = D.read_back(plan, run_toy(plan, plan.memory))["out_ptr"]
+        with sf.errstate(all="ignore"):
+            assert np.array_equal(got, sf.fma(args["a"], args["x_ptr"], args["y_ptr"]).codes)
+
+
+def test_launch_rule_is_checked_once_and_clearly():
+    k = copy.deepcopy(SAMPLE)
+    del k["launch"]["lanes_per_program"]
+    with pytest.raises(sf.SFCompileError, match="without lanes_per_program"):
+        D.read_kernel(k)
+    k = _gemm_2d()
+    k["launch"]["grid_axes"] = "2"                     # a string still means 2-D
+    p = D.plan_launch(k, {"a_ptr": sf.zeros(8, "sf16"), "c_ptr": sf.zeros(8, "sf16")},
+                      {"M": 16, "BM": 8, "N": 8, "BN": 8})
+    assert p.grid == (2, 1)
+    for cx, msg in [({"M": 16, "BM": 0, "N": 8, "BN": 8}, "divides by zero"),
+                    ({"M": (16,), "BM": 8, "N": 8, "BN": 8}, "not an int")]:
+        with pytest.raises(sf.SFLaunchError, match=msg):
+            D.plan_launch(_gemm_2d(), {"a_ptr": sf.zeros(8, "sf16"), "c_ptr": sf.zeros(8, "sf16")}, cx)
+
+
+def test_2d_block_offset_is_the_chip_block():
+    k = _gemm_2d()
+    k["launch"].update(lanes_per_program=16, threads_per_program=16)
+    k["params"]["slots"][0] = {"offset": 0, "name": "__pid0", "kind": "axis_index"}
+    k["params"]["slots"].append({"offset": 4, "name": "__block_offset", "kind": "block_offset"})
+    k["memory"]["reserved_words"] = [0, 4]
+    p = D.plan_launch(k, {"a_ptr": sf.zeros(8, "sf16"), "c_ptr": sf.zeros(8, "sf16")},
+                      {"M": 40 * 16, "BM": 16, "N": 8, "BN": 8})
+    second = p.launches[1]                             # 15 programs of 16 in the first launch
+    assert second.block_offset == 30 and second.writes == {4: 30, 0: 15, 3: 0}
+
+
 def test_grid_must_match_the_programs():
     p = D.plan_launch(_v03(16, 16), _axpy_args(20))
     assert D.check_grid(p, (2,)) == 2 and D.check_grid(p, (2, 1, 1)) == 2

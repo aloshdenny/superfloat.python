@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -97,11 +98,30 @@ def read_kernel(k: dict) -> dict:
         last = base + max(offsets)
         if _int(reserved[0]) > base or _int(reserved[1]) < last:
             bad(f"reserved_words {reserved} does not cover the parameter slots (last at word {last})")
+    _launch_rule(k, None, bad)
+    return k
+
+
+@dataclass
+class LaunchRule:
+    """The kernel file's launch rule, read and checked once."""
+    axes: int                              # 1 or 2
+    tpb: int                               # chip threads per block (8)
+    lanes: int                             # lanes per program: BLOCK as written in Python
+    tpp: int                               # chip threads per program: the compiler's choice
+    per_launch: int                        # whole programs in one launch, a whole number of blocks
+
+
+def _launch_rule(k: dict, default_lanes: int | None, bad) -> LaunchRule:
     launch = k.get("launch", {})
-    axes = int(launch.get("grid_axes", 1))
+    try:
+        axes = int(launch.get("grid_axes", 1))
+    except (TypeError, ValueError):
+        bad(f"grid_axes {launch.get('grid_axes')!r} is not a number")
     for key in ("threads_per_block", "max_blocks_per_launch") + (("total_threads",) if axes == 1 else ("axes",)):
         if key not in launch:
             bad(f"launch has no {key!r}")
+    slots = k.get("params", {}).get("slots", [])
     names = {s["name"] for s in slots} | {p["name"] for p in k.get("params", {}).get("not_in_block", [])}
     if axes == 1:
         total = launch["total_threads"]
@@ -111,19 +131,26 @@ def read_kernel(k: dict) -> dict:
         if len(launch["axes"]) != 2:
             bad("a 2-D launch needs 2 entries in launch.axes")
         for a in launch["axes"]:
-            if a.get("param_slot") not in offsets:
+            if a.get("param_slot") not in {s["offset"] for s in slots}:
                 bad(f"launch axis writes slot {a.get('param_slot')!r}, which is not a parameter slot")
     else:
         bad(f"grid_axes {axes}: the driver runs 1-D and 2-D grids")
-    if launch["threads_per_block"] * launch["max_blocks_per_launch"] > 255:
+    tpb, max_blocks = int(launch["threads_per_block"]), int(launch["max_blocks_per_launch"])
+    if tpb * max_blocks > 255:
         bad("one launch can run at most 255 threads (an 8-bit count)")
-    lanes = launch.get("lanes_per_program")
-    tpp = launch.get("threads_per_program", lanes)
-    if lanes is not None and (int(lanes) < 1 or int(tpp) < 1 or int(lanes) % int(tpp)):
+    if "threads_per_program" in launch and "lanes_per_program" not in launch:
+        bad("threads_per_program is given without lanes_per_program")
+    lanes = int(launch.get("lanes_per_program", default_lanes or tpb))
+    tpp = int(launch.get("threads_per_program", lanes))
+    if lanes < 1 or tpp < 1 or lanes % tpp:
         bad(f"lanes_per_program {lanes} must be a whole number of threads_per_program {tpp}")
-    if tpp is not None and int(tpp) > launch["threads_per_block"] * launch["max_blocks_per_launch"]:
-        bad(f"threads_per_program {tpp} does not fit in one launch")
-    return k
+    # a launch must end on a block boundary: the chip numbers threads from 0 in every block, so a
+    # launch that ended mid-block would make the next one start on the wrong element
+    step = math.lcm(tpp, tpb) // tpp                    # programs that fill whole blocks
+    per_launch = (tpb * max_blocks // tpp) // step * step
+    if per_launch < 1:
+        bad(f"{tpp} threads per program do not fit a launch of whole blocks ({tpb * max_blocks} threads)")
+    return LaunchRule(axes, tpb, lanes, tpp, per_launch)
 
 
 # --- the plan of a launch -----------------------------------------------------------------------
@@ -140,7 +167,7 @@ class Buffer:
 @dataclass
 class Launch:
     threads: int                           # 1..255, the count driven on bus_in[7:0]
-    block_offset: int                      # index of this launch's first block in the whole grid
+    block_offset: int                      # chip block index of this launch's first block (1-D and 2-D)
     writes: dict = field(default_factory=dict)    # {address: word} to write before this launch
 
 
@@ -235,7 +262,10 @@ def plan_launch(kernel: dict, args: dict, constexpr: dict | None = None,
     memory: dict[int, int] = {}
     buffers: dict[str, Buffer] = {}
     offset_slot = None
-    axis_slots = {a["param_slot"] for a in launch.get("axes", [])} if launch.get("grid_axes", 1) == 2 else set()
+    def refuse(msg):
+        raise SFLaunchError(f"{k['kernel']}: {msg}")
+    rule = _launch_rule(k, default_lanes, refuse)
+    axis_slots = {a["param_slot"] for a in launch["axes"]} if rule.axes == 2 else set()
     for s in slots:
         addr = base + s["offset"]
         kind, name = s["kind"], s["name"]
@@ -283,14 +313,9 @@ def plan_launch(kernel: dict, args: dict, constexpr: dict | None = None,
         else:
             raise SFLaunchError(f"{k['kernel']}: unknown parameter kind {kind!r} in slot {s['offset']}")
 
-    tpb, max_blocks = launch["threads_per_block"], launch["max_blocks_per_launch"]
-    lanes = int(launch.get("lanes_per_program", default_lanes or tpb))
-    tpp = int(launch.get("threads_per_program", lanes))     # the compiler's choice; lanes is the user's BLOCK
-    per_launch = (tpb * max_blocks) // tpp                  # whole programs in one launch
-    if per_launch < 1 or lanes % tpp:
-        raise SFLaunchError(f"{k['kernel']}: {lanes} lanes on {tpp} threads per program does not fit a launch")
+    tpb, lanes, tpp, per_launch = rule.tpb, rule.lanes, rule.tpp, rule.per_launch
     launches = []
-    if int(launch.get("grid_axes", 1)) == 1:
+    if rule.axes == 1:
         size = launch["total_threads"]                      # lanes in all (axpy: n)
         size = int(args[size]) if isinstance(size, str) else int(size)
         if size < 1:
@@ -300,14 +325,15 @@ def plan_launch(kernel: dict, args: dict, constexpr: dict | None = None,
         if offset_slot is None and total > per_launch * tpp:
             raise SFLaunchError(f"{k['kernel']}: {total} threads need several launches, but the kernel "
                                 f"has no block_offset slot")
-        for start in range(0, total, per_launch * tpp):
+        for start in range(0, total, per_launch * tpp):     # every launch starts on a block boundary
             first_block = start // tpb
             writes = {offset_slot: _int_word(first_block, "block offset")} if offset_slot is not None else {}
             launches.append(Launch(min(per_launch * tpp, total - start), first_block, writes))
     else:
         # 2-D (Kartik's draft, to fix once gemm compiles): the chip has only a 1-D block index, so run
-        # row launches: at most per_launch programs along axis 0, one axis-1 index each, and write the
-        # first axis-0 program index and the axis-1 index into their parameter slots
+        # row launches: at most per_launch programs along axis 0, one axis-1 index each.  The axis
+        # slots get the first axis-0 program index and the axis-1 index; a separate block_offset slot,
+        # if any, gets the chip block index, as in 1-D
         env = {**{n: v for n, v in args.items() if isinstance(v, (int, np.integer))}, **(constexpr or {})}
         ax0, ax1 = launch["axes"]
         grid = (_size(ax0["size"], env, k["kernel"]), _size(ax1["size"], env, k["kernel"]))
@@ -315,8 +341,13 @@ def plan_launch(kernel: dict, args: dict, constexpr: dict | None = None,
         for y in range(grid[1]):
             for x0 in range(0, grid[0], per_launch):
                 count = min(per_launch, grid[0] - x0)
-                launches.append(Launch(count * tpp, x0, {a0: _int_word(x0, "axis 0 index"),
-                                                         a1: _int_word(y, "axis 1 index")}))
+                first_block = x0 * tpp // tpb               # whole blocks: per_launch is a block multiple
+                writes = {}
+                if offset_slot is not None:
+                    writes[offset_slot] = _int_word(first_block, "block offset")
+                writes[a0] = _int_word(x0, "axis 0 index")
+                writes[a1] = _int_word(y, "axis 1 index")
+                launches.append(Launch(count * tpp, first_block, writes))
     return LaunchPlan(k["kernel"], list(k["program"]["words"]), memory, buffers, launches,
                       k.get("target", {}).get("isa"), grid, lanes)
 
@@ -334,7 +365,7 @@ def _size(expr, env: dict, kernel: str) -> int:
     bins = {ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.FloorDiv: op.floordiv}
 
     def ev(n):
-        if isinstance(n, ast.Constant) and isinstance(n.value, int):
+        if isinstance(n, ast.Constant) and isinstance(n.value, int) and not isinstance(n.value, bool):
             return n.value
         if isinstance(n, ast.Name) and n.id in env:
             return int(env[n.id])
@@ -349,6 +380,10 @@ def _size(expr, env: dict, kernel: str) -> int:
         v = ev(ast.parse(str(expr), mode="eval").body)
     except SyntaxError:
         raise SFLaunchError(f"{kernel}: launch size {expr!r} is not an expression") from None
+    except ZeroDivisionError:
+        raise SFLaunchError(f"{kernel}: launch size {expr!r} divides by zero") from None
+    except (TypeError, ValueError) as e:
+        raise SFLaunchError(f"{kernel}: launch size {expr!r} uses a value that is not an int ({e})") from None
     if v < 1:
         raise SFLaunchError(f"{kernel}: launch size {expr!r} is {v}; it must be at least 1")
     return v
@@ -367,6 +402,96 @@ def read_back(plan: LaunchPlan, memory: dict) -> dict:
             bits = _dtype_bits(b.dtype)
             out[b.name] = np.array([_sf_code(w, bits) for w in words], dtype=np.int64)
     return out
+
+
+# --- a run file: the whole launch as one file, for a chip or RTL testbench we do not drive -------
+#
+# Everything the chip needs, so it can be run where we have no access (Alosh's RTL testbench, a
+# board): the program, the data memory before the first launch, and each launch's thread count
+# and parameter-block writes.  The testbench runs it and sends back the data memory after the
+# last launch (a "dump"); check_dump compares the output buffers with what atreides-sim computed.
+
+RUN_FORMAT = "atreides-run"
+RUN_FORMAT_VERSION = "0.1-draft"
+
+
+def _ranges(memory: dict) -> list:
+    """{address: word} as [{"base": a, "words": [...]}, ...] over runs of consecutive addresses."""
+    out = []
+    for a in sorted(memory):
+        if out and a == out[-1]["base"] + len(out[-1]["words"]):
+            out[-1]["words"].append(int(memory[a]))
+        else:
+            out.append({"base": int(a), "words": [int(memory[a])]})
+    return out
+
+
+def _unranges(r) -> dict:
+    """The inverse of ``_ranges``; also takes {"address": word} or [[address, word], ...]."""
+    if isinstance(r, dict):
+        return {_int(a): int(w) for a, w in r.items()}
+    mem = {}
+    for item in r:
+        if isinstance(item, dict):
+            mem.update({_int(item["base"]) + i: int(w) for i, w in enumerate(item["words"])})
+        else:
+            mem[_int(item[0])] = int(item[1])
+    return mem
+
+
+def to_run_file(plan: LaunchPlan, expected: dict | None = None) -> dict:
+    """The run file for ``plan``.  ``expected`` ({buffer name: codes}, e.g. from atreides-sim) is
+    written as memory words too, so the testbench side can check its own dump."""
+    outputs = [{"name": b.name, "base": b.base, "length": b.length, "dtype": b.dtype}
+               for b in plan.buffers.values() if b.access != "read"]
+    run = {
+        "format": RUN_FORMAT, "format_version": RUN_FORMAT_VERSION,
+        "kernel": plan.kernel, "target": plan.target,
+        "how_to_run": "Load program at program address 0 and memory into data memory. For each launch "
+                      "in order: apply its writes, drive threads on bus_in[7:0], raise start, serve the "
+                      "bus until done, lower start. Then send back the data memory (at least the "
+                      "outputs' words) as a dump in the same ranges format.",
+        "program": list(plan.program),
+        "memory": _ranges(plan.memory),
+        "launches": [{"threads": L.threads, "first_block": L.block_offset, "writes": _ranges(L.writes)}
+                     for L in plan.launches],
+        "outputs": outputs,
+    }
+    if expected is not None:
+        words = {}
+        for o in outputs:
+            codes = np.asarray(expected[o["name"]]).reshape(-1)
+            enc = (lambda c: _int_word(c, o["name"])) if o["dtype"] == "int16" else \
+                  (lambda c, bits=_dtype_bits(o["dtype"]): _sf_word(c, bits))
+            words.update({o["base"] + i: enc(c) for i, c in enumerate(codes)})
+        run["expected"] = _ranges(words)
+    return run
+
+
+def from_run_file(run: dict) -> LaunchPlan:
+    """A ``LaunchPlan`` back from a run file (to replay it on a model, or to read a dump)."""
+    if run.get("format") != RUN_FORMAT:
+        raise SFLaunchError(f"not a run file: format is {run.get('format')!r}")
+    buffers = {o["name"]: Buffer(o["name"], o["base"], o["length"], o["dtype"], "write") for o in run["outputs"]}
+    launches = [Launch(L["threads"], L["first_block"], _unranges(L["writes"])) for L in run["launches"]]
+    return LaunchPlan(run["kernel"], list(run["program"]), _unranges(run["memory"]), buffers, launches,
+                      run.get("target"))
+
+
+def check_dump(run: dict, dump) -> list[str]:
+    """Compare a testbench's memory dump with the run file's expected words.  Returns one line per
+    output word that differs (empty: every output bit matches)."""
+    if "expected" not in run:
+        raise SFLaunchError("the run file has no expected words to check against")
+    got, want = _unranges(dump), _unranges(run["expected"])
+    bad = []
+    for o in run["outputs"]:
+        for i in range(o["length"]):
+            a = o["base"] + i
+            if got.get(a) != want[a]:
+                g = "missing" if a not in got else f"{got[a]:#06x}"
+                bad.append(f"{o['name']}[{i}] (word {a:#06x}): chip {g}, expected {want[a]:#06x}")
+    return bad
 
 
 # --- calling the compiler -----------------------------------------------------------------------

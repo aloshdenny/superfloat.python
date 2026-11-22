@@ -118,6 +118,17 @@ def test_dump_is_unchanged_by_locations():
     assert os.path.basename(__file__) not in ir.dump()
 
 
+def test_every_op_has_a_loc_even_without_a_user_frame(monkeypatch):
+    from sf.kernels import _ir
+    monkeypatch.setattr(_ir, "_user_loc", lambda: None)
+    ir = _traced(axpy, *_axpy_args(), BLOCK=8)
+    assert all(op.loc == (os.path.basename(__file__), _line("L-def"), 1) for op in ir.ops)
+    d = json.loads(ir.to_json())
+    d["ops"][5]["loc"] = None
+    with pytest.raises(sf.SFCompileError, match="has no loc"):
+        _irjson.from_dict(d)
+
+
 def test_loc_skips_only_sf_machinery():
     from sf.kernels import _ir
     sf_dir = _ir._SF_DIR

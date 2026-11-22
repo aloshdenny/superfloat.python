@@ -210,10 +210,10 @@ def from_dict(d: dict) -> KernelIR:
                 raise SFCompileError(f"SF IR JSON: value {o['id']} is defined twice")
             result = Value(o["id"], _parse_type(o["type"]), tuple(o["shape"]))
             values[o["id"]] = result
-        loc = None
-        if o["loc"] is not None:
-            _exact_fields(o["loc"], LOC_FIELDS, f"op {n} loc")
-            loc = (o["loc"]["file"], o["loc"]["line"], o["loc"]["col"])
+        if not isinstance(o["loc"], dict):
+            raise SFCompileError(f"SF IR JSON: op {n} has no loc; every op has one")
+        _exact_fields(o["loc"], LOC_FIELDS, f"op {n} loc")
+        loc = (o["loc"]["file"], o["loc"]["line"], o["loc"]["col"])
         attrs = {k: _tuples(v) for k, v in o["attrs"].items()}
         ir.ops.append(Op(o["op"], args, attrs, result, pred, loc))
     ir.values = [values[i] for i in sorted(values)]

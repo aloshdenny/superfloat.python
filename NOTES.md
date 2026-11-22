@@ -18,7 +18,7 @@ them. Each one is a single place to change if the team decides differently.
   nested body) is planned for format_version 2; not started.
 * Also from him: the grid stays out of the file, no source text in it, the compiler CLI (stdin to
   stdout, `--target`, `--version`) and 16-bit two's complement ints are confirmed.
-* The driver (`src/sf/kernels/_driver.py`) reads his kernel file format 0.2-draft (0.1 still read),
+* The driver (`src/sf/kernels/_driver.py`) reads his kernel file format 0.3-draft (0.1 and 0.2 still read),
   and refuses a compiled kernel whose target is not the one asked for.  Our own choice, not his: a file
   that does not say whether pointers are compared with CMP is treated as if they are.
 * The chip runs `total_threads` lanes whatever grid the user wrote, so the driver refuses a grid that
@@ -33,6 +33,14 @@ them. Each one is a single place to change if the team decides differently.
   `--emit=...` debug options are never cached; 2-D grids run as row launches (his draft).
   Still ours to check with him: in a 2-D launch the axis-0 slot gets the first program index, which
   equals the block index only while threads_per_program = threads_per_block.
+* A launch also ends on a chip block boundary: it holds a multiple of lcm(threads_per_program,
+  threads_per_block) threads, so the block_offset written before it is always a whole block.  The
+  launch rule is read once (`_launch_rule`), when the file is read and again with the call's lanes.
+* Run files (`to_run_file`, format "atreides-run" 0.1-draft): one JSON file with the program, the data
+  memory before the first launch, each launch (threads, first block, the words to write first) and the
+  expected output words from atreides-sim.  It is for a chip or RTL testbench we do not drive: whoever
+  runs it sends back the data memory and `check_dump` (or `tools/make_chip_run.py --check RUN DUMP`)
+  names every word that differs.  Example: `examples/chip_run/axpy_n600.run.json` (3 launches).
 * His hand-written axpy is checked on a toy model of its 7 instructions only (no MX), so wide kernels
   cannot run end to end yet.
 

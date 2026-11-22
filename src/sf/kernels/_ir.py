@@ -213,6 +213,7 @@ class Builder:
         self.pred_stack: list[Value] = []
         self._next = 0
         self.fixed_loc: tuple | None = None   # set while ``Kernel.trace`` emits the params
+        self.default_loc: tuple | None = None  # the kernel's def: used if no user frame is found
 
     def value(self, type_, shape) -> Value:
         v = Value(self._next, type_, tuple(int(s) for s in shape))
@@ -231,7 +232,7 @@ class Builder:
                 raise SFCompileError(f"{name}: a value of shape {tuple(shape)} cannot be computed "
                                      f"under a predicate of shape {pred.shape}") from None
         result = self.value(type_, shape) if type_ is not None else None
-        loc = self.fixed_loc if self.fixed_loc is not None else _user_loc()
+        loc = self.fixed_loc if self.fixed_loc is not None else (_user_loc() or self.default_loc)
         self.ir.ops.append(Op(name, list(args), dict(attrs or {}), result, pred, loc))
         return result
 

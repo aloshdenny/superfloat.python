@@ -231,6 +231,7 @@ class Kernel:
         call_args = []
         given = dict(args)
         b.fixed_loc = self.def_loc                     # param ops point at the ``def`` line
+        b.default_loc = self.def_loc
         with trace_context(b):
             for name in self.sig.parameters:               # signature order, configs included
                 if name in constexpr:
