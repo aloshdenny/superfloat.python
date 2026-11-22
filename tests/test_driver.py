@@ -2,7 +2,7 @@
 launch splitting, the compiler call and its cache.
 
 The end-to-end tests run Kartik's hand-written axpy program (tests/data/
-atreides_kernel_axpy_v0.2.json, written by his axpy_sample.py) on a toy model of the 7 instructions it uses
+atreides_kernel_axpy_v0.3.json, written by his axpy_sample.py; BLOCK 16) on a toy model of the 7 instructions it uses
 (CMP, CONST, LDR, ADD, FMA, STR, RET, as compiler_v4.9.2.md sections 2 and 3
 define them), on the memory the driver lays out, and compare with the host.
 The toy model is for these tests only; it is not the chip.
@@ -23,7 +23,8 @@ from sf.kernels import _driver as D
 from atreides_toy import run_toy  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
-SAMPLE = json.loads((HERE / "data" / "atreides_kernel_axpy_v0.2.json").read_text())
+SAMPLE = json.loads((HERE / "data" / "atreides_kernel_axpy_v0.3.json").read_text())
+SAMPLE_02 = json.loads((HERE / "data" / "atreides_kernel_axpy_v0.2.json").read_text())
 SAMPLE_01 = json.loads((HERE / "data" / "atreides_kernel_axpy_draft.json").read_text())
 FAKE = [sys.executable, str(HERE / "fake_superfloat_compile.py")]
 AXPY_IR = (HERE.parent / "examples" / "sfir" / "axpy" / "kernel.sfir.json").read_text()
@@ -43,12 +44,17 @@ def _axpy_args(n, seed=0):
 def test_reads_the_sample():
     k = D.read_kernel(copy.deepcopy(SAMPLE))
     assert len(k["program"]["words"]) == 25 and k["kernel"] == "axpy"
-    assert k["format_version"] == "0.2-draft" and k["target"] == {"isa": "atreides-v4.9.2", "mx": "v4.9.2"}
+    assert k["format_version"] == "0.3-draft" and k["target"] == {"isa": "atreides-v4.9.2", "mx": "v4.9.2"}
+    assert "cache_key" not in k and all("file" in e for e in k["source_map"])
+    assert (k["launch"]["lanes_per_program"], k["launch"]["threads_per_program"]) == (16, 16)
 
 
-def test_still_reads_the_first_draft():
-    k = D.read_kernel(copy.deepcopy(SAMPLE_01))
-    assert k["format_version"] == "0.1-draft" and k["program"]["words"] == SAMPLE["program"]["words"]
+def test_still_reads_the_earlier_drafts():
+    for old, v in ((SAMPLE_01, "0.1-draft"), (SAMPLE_02, "0.2-draft")):
+        k = D.read_kernel(copy.deepcopy(old))
+        assert k["format_version"] == v and k["program"]["words"] == SAMPLE["program"]["words"]
+    p = D.plan_launch(SAMPLE_02, _axpy_args(20))                   # no lanes fields: 8 per program
+    assert p.grid == (3,) and p.lanes == 8
 
 
 @pytest.mark.parametrize("change,msg", [
@@ -161,9 +167,11 @@ def test_2d_launch_needs_real_slots():
 
 
 def test_launches_split_at_31_blocks():
-    p = D.plan_launch(SAMPLE, _axpy_args(600))
+    p = D.plan_launch(SAMPLE_02, _axpy_args(600))                   # 8 lanes per program: 31 blocks
     assert [(L.threads, L.block_offset) for L in p.launches] == [(248, 0), (248, 31), (104, 62)]
     assert [L.writes for L in p.launches] == [{0: 0}, {0: 31}, {0: 62}]
+    p = D.plan_launch(SAMPLE, _axpy_args(600))                      # 16 lanes: 15 whole programs
+    assert [(L.threads, L.block_offset) for L in p.launches] == [(240, 0), (240, 30), (120, 60)]
 
 
 @pytest.mark.parametrize("n", [1, 8, 20, 248, 249, 600])

@@ -53,7 +53,7 @@ def _launch(device, n, seed, grid=None):
         y = sf.asarray(rng.uniform(-0.9, 0.9, n), dtype=sf.sf16, device=device)
         a = sf.sf16(float(rng.uniform(-0.9, 0.9)))
         out = sf.zeros(n, "sf16", device=device)
-        res = axpy[grid or (sf.cdiv(n, 8),)](a, x, y, out, n, BLOCK=8)
+        res = axpy[grid or (sf.cdiv(n, 16),)](a, x, y, out, n, BLOCK=16)     # Kartik's 0.3 sample: 16 lanes
     return out, res
 
 
@@ -63,13 +63,13 @@ def test_axpy_on_hardware_matches_the_simulator(hw, n):
     out_sim, res_sim = _launch("atreides-sim", n, seed=n)
     assert np.array_equal(out_hw.codes, out_sim.codes)
     assert res.device == "atreides-hw"
-    assert res.counters.programs == res_sim.counters.programs == -(-n // 8)   # counted the same way
-    assert len(hw.last_plan.launches) == -(-n // 248)
+    assert res.counters.programs == res_sim.counters.programs == -(-n // 16)  # counted the same way
+    assert len(hw.last_plan.launches) == -(-n // 240)                       # 15 programs of 16 a launch
 
 
-@pytest.mark.parametrize("grid", [(1,), (4,), (3, 2)])
+@pytest.mark.parametrize("grid", [(1,), (3,), (2, 2)])
 def test_a_grid_that_does_not_match_the_threads_is_refused(hw, grid):
-    with pytest.raises(sf.SFLaunchError, match="programs"):     # n = 20 needs exactly 3 programs of 8
+    with pytest.raises(sf.SFLaunchError, match="does not match"):   # n = 20 needs exactly 2 programs of 16
         _launch("atreides-hw", 20, seed=8, grid=grid)
 
 
@@ -107,21 +107,27 @@ def test_no_driver_is_a_clear_error(monkeypatch):
         _launch("atreides-hw", 8, seed=7)
 
 
-def test_block_16_with_lanes_per_program(hw, monkeypatch):
-    """Kartik's 0.3 rule: the grid is checked against lanes_per_program (BLOCK as written)."""
-    monkeypatch.setenv("FAKE_COMPILE_LAUNCH", '{"lanes_per_program": 16, "threads_per_program": 16}')
-    rng = np.random.default_rng(9)
+def test_block_8_on_a_kernel_file_with_8_lanes(hw, monkeypatch):
+    """lanes_per_program is BLOCK as written: an 8-lane kernel file takes BLOCK 8 grids."""
+    monkeypatch.setenv("FAKE_COMPILE_LAUNCH", '{"lanes_per_program": 8, "threads_per_program": 8}')
     n = 300
     outs = []
     for dev in ("atreides-hw", "atreides-sim"):
+        rng = np.random.default_rng(9)
         with sf.errstate(all="ignore"):
             x = sf.asarray(rng.uniform(-0.9, 0.9, n), dtype=sf.sf16, device=dev)
             y = sf.asarray(rng.uniform(-0.9, 0.9, n), dtype=sf.sf16, device=dev)
             out = sf.zeros(n, "sf16", device=dev)
-            axpy[(sf.cdiv(n, 16),)](sf.sf16(0.5), x, y, out, n, BLOCK=16)
+            axpy[(sf.cdiv(n, 8),)](sf.sf16(0.5), x, y, out, n, BLOCK=8)
         outs.append(out.codes)
-        rng = np.random.default_rng(9)
     assert np.array_equal(*outs)
-    assert [L.threads for L in hw.last_plan.launches] == [240, 60]
-    with pytest.raises(sf.SFLaunchError, match="does not match"):
-        _launch("atreides-hw", 20, seed=10)                       # BLOCK 8 grid on a 16-lane kernel
+    assert [L.threads for L in hw.last_plan.launches] == [248, 52]
+
+
+def test_block_8_grid_on_the_16_lane_sample_is_refused(hw):
+    rng = np.random.default_rng(10)
+    with sf.errstate(all="ignore"):
+        x = sf.asarray(rng.uniform(-0.9, 0.9, 20), dtype=sf.sf16, device="atreides-hw")
+        out = sf.zeros(20, "sf16", device="atreides-hw")
+        with pytest.raises(sf.SFLaunchError, match="does not match"):
+            axpy[(sf.cdiv(20, 8),)](sf.sf16(0.5), x, x, out, 20, BLOCK=8)

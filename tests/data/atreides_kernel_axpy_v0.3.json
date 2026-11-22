@@ -1,0 +1,251 @@
+{
+  "format": "atreides-kernel",
+  "format_version": "0.3-draft",
+  "note": "Hand-assembled sample for building the driver. Checked on a Python model of the ISA, not on the RTL.",
+  "kernel": "axpy",
+  "target": {
+    "isa": "atreides-v4.9.2",
+    "mx": "v4.9.2"
+  },
+  "spec_version": "1.10.0",
+  "compiler": {
+    "name": "superfloat-compile",
+    "version": "hand-written"
+  },
+  "program": {
+    "size_words": 25,
+    "words": [
+      8192,
+      37120,
+      38401,
+      29712,
+      13389,
+      13380,
+      13380,
+      13380,
+      13391,
+      12566,
+      29200,
+      12566,
+      31248,
+      12566,
+      31504,
+      12566,
+      29456,
+      13604,
+      30032,
+      14500,
+      30848,
+      43061,
+      14772,
+      35200,
+      61440
+    ],
+    "listing": [
+      "  0  0x2000  CMP   R0, R0        ; make NZP non-zero (required at entry)",
+      "  1  0x9100  CONST R1, 0         ; R1 = parameter block base (word 0)",
+      "  2  0x9601  CONST R6, 1         ; R6 = 1, step between parameter slots",
+      "  3  0x7410  LDR   R4, R1        ; R4 = block_offset (slot 0)",
+      "  4  0x344D  ADD   R4, R4, R13   ; global block = block_offset + blockIdx",
+      "  5  0x3444  ADD   R4, R4, R4    ; x2",
+      "  6  0x3444  ADD   R4, R4, R4    ; x4",
+      "  7  0x3444  ADD   R4, R4, R4    ; x8 (doubling, not MUL: MUL is 8x8 only)",
+      "  8  0x344F  ADD   R4, R4, R15   ; i = global block * 8 + threadIdx",
+      "  9  0x3116  ADD   R1, R1, R6",
+      " 10  0x7210  LDR   R2, R1        ; R2 = x_ptr (slot 1)",
+      " 11  0x3116  ADD   R1, R1, R6",
+      " 12  0x7A10  LDR   R10, R1       ; R10 = y_ptr (slot 2)",
+      " 13  0x3116  ADD   R1, R1, R6",
+      " 14  0x7B10  LDR   R11, R1       ; R11 = out_ptr (slot 3)",
+      " 15  0x3116  ADD   R1, R1, R6",
+      " 16  0x7310  LDR   R3, R1        ; R3 = a, sign-magnitude sf16 (slot 4)",
+      " 17  0x3524  ADD   R5, R2, R4    ; &x[i]",
+      " 18  0x7550  LDR   R5, R5        ; x[i]",
+      " 19  0x38A4  ADD   R8, R10, R4   ; &y[i]",
+      " 20  0x7880  LDR   R8, R8        ; y[i], the FMA accumulator",
+      " 21  0xA835  FMA   R8, R3, R5    ; R8 = y[i] + a * x[i]",
+      " 22  0x39B4  ADD   R9, R11, R4   ; &out[i]",
+      " 23  0x8980  STR   R9, R8        ; out[i] = R8",
+      " 24  0xF000  RET"
+    ]
+  },
+  "params": {
+    "base_address": 0,
+    "slots": [
+      {
+        "offset": 0,
+        "name": "__block_offset",
+        "kind": "block_offset",
+        "meaning": "index of this launch's first block in the whole grid"
+      },
+      {
+        "offset": 1,
+        "name": "x_ptr",
+        "kind": "ptr",
+        "dtype": "sf16",
+        "access": "read"
+      },
+      {
+        "offset": 2,
+        "name": "y_ptr",
+        "kind": "ptr",
+        "dtype": "sf16",
+        "access": "read"
+      },
+      {
+        "offset": 3,
+        "name": "out_ptr",
+        "kind": "ptr",
+        "dtype": "sf16",
+        "access": "write"
+      },
+      {
+        "offset": 4,
+        "name": "a",
+        "kind": "sf",
+        "dtype": "sf16",
+        "encoding": "sign_magnitude"
+      }
+    ],
+    "not_in_block": [
+      {
+        "name": "n",
+        "kind": "int",
+        "used_as": "total_threads",
+        "why": "the tail mask i < n is lowered to the launch's thread count"
+      }
+    ]
+  },
+  "launch": {
+    "threads_per_block": 8,
+    "grid_axes": 1,
+    "lanes_per_program": 16,
+    "threads_per_program": 16,
+    "program_mapping": "one lane per chip thread: one program (BLOCK=16) runs on 2 chip blocks",
+    "total_threads": "n",
+    "max_blocks_per_launch": 31,
+    "rule": "Split total_threads into launches of at most 31 full blocks (248 threads). Before each launch write __block_offset = index of its first block. The last launch gets the remaining threads."
+  },
+  "memory": {
+    "reserved_words": [
+      0,
+      4
+    ],
+    "buffers_below": "0xFFC0",
+    "pointers_compared_with_cmp": false,
+    "scratchpad_words": 0,
+    "encoding": "every sf16 value in memory is sign-magnitude; the driver converts codes on upload and download"
+  },
+  "source_map": [
+    {
+      "pc": 3,
+      "file": "axpy.py",
+      "line": 3
+    },
+    {
+      "pc": 4,
+      "file": "axpy.py",
+      "line": 3
+    },
+    {
+      "pc": 5,
+      "file": "axpy.py",
+      "line": 3
+    },
+    {
+      "pc": 6,
+      "file": "axpy.py",
+      "line": 3
+    },
+    {
+      "pc": 7,
+      "file": "axpy.py",
+      "line": 3
+    },
+    {
+      "pc": 8,
+      "file": "axpy.py",
+      "line": 3
+    },
+    {
+      "pc": 9,
+      "file": "axpy.py",
+      "line": 2
+    },
+    {
+      "pc": 10,
+      "file": "axpy.py",
+      "line": 2
+    },
+    {
+      "pc": 11,
+      "file": "axpy.py",
+      "line": 2
+    },
+    {
+      "pc": 12,
+      "file": "axpy.py",
+      "line": 2
+    },
+    {
+      "pc": 13,
+      "file": "axpy.py",
+      "line": 2
+    },
+    {
+      "pc": 14,
+      "file": "axpy.py",
+      "line": 2
+    },
+    {
+      "pc": 15,
+      "file": "axpy.py",
+      "line": 2
+    },
+    {
+      "pc": 16,
+      "file": "axpy.py",
+      "line": 2
+    },
+    {
+      "pc": 17,
+      "file": "axpy.py",
+      "line": 4
+    },
+    {
+      "pc": 18,
+      "file": "axpy.py",
+      "line": 4
+    },
+    {
+      "pc": 19,
+      "file": "axpy.py",
+      "line": 4
+    },
+    {
+      "pc": 20,
+      "file": "axpy.py",
+      "line": 4
+    },
+    {
+      "pc": 21,
+      "file": "axpy.py",
+      "line": 4
+    },
+    {
+      "pc": 22,
+      "file": "axpy.py",
+      "line": 4
+    },
+    {
+      "pc": 23,
+      "file": "axpy.py",
+      "line": 4
+    }
+  ],
+  "stats": {
+    "instructions": 25,
+    "external_loads_per_thread": 7,
+    "external_stores_per_thread": 1
+  }
+}

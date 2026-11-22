@@ -2,12 +2,12 @@
 
 ``--version`` prints a version.  Otherwise it reads SF IR JSON on stdin,
 checks it is SF IR, and prints the hand-written axpy kernel file
-(tests/data/atreides_kernel_axpy_v0.2.json) with the requested target.
+(tests/data/atreides_kernel_axpy_v0.3.json) with the requested target.
 FAKE_COMPILE_COUNT names a file to which each compile appends a line, so
 tests can count runs; FAKE_COMPILE_FAIL makes it fail like a compiler bug;
 FAKE_COMPILE_WRONG_TARGET makes it write a kernel for another target;
 FAKE_COMPILE_VERSION replaces its version line.  FAKE_COMPILE_LAUNCH (JSON) is merged into
-the kernel file's launch rule, which is then labelled 0.3-draft.  It takes ``--target=T`` as
+the kernel file's launch rule.  It takes ``--target=T`` as
 the real one does, and writes its argument list to FAKE_COMPILE_COUNT too.
 """
 import json
@@ -15,7 +15,7 @@ import os
 import sys
 from pathlib import Path
 
-SAMPLE = Path(__file__).resolve().parent / "data" / "atreides_kernel_axpy_v0.2.json"
+SAMPLE = Path(__file__).resolve().parent / "data" / "atreides_kernel_axpy_v0.3.json"
 
 
 def main(argv):
@@ -41,7 +41,6 @@ def main(argv):
     k["target"]["isa"] = os.environ.get("FAKE_COMPILE_WRONG_TARGET") or target
     if os.environ.get("FAKE_COMPILE_LAUNCH"):              # e.g. {"lanes_per_program": 16, ...}
         k["launch"].update(json.loads(os.environ["FAKE_COMPILE_LAUNCH"]))
-        k["format_version"] = "0.3-draft"
     print(json.dumps(k))
     return 0
 
