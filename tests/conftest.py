@@ -30,11 +30,18 @@ if os.environ.get("SF_IR_ROUNDTRIP") == "1":
     from sf.kernels._ir import KernelIR             # noqa: E402
     from sf.kernels._runtime import Kernel          # noqa: E402
 
+    import json                                     # noqa: E402
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+    from check_sfir import check, load_spec         # noqa: E402
+
     _trace = Kernel.trace
+    _spec = load_spec()
 
     def _round_trip_trace(self, *a, **k):
         ir = _trace(self, *a, **k)
         text = ir.to_json()
+        errs = check(json.loads(text), _spec)       # and it must pass the spec's per-op schema
+        assert not errs, f"{ir.name}: SF IR JSON does not match spec/ops.json:\n" + "\n".join(errs)
         back = KernelIR.from_json(text)
         assert back.to_json() == text, f"{ir.name}: SF IR JSON round trip changed the file"
         return back

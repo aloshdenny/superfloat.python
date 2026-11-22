@@ -3,6 +3,27 @@
 Decisions the spec left open or did not state, and how this code resolves
 them. Each one is a single place to change if the team decides differently.
 
+## SF IR JSON and the Atreides driver (spec 1.10.1, not released yet)
+
+* sf writes each traced kernel as SF IR JSON (`src/sf/kernels/_irjson.py`, format "sfir" version 1),
+  the file `superfloat-compile` reads.  Examples with inputs and expected outputs: `examples/sfir/`.
+* Kartik's review (2026-11-22): the design is fine, with four changes, now done.  (1) Constexpr values
+  are only in the top-level `constexpr` map, not also in `params`; reading a file puts them back after
+  the runtime params, so the signature order of constexpr params is not kept (nothing uses it).
+  (2) Pointer params have a value id, and it is the first argument of every load and store on that
+  buffer (tested; the spec's param entry said the opposite and is fixed).  (3) Each op's args, attribute
+  types and result types are in spec/ops.json (`ir` per op, `sfir` for the file); `tools/check_sfir.py`
+  checks a file, and `SF_IR_ROUNDTRIP=1 pytest` checks every kernel the suite traces.  This found that
+  `reshape` writes a `shape` attribute the spec did not list.  (4) A `for` op (constant trip count,
+  nested body) is planned for format_version 2; not started.
+* Also from him: the grid stays out of the file, no source text in it, the compiler CLI (stdin to
+  stdout, `--target`, `--version`) and 16-bit two's complement ints are confirmed.
+* The driver (`src/sf/kernels/_driver.py`) reads his kernel file format 0.2-draft (0.1 still read),
+  and refuses a compiled kernel whose target is not the one asked for.  Our own choice, not his: a file
+  that does not say whether pointers are compared with CMP is treated as if they are.
+* His hand-written axpy is checked on a toy model of its 7 instructions only (no MX), so wide kernels
+  cannot run end to end yet.
+
 ## Alosh's decisions on the 0.15.0 questions (0.16.0, spec 1.10.0)
 
 * Alosh (2026-11-18), on Poojith's four questions in PR 23; measured on GPT-2 and Qwen2.5-0.5B, 2,048

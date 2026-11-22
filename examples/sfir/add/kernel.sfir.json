@@ -311,14 +311,9 @@
    "kind": "int",
    "name": "n",
    "type": "int"
-  },
-  {
-   "kind": "constexpr",
-   "name": "BLOCK",
-   "value": 8
   }
  ],
  "shared": [],
- "spec_version": "1.10.0",
+ "spec_version": "1.10.1",
  "style": "block"
 }

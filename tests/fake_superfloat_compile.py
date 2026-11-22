@@ -2,16 +2,17 @@
 
 ``--version`` prints a version.  Otherwise it reads SF IR JSON on stdin,
 checks it is SF IR, and prints the hand-written axpy kernel file
-(tests/data/atreides_kernel_axpy_draft.json) with the requested target.
+(tests/data/atreides_kernel_axpy_v0.2.json) with the requested target.
 FAKE_COMPILE_COUNT names a file to which each compile appends a line, so
-tests can count runs; FAKE_COMPILE_FAIL makes it fail like a compiler bug.
+tests can count runs; FAKE_COMPILE_FAIL makes it fail like a compiler bug;
+FAKE_COMPILE_WRONG_TARGET makes it write a kernel for another target.
 """
 import json
 import os
 import sys
 from pathlib import Path
 
-SAMPLE = Path(__file__).resolve().parent / "data" / "atreides_kernel_axpy_draft.json"
+SAMPLE = Path(__file__).resolve().parent / "data" / "atreides_kernel_axpy_v0.2.json"
 
 
 def main(argv):
@@ -31,7 +32,7 @@ def main(argv):
             f.write(ir["kernel"] + "\n")
     k = json.loads(SAMPLE.read_text())
     target = argv[argv.index("--target") + 1] if "--target" in argv else None
-    k["target"]["isa"] = target
+    k["target"]["isa"] = os.environ.get("FAKE_COMPILE_WRONG_TARGET") or target
     print(json.dumps(k))
     return 0
 

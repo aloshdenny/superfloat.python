@@ -17,8 +17,11 @@ as a list of 16-bit words and the data memory as ``{address: word}``
 (compiler_v4.8.1.md, section 6), plus the thread count and block offset of
 each launch.  Running it (testbench, ISA model or board) is a separate step.
 
-Kernel file format: "atreides-kernel" 0.1-draft (Kartik, 2026-11-21).
-Assumptions still to confirm with him are marked ASSUMED.
+Kernel file format: "atreides-kernel" 0.2-draft (Kartik, 2026-11-22; 0.1 is
+still read).  Confirmed by Kartik: the compiler is called as described in
+``compile_kernel``; ints and int tables are 16-bit two's complement words.
+One choice is still ours: a file that does not say whether pointers are
+compared with CMP is treated as if they are (no buffer crosses 0x8000).
 """
 from __future__ import annotations
 
@@ -42,7 +45,7 @@ from .._scalar import SFScalar
 from ._ir import KernelIR
 
 KERNEL_FORMAT = "atreides-kernel"
-KERNEL_FORMAT_VERSIONS = ("0.1",)          # accepted major.minor prefixes
+KERNEL_FORMAT_VERSIONS = ("0.1", "0.2")   # accepted major.minor (any suffix, e.g. "-draft")
 DEFAULT_TARGET = "atreides-v4.9.2"
 PROGRAM_WORDS = 512                        # program memory, words
 WORD = 1 << 16
@@ -66,7 +69,7 @@ def read_kernel(k: dict) -> dict:
 
     if k.get("format") != KERNEL_FORMAT:
         bad(f"format is {k.get('format')!r}, not {KERNEL_FORMAT!r}")
-    if not str(k.get("format_version", "")).startswith(KERNEL_FORMAT_VERSIONS):
+    if ".".join(str(k.get("format_version", "")).split("-")[0].split(".")[:2]) not in KERNEL_FORMAT_VERSIONS:
         bad(f"format_version {k.get('format_version')!r} is not one this driver reads {KERNEL_FORMAT_VERSIONS}")
     words = k.get("program", {}).get("words")
     if not isinstance(words, list) or not words:
@@ -178,7 +181,7 @@ def plan_launch(kernel: dict, args: dict) -> LaunchPlan:
     base = _int(params.get("base_address", 0))
     slots = sorted(params.get("slots", []), key=lambda s: s["offset"])
     below = _int(mem_rules.get("buffers_below", 0xFFC0))
-    no_cross = bool(mem_rules.get("pointers_compared_with_cmp", True))   # ASSUMED: strict when missing
+    no_cross = bool(mem_rules.get("pointers_compared_with_cmp", True))   # our choice: strict when missing
     reserved = mem_rules.get("reserved_words", [base, base + (slots[-1]["offset"] if slots else 0)])
     nxt = max(_int(reserved[1]) + 1, base + len(slots))
 
@@ -279,7 +282,7 @@ def _command(compiler) -> list:
 
 
 def compiler_version(compiler=None) -> str:
-    """``superfloat-compile --version``, asked once per command.  ASSUMED interface."""
+    """``superfloat-compile --version``, asked once per command."""
     cmd = _command(compiler)
     key = tuple(cmd)
     with _lock:
@@ -302,9 +305,10 @@ def cache_key(ir_json: str, version: str, target: str, options=()) -> str:
 def compile_kernel(ir: KernelIR | str, target: str = DEFAULT_TARGET, options=(), compiler=None) -> dict:
     """The kernel file for ``ir``, from the disk cache or a run of the compiler.
 
-    ASSUMED interface, to confirm with Kartik: ``superfloat-compile --target
+    The interface (confirmed by Kartik): ``superfloat-compile --target
     <target> [options]`` reads SF IR JSON on stdin, writes the kernel file
     JSON on stdout, and exits non-zero with a message on stderr on failure.
+    The file must be for the target asked for.
     """
     ir_json = ir if isinstance(ir, str) else ir.to_json()
     cmd = _command(compiler)
@@ -325,6 +329,9 @@ def compile_kernel(ir: KernelIR | str, target: str = DEFAULT_TARGET, options=(),
     except json.JSONDecodeError as e:
         raise SFCompileError(f"{cmd[0]} wrote something that is not JSON: {e}") from None
     read_kernel(k)
+    got = (k.get("target") or {}).get("isa")
+    if got != target:
+        raise SFCompileError(f"{cmd[0]} was asked for target {target!r} but wrote a kernel for {got!r}")
     fd, tmp = tempfile.mkstemp(suffix=".json", prefix=f".{key[:12]}-", dir=cache)
     try:                                            # publish atomically: no half-written cache file
         with os.fdopen(fd, "w") as f:

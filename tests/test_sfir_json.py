@@ -116,9 +116,8 @@ def test_json_fields():
     assert d["format"] == "sfir" and d["format_version"] == 1
     assert d["kernel"] == "axpy" and d["style"] == "block" and d["block"] == [1, 1, 1]
     assert d["constexpr"] == {"BLOCK": 8} and "grid" not in d
-    assert [p["name"] for p in d["params"]] == ["a", "x_ptr", "y_ptr", "out_ptr", "n", "BLOCK"]
+    assert [p["name"] for p in d["params"]] == ["a", "x_ptr", "y_ptr", "out_ptr", "n"]   # no BLOCK here
     assert d["params"][1] == {"name": "x_ptr", "kind": "ptr", "type": "ptr<sf16>", "id": 1}
-    assert d["params"][-1] == {"name": "BLOCK", "kind": "constexpr", "value": 8}
     fma = next(o for o in d["ops"] if o["op"] == "fma")
     assert fma["args"] == [0, 12, 14] and fma["type"] == "sf16" and fma["shape"] == [8]
     store = d["ops"][-1]
@@ -150,6 +149,30 @@ def test_every_op_kernel_covers_the_missing_ops():
             "transpose", "xor"} <= names
 
 
+def test_constexpr_is_written_in_one_place():
+    text = _traced(axpy, *_axpy_args(), BLOCK=8).to_json()
+    d = json.loads(text)
+    assert d["constexpr"] == {"BLOCK": 8}
+    assert all(p["kind"] in ("ptr", "sf", "int") for p in d["params"])
+    assert text.count('"BLOCK"') == 1
+
+
+@pytest.mark.parametrize("kernel,args", [(axpy, _axpy_args), (every_op, _every_args)])
+def test_pointer_params_have_the_id_loads_and_stores_use(kernel, args):
+    d = json.loads(_traced(kernel, *args(), BLOCK=8).to_json())
+    param_ops = {o["id"]: o for o in d["ops"] if o["op"] == "param"}
+    ptrs = {p["id"]: p for p in d["params"] if p["kind"] == "ptr"}
+    assert ptrs
+    for i, p in ptrs.items():                        # each pointer param is a real value
+        assert param_ops[i]["attrs"] == {"param": p["name"], "kind": "ptr"}
+        assert param_ops[i]["type"] == p["type"] and p["type"].startswith("ptr<")
+    mem = [o for o in d["ops"] if o["op"] in ("load", "store")]
+    assert mem
+    for o in mem:                                    # and loads / stores name it as their first argument
+        assert o["args"][0] in ptrs
+    assert {o["args"][0] for o in mem} == set(ptrs)  # every buffer is used
+
+
 # --- reading and the round trip ---------------------------------------------------------------
 
 @pytest.mark.parametrize("kernel,args", [(axpy, _axpy_args), (every_op, _every_args)])
@@ -163,7 +186,11 @@ def test_round_trip_text(kernel, args):
     assert back.shared == ir.shared and back.block_dim == ir.block_dim and back.constexpr == ir.constexpr
     assert back.to_json() == ir.to_json()
     assert [op.loc for op in back.ops] == [op.loc for op in ir.ops]
-    assert [p.__dict__ for p in back.params] == [p.__dict__ for p in ir.params]
+    # constexpr params come back after the runtime ones (only the map is in the file)
+    assert ([p.__dict__ for p in back.params if p.kind != "constexpr"]
+            == [p.__dict__ for p in ir.params if p.kind != "constexpr"])
+    assert ({p.name: p.value for p in back.params if p.kind == "constexpr"}
+            == {p.name: p.value for p in ir.params if p.kind == "constexpr"})
 
 
 @pytest.mark.parametrize("kernel,args", [(axpy, _axpy_args), (every_op, _every_args)])
@@ -196,4 +223,12 @@ def test_rejects_bad_files():
         _irjson.from_dict(bad)
     with pytest.raises(sf.SFCompileError, match="unknown type"):
         _irjson._parse_type("float32")
+    bad = json.loads(json.dumps(d))
+    bad["params"].append({"name": "BLOCK", "kind": "constexpr", "value": 8})
+    with pytest.raises(sf.SFCompileError, match="top-level constexpr map"):
+        _irjson.from_dict(bad)
+    bad = json.loads(json.dumps(d))
+    bad["params"][1]["id"] = 77
+    with pytest.raises(sf.SFCompileError, match="no param op made"):
+        _irjson.from_dict(bad)
 

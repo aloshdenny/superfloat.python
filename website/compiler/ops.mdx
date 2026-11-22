@@ -1,6 +1,6 @@
 ---
 title: "IR ops"
-description: "Every SF IR op, one section each. Spec version 1.10.0."
+description: "Every SF IR op, one section each. Spec version 1.10.1."
 ---
 
 Each op lists its operands, attributes, result, shape rule, exact semantics on integer codes, events, memory effects, faults, predication, the v1 hardware unit, a suggested MLIR op with traits, and the rewrites that are and are not legal. Ops with golden vectors say so.
@@ -642,9 +642,9 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 |---|---|
 | Operands | none |
 | Attributes | param: kernel parameter name; kind: 'ptr' \| 'int' \| 'sf' |
-| Result | int or sfN scalar for kind int/sf; none for ptr (the buffer is bound by value id) |
+| Result | int or sfN scalar for kind int/sf; ptr&lt;sfN> or ptr&lt;int> for kind ptr |
 | Shape | () |
-| Semantics | Reads a scalar kernel argument. Pointer params produce no value; loads and stores refer to them directly. |
+| Semantics | Reads a kernel argument. A pointer param's value is the buffer: its id is the first argument of every load and store on that buffer, and it is used nowhere else. |
 | Events | none |
 | Memory | none |
 | Predication | pure |
@@ -758,11 +758,12 @@ Each op lists its operands, attributes, result, shape rule, exact semantics on i
 
 ### reshape
 
-`%r = reshape %x` · version 1.0
+`%r = reshape %x {shape}` · version 1.0
 
 | | |
 |---|---|
 | Operands | x |
+| Attributes | shape: result static shape (same element count) |
 | Result | same type |
 | Shape | result shape (same element count) |
 | Semantics | Row-major reshape. No numeric change. |

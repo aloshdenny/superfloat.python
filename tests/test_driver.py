@@ -2,7 +2,7 @@
 launch splitting, the compiler call and its cache.
 
 The end-to-end tests run Kartik's hand-written axpy program (tests/data/
-atreides_kernel_axpy_draft.json) on a toy model of the 7 instructions it uses
+atreides_kernel_axpy_v0.2.json, written by his axpy_sample.py) on a toy model of the 7 instructions it uses
 (CMP, CONST, LDR, ADD, FMA, STR, RET, as compiler_v4.9.2.md sections 2 and 3
 define them), on the memory the driver lays out, and compare with the host.
 The toy model is for these tests only; it is not the chip.
@@ -23,7 +23,8 @@ from sf.kernels import _driver as D
 from atreides_toy import run_toy  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
-SAMPLE = json.loads((HERE / "data" / "atreides_kernel_axpy_draft.json").read_text())
+SAMPLE = json.loads((HERE / "data" / "atreides_kernel_axpy_v0.2.json").read_text())
+SAMPLE_01 = json.loads((HERE / "data" / "atreides_kernel_axpy_draft.json").read_text())
 FAKE = [sys.executable, str(HERE / "fake_superfloat_compile.py")]
 AXPY_IR = (HERE.parent / "examples" / "sfir" / "axpy" / "kernel.sfir.json").read_text()
 
@@ -42,11 +43,18 @@ def _axpy_args(n, seed=0):
 def test_reads_the_sample():
     k = D.read_kernel(copy.deepcopy(SAMPLE))
     assert len(k["program"]["words"]) == 25 and k["kernel"] == "axpy"
+    assert k["format_version"] == "0.2-draft" and k["target"] == {"isa": "atreides-v4.9.2", "mx": "v4.9.2"}
+
+
+def test_still_reads_the_first_draft():
+    k = D.read_kernel(copy.deepcopy(SAMPLE_01))
+    assert k["format_version"] == "0.1-draft" and k["program"]["words"] == SAMPLE["program"]["words"]
 
 
 @pytest.mark.parametrize("change,msg", [
     (lambda k: k.update(format="sfir"), "format"),
     (lambda k: k.update(format_version="2.0"), "format_version"),
+    (lambda k: k.update(format_version="0.10"), "format_version"),
     (lambda k: k["program"].update(words=[0] * 513), "at most 512"),
     (lambda k: k["program"].update(words=[0x10000]), "0xFFFF"),
     (lambda k: k["launch"].update(max_blocks_per_launch=32), "255 threads"),
@@ -170,6 +178,12 @@ def test_compiler_failure_is_a_clean_error(cache, monkeypatch):
         D.compile_kernel(AXPY_IR, compiler=FAKE)
     with pytest.raises(sf.SFCompileError, match="not SF IR|failed"):
         D.compile_kernel('{"format": "other"}', compiler=FAKE)
+
+
+def test_kernel_for_another_target_is_refused(cache, monkeypatch):
+    monkeypatch.setenv("FAKE_COMPILE_WRONG_TARGET", "atreides-v4.8.1")
+    with pytest.raises(sf.SFCompileError, match="asked for target 'atreides-v4.9.2'"):
+        D.compile_kernel(AXPY_IR, compiler=FAKE)
 
 
 def test_missing_compiler():

@@ -3,10 +3,11 @@
 ``to_dict`` / ``dumps`` write a traced ``KernelIR``; ``from_dict`` / ``loads``
 read one back.  The layout (format "sfir", version 1):
 
-    {"format": "sfir", "format_version": 1, "spec_version": "1.10.0",
+    {"format": "sfir", "format_version": 1, "spec_version": "1.10.1",
      "kernel": "axpy_b", "style": "block", "block": [1, 1, 1],
      "constexpr": {"BLOCK": 8},
-     "params": [{"name": "a", "kind": "sf", "type": "sf16", "id": 0}, ...],
+     "params": [{"name": "a", "kind": "sf", "type": "sf16", "id": 0},
+                {"name": "x_ptr", "kind": "ptr", "type": "ptr<sf16>", "id": 1}, ...],
      "shared": [{"id": 0, "type": "sf16", "shape": [8, 8]}],
      "ops": [{"id": 15, "op": "fma", "args": [0, 12, 14], "attrs": {},
               "type": "sf16", "shape": [8], "pred": null,
@@ -14,6 +15,12 @@ read one back.  The layout (format "sfir", version 1):
 
 Rules:
 
+* ``params`` lists the runtime arguments only (kinds ptr, sf, int), in
+  signature order.  Constexpr values are only in the top-level
+  ``constexpr`` map.
+* Every param, pointers included, has a ``param`` op whose result id is the
+  param's ``id``.  For a pointer that value has type ``ptr<...>`` and is the
+  first argument of every ``load`` and ``store`` on that buffer.
 * ``args`` are the ids of earlier values, in the operand order of
   ``spec/ops.json``.  Ops with no result (``store``, ``shared_store``,
   ``barrier``) have ``id``, ``type`` and ``shape`` null.
@@ -31,6 +38,13 @@ Rules:
 
 The same kernel always gives the same text (sorted keys, no timestamps, no
 paths), so ``dumps`` is safe to hash.
+
+Per op, the number of args, each attribute's JSON type and the possible result
+types are in spec/ops.json (each op's ``ir`` entry; the file layout is its
+``sfir`` section).  ``tools/check_sfir.py FILE`` checks a file against them.
+
+Planned for format_version 2: a ``for`` op (constant trip count, nested body)
+so loops are not unrolled in the file.
 """
 from __future__ import annotations
 
@@ -44,7 +58,7 @@ from ._ir import BOOL, INT, KernelIR, Op, Param, PtrType, SFType, SharedBuf, Val
 
 FORMAT = "sfir"
 FORMAT_VERSION = 1
-SPEC_VERSION = "1.10.0"          # must equal spec/ops.py (checked by tests/test_sfir_json.py)
+SPEC_VERSION = "1.10.1"          # must equal spec/ops.py (checked by tests/test_sfir_json.py)
 
 _PTR = re.compile(r"ptr<(sf(\d+)|int)>")
 _SF = re.compile(r"sf(\d+)")
@@ -90,12 +104,9 @@ def to_dict(ir: KernelIR) -> dict:
             "pred": op.pred.id if op.pred is not None else None,
             "loc": {"file": op.loc[0], "line": op.loc[1]} if op.loc is not None else None,
         })
-    params = []
-    for p in ir.params:
-        if p.kind == "constexpr":
-            params.append({"name": p.name, "kind": p.kind, "value": _plain(p.value)})
-        else:
-            params.append({"name": p.name, "kind": p.kind, "type": _type_str(p.type), "id": p.vid})
+    # constexpr values live only in the top-level map, not here (one place, Kartik's review)
+    params = [{"name": p.name, "kind": p.kind, "type": _type_str(p.type), "id": p.vid}
+              for p in ir.params if p.kind != "constexpr"]
     return {
         "format": FORMAT,
         "format_version": FORMAT_VERSION,
@@ -173,10 +184,14 @@ def from_dict(d: dict) -> KernelIR:
         ir.ops.append(Op(o["op"], args, attrs, result, pred, loc))
     ir.values = [values[i] for i in sorted(values)]
     for p in d["params"]:
-        if p["kind"] == "constexpr":
-            ir.params.append(Param(p["name"], "constexpr", value=_tuples(p["value"])))
-        else:
-            ir.params.append(Param(p["name"], p["kind"], _parse_type(p["type"]), vid=p["id"]))
+        if p["kind"] not in ("ptr", "sf", "int"):
+            raise SFCompileError(f"SF IR JSON: param {p['name']!r} has kind {p['kind']!r}; constexpr "
+                                 "values belong in the top-level constexpr map")
+        if p["id"] not in values:
+            raise SFCompileError(f"SF IR JSON: param {p['name']!r} has id {p['id']}, which no param op made")
+        ir.params.append(Param(p["name"], p["kind"], _parse_type(p["type"]), vid=p["id"]))
+    for name, value in ir.constexpr.items():       # after the runtime params (signature order is not kept)
+        ir.params.append(Param(name, "constexpr", value=value))
     for s in d["shared"]:
         bits = _parse_type(s["type"]).bits
         ir.shared.append(SharedBuf(s["id"], bits, tuple(s["shape"])))

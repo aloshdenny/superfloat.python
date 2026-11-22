@@ -1,6 +1,11 @@
 {
- "spec_version": "1.10.0",
+ "spec_version": "1.10.1",
  "changelog": [
+  [
+   "1.10.1",
+   "2026-11-22",
+   "From Kartik's review of the SF IR JSON file. No op changes behaviour. Every op now has an `ir` entry: how many args it takes, each attribute's JSON type and the result types it can have, so an importer can check a file; the top-level `sfir` section gives the file layout and the type names (ptr<int> added to the types). param's result was written wrong: pointer params do produce a value (type ptr<sfN> or ptr<int>), and its id is the first argument of every load and store on that buffer. reshape has a `shape` attribute (the result shape); it was missing. A `for` loop op is planned for SF IR JSON format_version 2."
+  ],
   [
    "1.10.0",
    "2026-11-18",
@@ -97,9 +102,10 @@
  ],
  "types": {
   "sfN": "Superfloat code, N in 4..16. Stored as a signed integer k in [-M, M], M = 2^(N-1) - 1. Value = k / 2^(N-1). In the IR, k is a plain signed (two's complement) integer, int64 in both reference backends; the semantics in this spec are written on k. There is no code -2^(N-1), no NaN, no infinity. On the chip, registers and memory both hold sign-magnitude: see the memory format rule.",
-  "int": "64-bit signed integer (indices, offsets, loop math). Never overflows in practice; the reference uses int64 and does not wrap-check.",
+  "int": "64-bit signed integer (indices, offsets, loop math). Never overflows in practice; the reference uses int64 and does not wrap-check. On the Atreides chip a 16-bit two's complement word.",
   "bool": "1-bit predicate / mask.",
-  "ptr<sfN>": "Base address of a global buffer of sfN codes. Only appears as a kernel parameter; address arithmetic is `ptr + int offsets` and is folded into load/store."
+  "ptr<sfN>": "Base address of a global buffer of sfN codes. Only appears as a kernel parameter; address arithmetic is `ptr + int offsets` and is folded into load/store.",
+  "ptr<int>": "Base address of a read-only buffer of ints (for example one dot_wide shift per output). Only appears as a kernel parameter; load gives int, a store to it is refused at trace time."
  },
  "events": {
   "overflow": "the exact result did not fit; the result is saturated to +-M (sign of the exact result).",
@@ -112,6 +118,47 @@
   "events": "Value is pure, but events are only counted on live lanes (lanes where the predicate in force is true). Lowering may compute every lane but MUST mask the event flags with the predicate, or it will report events from dead lanes.",
   "memory": "Only live lanes (mask AND predicate) touch memory. Masked lanes must not read, write or fault."
  },
+ "sfir": {
+  "format": "sfir",
+  "format_version": 1,
+  "fields": {
+   "format": "always \"sfir\"",
+   "format_version": "1; a reader refuses a version it does not know",
+   "spec_version": "this spec's version; a reader refuses a different major version",
+   "kernel": "the kernel's name",
+   "style": "\"block\" (one program is a vector of lanes) or \"thread\" (CUDA style)",
+   "block": "[x, y, z] lanes per block for thread kernels, [1, 1, 1] for block kernels",
+   "constexpr": "{name: value}: every constexpr argument, the only place they appear",
+   "params": "the runtime arguments in signature order: {name, kind (ptr | sf | int), type, id}. id is the result id of that argument's param op",
+   "shared": "shared buffers: {id, type, shape}; shared_load / shared_store name them by buf",
+   "ops": "{id, op, args, attrs, type, shape, pred, loc} in program order; see each op's `ir` entry"
+  },
+  "op_fields": {
+   "id": "the result's value id, unique in the file; null for an op with no result",
+   "op": "the op's name, one of the ops in this file",
+   "args": "ids of earlier results, in the op's operand order",
+   "attrs": "exactly the attributes in the op's `ir` entry, with those JSON types",
+   "type": "the result type (a name from `types`), null with no result",
+   "shape": "the result's static shape, a list of rank <= 3 ([] for a scalar); null with no result",
+   "pred": "id of the bool mask the op runs under, or null",
+   "loc": "{file, line}: base name of the source file (never a path) and the line; param ops give the def line"
+  },
+  "types": {
+   "sfN": "^sf([4-9]|1[0-6])$",
+   "int": "^int$",
+   "bool": "^bool$",
+   "ptr<sfN>": "^ptr<sf([4-9]|1[0-6])>$",
+   "ptr<int>": "^ptr<int>$"
+  },
+  "not_in_the_file": [
+   "the grid (it changes with every launch and the file is the compile cache key)",
+   "the kernel's source text",
+   "full paths, timestamps or anything else that varies between runs"
+  ],
+  "planned": [
+   "format_version 2: a `for` op with a constant trip count and a nested body of ops, so a loop such as dot's k loop is not unrolled in the file (Kartik's review, 2026-11-22)"
+  ]
+ },
  "ops": [
   {
    "name": "param",
@@ -122,9 +169,9 @@
     "param": "kernel parameter name",
     "kind": "'ptr' | 'int' | 'sf'"
    },
-   "result": "int or sfN scalar for kind int/sf; none for ptr (the buffer is bound by value id)",
+   "result": "int or sfN scalar for kind int/sf; ptr<sfN> or ptr<int> for kind ptr",
    "shape": "()",
-   "semantics": "Reads a scalar kernel argument. Pointer params produce no value; loads and stores refer to them directly.",
+   "semantics": "Reads a kernel argument. A pointer param's value is the buffer: its id is the first argument of every load and store on that buffer, and it is used nowhere else.",
    "predication": "pure",
    "hw_v1": "kernel argument register / constant bank",
    "mlir": {
@@ -142,6 +189,30 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     0,
+     0
+    ],
+    "attrs": {
+     "param": {
+      "type": "string"
+     },
+     "kind": {
+      "enum": [
+       "ptr",
+       "int",
+       "sf"
+      ]
+     }
+    },
+    "result": [
+     "sfN",
+     "int",
+     "ptr<sfN>",
+     "ptr<int>"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "LDR Rd, [param block + i]: one load per parameter (no argument registers, ISA s4.1)",
@@ -178,6 +249,29 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     0,
+     0
+    ],
+    "attrs": {
+     "value": {
+      "type": "int|bool"
+     },
+     "kind": {
+      "enum": [
+       "int",
+       "sf",
+       "bool"
+      ]
+     }
+    },
+    "result": [
+     "sfN",
+     "int",
+     "bool"
+    ]
+   },
    "v481": {
     "verdict": "native",
     "lowering": "int or code in -128..127: CONST Rd, imm (sign-extended). Larger: CONST then ADD x,x,x doublings plus adds per set bit (build_large_const, ISA s7), or LDR from a constant table. An sf constant is its 16-bit sign-magnitude word, built the same way. 0xFFC0 is one CONST 0xC0",
@@ -213,6 +307,22 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     0,
+     0
+    ],
+    "attrs": {
+     "axis": {
+      "type": "int",
+      "min": 0,
+      "max": 2
+     }
+    },
+    "result": [
+     "int"
+    ]
+   },
    "v481": {
     "verdict": "limited",
     "lowering": "axis 0: read R13 directly (no instruction). Axes 1, 2: not on the chip; flatten the grid. At most 32 blocks per launch",
@@ -247,6 +357,22 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     0,
+     0
+    ],
+    "attrs": {
+     "axis": {
+      "type": "int",
+      "min": 0,
+      "max": 2
+     }
+    },
+    "result": [
+     "int"
+    ]
+   },
    "v481": {
     "verdict": "limited",
     "lowering": "axis 0: read R15 directly. Axes 1, 2: flatten. More than 8 lanes: strip-mine (see the mapping)",
@@ -282,6 +408,23 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     0,
+     0
+    ],
+    "attrs": {
+     "start": {
+      "type": "int"
+     },
+     "end": {
+      "type": "int"
+     }
+    },
+    "result": [
+     "int"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "lanes <= 8: ADD Rd, R15, Rstart. More lanes: the same per strip-mined chunk, plus 8*chunk",
@@ -320,6 +463,22 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {
+     "shape": {
+      "type": "int[]"
+     }
+    },
+    "result": [
+     "sfN",
+     "int",
+     "bool"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "a value every thread computes the same way needs nothing. Moving one lane's value to all threads (suggested): STR it to the scratchpad, then every thread LDRs that word",
@@ -329,10 +488,13 @@
   {
    "name": "reshape",
    "category": "shape",
-   "signature": "%r = reshape %x",
+   "signature": "%r = reshape %x {shape}",
    "operands": [
     "x"
    ],
+   "attrs": {
+    "shape": "result static shape (same element count)"
+   },
    "result": "same type",
    "shape": "result shape (same element count)",
    "semantics": "Row-major reshape. No numeric change.",
@@ -348,12 +510,27 @@
     "x.reshape(...)"
    ],
    "version": "1.0",
-   "attrs": {},
    "events": [],
    "memory": "none",
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {
+     "shape": {
+      "type": "int[]"
+     }
+    },
+    "result": [
+     "sfN",
+     "int",
+     "bool"
+    ]
+   },
    "v481": {
     "verdict": "native",
     "lowering": "layout only: no instruction when the lane-to-thread mapping is unchanged. Otherwise go through the scratchpad",
@@ -388,6 +565,18 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {},
+    "result": [
+     "sfN",
+     "int",
+     "bool"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "no shuffle instruction. Suggested: STR to the scratchpad in one layout, LDR in the other (64 words per tile)",
@@ -426,6 +615,16 @@
    "memory": "none",
    "faults": [],
    "notes": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "int"
+    ]
+   },
    "v481": {
     "verdict": "native",
     "lowering": "ADD Rd, Rs, Rt (mod 2^16)",
@@ -463,6 +662,16 @@
    "memory": "none",
    "faults": [],
    "notes": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "int"
+    ]
+   },
    "v481": {
     "verdict": "native",
     "lowering": "SUB Rd, Rs, Rt (mod 2^16)",
@@ -501,6 +710,16 @@
    "memory": "none",
    "faults": [],
    "notes": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "int"
+    ]
+   },
    "v481": {
     "verdict": "limited",
     "lowering": "both operands provably < 256: MUL (8 x 8 unsigned; high bytes are ignored). Otherwise the 16 x 16 sequence lo*lo + ((hi*lo + lo*hi) << 8), about 17 instructions (ISA s5)",
@@ -540,6 +759,16 @@
    "events": [],
    "memory": "none",
    "rewrites": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "int"
+    ]
+   },
    "v481": {
     "verdict": "limited",
     "lowering": "non-negative dividend and divisor 1, 2, 4, 8, 16, 32 or 64: DIV (a logical shift of all 16 bits, ISA s3.1). Divisor 3, 9, 10, 11 or 12 with dividend < 256: DIV. Anything else: no lowering, and DIV silently returns 0, so precompute on the host. Negative dividends break (derived): DIV shifts logically, idiv floors",
@@ -575,6 +804,16 @@
    "memory": "none",
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "int"
+    ]
+   },
    "v481": {
     "verdict": "limited",
     "lowering": "non-negative x mod 2^k, k <= 6: x - ((x >> k) << k), using DIV for >> and ADD doubling for << (ISA s5). Other divisors: no lowering",
@@ -609,6 +848,16 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {},
+    "result": [
+     "int"
+    ]
+   },
    "v481": {
     "verdict": "native",
     "lowering": "SUB Rd, Z, Rs",
@@ -643,6 +892,16 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {},
+    "result": [
+     "int"
+    ]
+   },
    "v481": {
     "verdict": "none",
     "lowering": "no instruction, no select, and no sequence in the ISA. Avoid it, or compute on the host",
@@ -680,6 +939,27 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {
+     "op": {
+      "enum": [
+       "lt",
+       "le",
+       "gt",
+       "ge",
+       "eq",
+       "ne"
+      ]
+     }
+    },
+    "result": [
+     "bool"
+    ]
+   },
    "v481": {
     "verdict": "limited",
     "lowering": "only as a branch condition that is uniform across the block: CMP Ra, Rb sets NZP (signed: lt, eq, gt; le, ge, ne by the BR mask), then BR. The result cannot be put in a register. Unsigned compare: add 0x8000 to both operands first",
@@ -714,6 +994,16 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {},
+    "result": [
+     "int"
+    ]
+   },
    "v481": {
     "verdict": "none",
     "lowering": "nothing writes NZP to a register (ISA s5)",
@@ -750,6 +1040,16 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "bool"
+    ]
+   },
    "v481": {
     "verdict": "none",
     "lowering": "no AND instruction (ISA s5). Two uniform conditions can be combined with branch structure instead",
@@ -786,6 +1086,16 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "bool"
+    ]
+   },
    "v481": {
     "verdict": "none",
     "lowering": "no OR instruction (ISA s5). Uniform conditions: branch structure",
@@ -822,6 +1132,16 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "bool"
+    ]
+   },
    "v481": {
     "verdict": "none",
     "lowering": "no XOR instruction (ISA s5)",
@@ -856,6 +1176,16 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {},
+    "result": [
+     "bool"
+    ]
+   },
    "v481": {
     "verdict": "none",
     "lowering": "no NOT instruction (ISA s5). A uniform condition: branch on the inverse NZP mask",
@@ -892,6 +1222,18 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     3,
+     3
+    ],
+    "attrs": {},
+    "result": [
+     "sfN",
+     "int",
+     "bool"
+    ]
+   },
    "v481": {
     "verdict": "limited",
     "lowering": "only for SF values, if-converted arithmetically with ReLU (ISA s5). A general select on a mask: no lowering",
@@ -939,6 +1281,16 @@
    "attrs": {},
    "memory": "none",
    "faults": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "native",
     "lowering": "ACT f=00 Rd, Ra, Rb with Rd in {R0, R4, R8, R12}. Not integer ADD, which is wrong for negative sign-magnitude values (ISA s3.2)",
@@ -981,6 +1333,16 @@
    "memory": "none",
    "faults": [],
    "notes": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "ADD n, b, S (flips b's sign bit), then ACT f=00 Rd, a, n (ISA s5)",
@@ -1029,6 +1391,16 @@
    "attrs": {},
    "memory": "none",
    "faults": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "native",
     "lowering": "FMA with Rd = +0: CONST Rd, 0 (or copy Z), then FMA Rd, Ra, Rb. Truncates toward zero (ISA s5)",
@@ -1075,6 +1447,16 @@
    "attrs": {},
    "memory": "none",
    "faults": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "host",
     "lowering": "no SF divide or reciprocal on the chip (ISA s5)",
@@ -1122,6 +1504,16 @@
    "attrs": {},
    "memory": "none",
    "faults": [],
+   "ir": {
+    "args": [
+     3,
+     3
+    ],
+    "attrs": {},
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "native",
     "lowering": "FMA Rd, Ra, Rb with Rd holding c on entry: Rd = c + a*b. Copy c first if it is still needed",
@@ -1160,6 +1552,16 @@
    "memory": "none",
    "faults": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {},
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "ADD n, x, S (flip bit 15), then ACT f=00 Rd, n, Z so a 0 input never leaves 0x8000 (ISA s5)",
@@ -1196,6 +1598,16 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {},
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "abs(x) = ReLU(x) + ReLU(-x): ACT f=01 p, x, Z; ADD n, x, S; ACT f=01 q, n, Z; ACT f=00 Rd, p, q (ISA s5; mind the ACT destination classes)",
@@ -1234,6 +1646,16 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {},
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "host",
     "lowering": "no sqrt or rsqrt on the chip (ISA s5)",
@@ -1272,6 +1694,22 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {
+     "bits": {
+      "type": "int",
+      "min": 4,
+      "max": 16
+     }
+    },
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "native",
     "lowering": "(derived) free when sfN values are kept left-aligned in 16 bits, as the MX engine expects: the word of an sfN code is already the sf16 word of the same value",
@@ -1316,6 +1754,22 @@
    "memory": "none",
    "faults": [],
    "rewrites": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {
+     "bits": {
+      "type": "int",
+      "min": 4,
+      "max": 16
+     }
+    },
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "none",
     "lowering": "no conversion or rounding instruction on FMA / ACT (ISA s5); the only hardware rounding is POP. Run it on the host, or produce sfN directly from MX with POP at N bits",
@@ -1355,6 +1809,27 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {
+     "op": {
+      "enum": [
+       "lt",
+       "le",
+       "gt",
+       "ge",
+       "eq",
+       "ne"
+      ]
+     }
+    },
+    "result": [
+     "bool"
+    ]
+   },
    "v481": {
     "verdict": "limited",
     "lowering": "R = ACT f=00 (a, -b) using ADD n, b, S; then CMP R, Z. Exact over the whole range, because saturation keeps the sign (ISA s5). Like icmp, usable only as a uniform branch condition",
@@ -1393,6 +1868,30 @@
    "faults": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {
+     "op": {
+      "enum": [
+       "lt",
+       "le",
+       "gt",
+       "ge",
+       "eq",
+       "ne"
+      ]
+     },
+     "value": {
+      "type": "int"
+     }
+    },
+    "result": [
+     "bool"
+    ]
+   },
    "v481": {
     "verdict": "limited",
     "lowering": "as cmp, with -threshold built as a sign-magnitude constant: ACT f=00 R, a, (-t); CMP R, Z",
@@ -1432,6 +1931,16 @@
    "memory": "none",
    "faults": [],
    "notes": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "the exact 16-instruction sequence of ISA s5: max(a, b) = max(a+, b+) - min(a-, b-). Never b + ReLU(a - b): the difference saturates (wrong on 118 of 1,024 pairs, measured)",
@@ -1471,6 +1980,16 @@
    "memory": "none",
    "faults": [],
    "notes": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "min(a, b) = -max(-a, -b) with the ISA s5 sequence, finished as M - P so the result is never -0",
@@ -1513,6 +2032,22 @@
    "memory": "none",
    "faults": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {
+     "axis": {
+      "type": "int",
+      "min": 0,
+      "null": true
+     }
+    },
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "an ACT f=00 chain in index order (order matters: it saturates). Across threads (suggested): each thread STRs its value to the scratchpad, then the chain LDRs them in order",
@@ -1551,6 +2086,22 @@
    "memory": "none",
    "faults": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {
+     "axis": {
+      "type": "int",
+      "min": 0,
+      "null": true
+     }
+    },
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "the maximum sequence folded over the elements; any order. Across threads via the scratchpad (suggested)",
@@ -1589,6 +2140,22 @@
    "memory": "none",
    "faults": [],
    "notes": [],
+   "ir": {
+    "args": [
+     1,
+     1
+    ],
+    "attrs": {
+     "axis": {
+      "type": "int",
+      "min": 0,
+      "null": true
+     }
+    },
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "the minimum sequence folded over the elements; any order",
@@ -1635,6 +2202,16 @@
    "attrs": {},
    "memory": "none",
    "faults": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {},
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "(suggested) per output, an FMA chain in increasing k: FMA acc, a[k], b[k] (LDR the operands first). Never MX: MX gives different bits (ISA s3.4 rule 5)",
@@ -1693,6 +2270,23 @@
     "the kernel trace picks dot or dot_wide from sf.accumulate at trace time; the kernel cache keys on it"
    ],
    "memory": "none",
+   "ir": {
+    "args": [
+     2,
+     3
+    ],
+    "attrs": {
+     "shift": {
+      "type": "int",
+      "min": -32,
+      "max": 31,
+      "null": true
+     }
+    },
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "expand",
     "lowering": "the MX sequence of ISA s3.4: CFG (block and N, from thread 0) and CLR; per chunk of 8 k: WL rows 7..0 then SWAP; MAC per token into its slot (up to 8 tokens per weight tile); then POP with Rs(c) = slot << 8 | (shift & 63). Thread j supplies lane or column j. 8 output columns per weight tile. Weights are not reset at block start: always load all 8 rows and SWAP",
@@ -1732,6 +2326,17 @@
    "events": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     4,
+     4
+    ],
+    "attrs": {},
+    "result": [
+     "sfN",
+     "int"
+    ]
+   },
    "v481": {
     "verdict": "limited",
     "lowering": "LDR Rd, Ra with Ra a word address below 0xFFC0. Masked lanes: only a tail mask, lowered as the launch's thread count (see the mapping). No bounds check: an out-of-range address silently reads other memory or the scratchpad",
@@ -1773,6 +2378,16 @@
    "attrs": {},
    "events": [],
    "rewrites": [],
+   "ir": {
+    "args": [
+     4,
+     4
+    ],
+    "attrs": {},
+    "result": [
+     null
+    ]
+   },
    "v481": {
     "verdict": "limited",
     "lowering": "STR Ra, Rv (address register first). Same mask and bounds rules as load. If several threads store to one address in one instruction, the highest thread's value lands last (derived)",
@@ -1812,6 +2427,21 @@
    "events": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     2,
+     2
+    ],
+    "attrs": {
+     "buf": {
+      "type": "int",
+      "min": 0
+     }
+    },
+    "result": [
+     "sfN"
+    ]
+   },
    "v481": {
     "verdict": "limited",
     "lowering": "LDR from 0xFFC0 + index. At most 64 words per tile. The scratchpad is NEVER cleared, but DSL shared memory starts at 0: emit the zeroing stores if the kernel reads before writing",
@@ -1852,6 +2482,21 @@
    "events": [],
    "rewrites": [],
    "notes": [],
+   "ir": {
+    "args": [
+     3,
+     3
+    ],
+    "attrs": {
+     "buf": {
+      "type": "int",
+      "min": 0
+     }
+    },
+    "result": [
+     null
+    ]
+   },
    "v481": {
     "verdict": "limited",
     "lowering": "STR to 0xFFC0 + index; at most 64 words per tile",
@@ -1887,6 +2532,16 @@
    "events": [],
    "faults": [],
    "rewrites": [],
+   "ir": {
+    "args": [
+     0,
+     0
+    ],
+    "attrs": {},
+    "result": [
+     null
+    ]
+   },
    "v481": {
     "verdict": "native",
     "lowering": "nothing to emit inside a block: every instruction finishes for all 8 threads before the next, so a store is visible to the whole block from the next instruction (ISA s1.5). There is no barrier between blocks",

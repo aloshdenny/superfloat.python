@@ -547,24 +547,9 @@
    "kind": "ptr",
    "name": "c_ptr",
    "type": "ptr<sf16>"
-  },
-  {
-   "kind": "constexpr",
-   "name": "M",
-   "value": 8
-  },
-  {
-   "kind": "constexpr",
-   "name": "K",
-   "value": 16
-  },
-  {
-   "kind": "constexpr",
-   "name": "N",
-   "value": 8
   }
  ],
  "shared": [],
- "spec_version": "1.10.0",
+ "spec_version": "1.10.1",
  "style": "block"
 }
