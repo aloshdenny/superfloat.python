@@ -67,6 +67,19 @@ them. Each one is a single place to change if the team decides differently.
   464,690 in 31 launches vs 461,280 in 30).  The chip takes up to 255 threads (32 blocks, compiler_v4.9.2.md
   4.2).  So keeping whole programs in a launch (240 for BLOCK 16) costs nothing measurable, and it is
   needed for kernels whose threads work together on one program.
+* Wide matmul as a library call on the chip model (2026-11-23): `sf.kernels._chipmm.ChipMatmul` runs
+  (M, K) @ (K, N) with one POP shift per output through Alosh's hand-written gemv (M = 1) and gemm
+  (8 tokens a block) programs from superfloat.gpu `test/gpt2/kernels_v4.py`, on superfloat.sim.  The
+  host side is ours: blocks of 8 columns, the block table at word 0, weights in WL order, activations
+  chunk by chunk, POP operands slot << 8 | (shift & 63), as many blocks a launch as fit (31 at most,
+  the x region kept off 0x8000).  This is "matmuls as library calls first" from the compiler meeting:
+  no compiler, so it is also the way around LLVM that Alosh asked about.  Measured against sf's MX
+  model (matmul_wide_codes, v4.9.2): 0 wrong on every GPT-2 layer size at sf16 and sf8 (768 x 768 at
+  M = 1 and 8, 768 x 3072, 3072 x 768: 22,272 outputs, tight shifts, full-range inputs), and on
+  saturated POPs, a saturated accumulator, underflow and padding (M, K, N not multiples of 8) at sf4,
+  sf8, sf9, sf12 and sf16 (tests/test_chipmm.py, needs SUPERFLOAT_SIM and SUPERFLOAT_GPU).  Chip cost
+  at sf16, decode (M = 1): 768 x 768 is 5.27M cycles in 10 launches; 768 x 3072 is 21.1M in 39;
+  3072 x 768 is 23.7M in 48.  The programs are imported from the checkout, never copied here.
 * His hand-written axpy is checked on a toy model of its 7 instructions only (no MX), so wide kernels
   cannot run end to end yet.
 
