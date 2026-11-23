@@ -100,7 +100,10 @@ them. Each one is a single place to change if the team decides differently.
   625.96 over 7 predicted tokens; a short context, so not comparable to the 256-token number).  115 chip
   calls: 73 matmuls (12 blocks x 6, then the LM head) and 42 redo relaunches for outputs at +-max;
   4,892 launches, 4.16G simulated cycles, 262 s wall on the laptop.  The LM head (768 x 50,257) runs on
-  the chip too.  `tests/test_chipmm.py` runs transformers' own GPT-2 code (tiny random config, no
+  the chip too.  A full 256-token window (the first of the test set, 255 predicted tokens): logits
+  bit-identical, loss 3.945928 on both, ppl 51.7243 on the host and on the chip.  121 chip calls,
+  161,282 launches, 143.55G simulated cycles (2 graphs, 73 SF ops on the chip, 0 host-emulated); 8,682 s
+  wall against 19 s for the host emulation.  `tests/test_chipmm.py` runs transformers' own GPT-2 code (tiny random config, no
   download) the same way and asserts bit-identical logits.
 * His hand-written axpy is checked on a toy model of its 7 instructions only (no MX), so wide kernels
   cannot run end to end yet.
