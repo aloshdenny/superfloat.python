@@ -119,14 +119,21 @@ class _Window:
         self.top = TABLE_WORDS
         self.blocks = 0
 
-    def fits(self, words: int, no_cross: bool = False) -> bool:
-        top = 0x8000 if no_cross and self.top < 0x8000 < self.top + words else self.top
-        return top + words <= TOP
+    @staticmethod
+    def _base(top: int, words: int, no_cross: bool) -> int:
+        """Where a region of ``words`` goes when the window is filled up to ``top``."""
+        return 0x8000 if no_cross and top < 0x8000 < top + words else top   # x loops compare signed
+
+    def fits(self, regions) -> bool:
+        """Whether every (words, no_cross) region still fits, placed in order."""
+        top = self.top
+        for words, no_cross in regions:
+            top = self._base(top, words, no_cross) + words
+        return top <= TOP
 
     def alloc(self, words: int, no_cross: bool = False) -> int:
-        if no_cross and self.top < 0x8000 < self.top + words:
-            self.top = 0x8000                        # the x loop compares addresses as signed ints
-        base, self.top = self.top, self.top + words
+        base = self._base(self.top, words, no_cross)
+        self.top = base + words
         assert self.top <= TOP, "window overflow"
         return base
 
@@ -151,6 +158,7 @@ class ChipMatmul:
             sim = _chip_class()(version)
         self.chip = sim
         self.report = Report()
+        self._programs: dict = {}          # (gemv, Kp, unit, bits) -> program
 
     def __call__(self, a, w, shift, bits: int = 16) -> np.ndarray:
         a, w = np.asarray(a, dtype=np.int64), np.asarray(w, dtype=np.int64)
@@ -161,6 +169,10 @@ class ChipMatmul:
         if s.size and (s.min() < -32 or s.max() > 31):
             raise ValueError("POP shifts are -32..31")
         unit, gemv = unit_for(bits), M == 1
+        lim = (1 << (bits - 1)) - 1
+        for name, x in (("a", a), ("w", w)):
+            if x.size and np.abs(x).max() > lim:
+                raise ValueError(f"{name} holds a code outside sf{bits}'s +-{lim}")
         tm = 1 if gemv else N
         Mp, Kp, Np = -(-M // tm) * tm, max(N, -(-K // N) * N), -(-Nc // N) * N
         A = np.zeros((Mp, Kp), np.int64); A[:M, :K] = a
@@ -168,7 +180,10 @@ class ChipMatmul:
         S = np.zeros((Mp, Np), np.int64); S[:M, :Nc] = s
         Aw, Ww = encode(A, bits), encode(W, bits)
         Kv = self.K
-        prog, _ = (Kv.gemv_program if gemv else Kv.gemm_program)(Kp, unit, bits)
+        key = (gemv, Kp, unit, bits)
+        if key not in self._programs:
+            self._programs[key] = (Kv.gemv_program if gemv else Kv.gemm_program)(Kp, unit, bits)[0]
+        prog = self._programs[key]
         self.report = Report("gemv" if gemv else "gemm")
         x_words = Kp * tm
         out = np.zeros((Mp, Np), np.int64)
@@ -179,17 +194,9 @@ class ChipMatmul:
             win, wbase, xbase, placed = _Window(), {}, {}, []
             while i < len(blocks) and win.blocks < MAX_BLOCKS:
                 m0, n0 = blocks[i]
-                trial = _Window.__new__(_Window)
-                trial.top = win.top
-                ok = True
-                for words, cross, new in ((x_words, True, m0 not in xbase), (Kp * N, False, n0 not in wbase),
-                                          (tm * N, False, True), (tm * N, False, True)):
-                    if new:
-                        if not trial.fits(words, cross):
-                            ok = False
-                            break
-                        trial.alloc(words, cross)
-                if not ok:
+                need = ([(x_words, True)] if m0 not in xbase else []) + \
+                       ([(Kp * N, False)] if n0 not in wbase else []) + [(tm * N, False)] * 2   # POP operands, outputs
+                if not win.fits(need):
                     break
                 if m0 not in xbase:                       # x first: low addresses, never across 0x8000
                     xbase[m0] = xb = win.alloc(x_words, no_cross=True)

@@ -10,7 +10,7 @@ right bits here gives them on the RTL.  It plays the host as well: it answers
 the chip's pin bus from its own copy of data memory, which is the job a runner
 on the real chip has to do.
 
-superfloat.sim is Superfloat's private SDK (github.com/aloshdenny/superfloat.sim),
+superfloat.sim is Superfloat's private SDK (its own private GitHub repository),
 not a dependency of sf: build it from its checkout and put its ``python/``
 folder on ``PYTHONPATH`` (or set ``SUPERFLOAT_SIM`` to the checkout for the
 tests).  Nothing of it is copied here.

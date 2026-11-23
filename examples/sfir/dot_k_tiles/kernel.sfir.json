@@ -24,7 +24,7 @@
    "loc": {
     "col": 1,
     "file": "export_sfir_examples.py",
-    "line": 74
+    "line": 87
    },
    "op": "param",
    "pred": null,
@@ -41,7 +41,7 @@
    "loc": {
     "col": 1,
     "file": "export_sfir_examples.py",
-    "line": 74
+    "line": 87
    },
    "op": "param",
    "pred": null,
@@ -58,7 +58,7 @@
    "loc": {
     "col": 1,
     "file": "export_sfir_examples.py",
-    "line": 74
+    "line": 87
    },
    "op": "param",
    "pred": null,
@@ -75,7 +75,7 @@
    "loc": {
     "col": 9,
     "file": "export_sfir_examples.py",
-    "line": 75
+    "line": 88
    },
    "op": "arange",
    "pred": null,
@@ -98,7 +98,7 @@
    "loc": {
     "col": 9,
     "file": "export_sfir_examples.py",
-    "line": 75
+    "line": 88
    },
    "op": "reshape",
    "pred": null,
@@ -118,7 +118,7 @@
    "loc": {
     "col": 10,
     "file": "export_sfir_examples.py",
-    "line": 76
+    "line": 89
    },
    "op": "arange",
    "pred": null,
@@ -137,7 +137,7 @@
    "loc": {
     "col": 9,
     "file": "export_sfir_examples.py",
-    "line": 77
+    "line": 90
    },
    "op": "arange",
    "pred": null,
@@ -160,7 +160,7 @@
    "loc": {
     "col": 9,
     "file": "export_sfir_examples.py",
-    "line": 77
+    "line": 90
    },
    "op": "reshape",
    "pred": null,
@@ -180,7 +180,7 @@
    "loc": {
     "col": 44,
     "file": "export_sfir_examples.py",
-    "line": 85
+    "line": 98
    },
    "op": "const",
    "pred": null,
@@ -201,7 +201,7 @@
    "loc": {
     "col": 44,
     "file": "export_sfir_examples.py",
-    "line": 85
+    "line": 98
    },
    "op": "broadcast",
    "pred": null,
@@ -236,7 +236,7 @@
       "loc": {
        "col": 13,
        "file": "export_sfir_examples.py",
-       "line": 80
+       "line": 93
       },
       "op": "const",
       "pred": null,
@@ -253,7 +253,7 @@
       "loc": {
        "col": 13,
        "file": "export_sfir_examples.py",
-       "line": 80
+       "line": 93
       },
       "op": "imul",
       "pred": null,
@@ -270,7 +270,7 @@
       "loc": {
        "col": 13,
        "file": "export_sfir_examples.py",
-       "line": 80
+       "line": 93
       },
       "op": "iadd",
       "pred": null,
@@ -289,7 +289,7 @@
       "loc": {
        "col": 29,
        "file": "export_sfir_examples.py",
-       "line": 81
+       "line": 94
       },
       "op": "const",
       "pred": null,
@@ -306,7 +306,7 @@
       "loc": {
        "col": 29,
        "file": "export_sfir_examples.py",
-       "line": 81
+       "line": 94
       },
       "op": "imul",
       "pred": null,
@@ -330,7 +330,7 @@
       "loc": {
        "col": 37,
        "file": "export_sfir_examples.py",
-       "line": 81
+       "line": 94
       },
       "op": "reshape",
       "pred": null,
@@ -350,7 +350,7 @@
       "loc": {
        "col": 21,
        "file": "export_sfir_examples.py",
-       "line": 81
+       "line": 94
       },
       "op": "iadd",
       "pred": null,
@@ -370,7 +370,7 @@
       "loc": {
        "col": 13,
        "file": "export_sfir_examples.py",
-       "line": 81
+       "line": 94
       },
       "op": "const",
       "pred": null,
@@ -387,7 +387,7 @@
       "loc": {
        "col": 13,
        "file": "export_sfir_examples.py",
-       "line": 81
+       "line": 94
       },
       "op": "const",
       "pred": null,
@@ -406,7 +406,7 @@
       "loc": {
        "col": 13,
        "file": "export_sfir_examples.py",
-       "line": 81
+       "line": 94
       },
       "op": "load",
       "pred": null,
@@ -430,7 +430,7 @@
       "loc": {
        "col": 29,
        "file": "export_sfir_examples.py",
-       "line": 82
+       "line": 95
       },
       "op": "reshape",
       "pred": null,
@@ -450,7 +450,7 @@
       "loc": {
        "col": 29,
        "file": "export_sfir_examples.py",
-       "line": 82
+       "line": 95
       },
       "op": "const",
       "pred": null,
@@ -467,7 +467,7 @@
       "loc": {
        "col": 29,
        "file": "export_sfir_examples.py",
-       "line": 82
+       "line": 95
       },
       "op": "imul",
       "pred": null,
@@ -487,7 +487,7 @@
       "loc": {
        "col": 21,
        "file": "export_sfir_examples.py",
-       "line": 82
+       "line": 95
       },
       "op": "iadd",
       "pred": null,
@@ -507,7 +507,7 @@
       "loc": {
        "col": 13,
        "file": "export_sfir_examples.py",
-       "line": 82
+       "line": 95
       },
       "op": "const",
       "pred": null,
@@ -524,7 +524,7 @@
       "loc": {
        "col": 13,
        "file": "export_sfir_examples.py",
-       "line": 82
+       "line": 95
       },
       "op": "const",
       "pred": null,
@@ -543,7 +543,7 @@
       "loc": {
        "col": 13,
        "file": "export_sfir_examples.py",
-       "line": 82
+       "line": 95
       },
       "op": "load",
       "pred": null,
@@ -563,7 +563,7 @@
       "loc": {
        "col": 22,
        "file": "export_sfir_examples.py",
-       "line": 83
+       "line": 96
       },
       "op": "dot",
       "pred": null,
@@ -583,7 +583,7 @@
       "loc": {
        "col": 16,
        "file": "export_sfir_examples.py",
-       "line": 83
+       "line": 96
       },
       "op": "add",
       "pred": null,
@@ -605,7 +605,7 @@
    "loc": {
     "col": 11,
     "file": "export_sfir_examples.py",
-    "line": 85
+    "line": 98
    },
    "op": "for",
    "pred": null,
@@ -622,7 +622,7 @@
    "loc": {
     "col": 22,
     "file": "export_sfir_examples.py",
-    "line": 86
+    "line": 99
    },
    "op": "const",
    "pred": null,
@@ -639,7 +639,7 @@
    "loc": {
     "col": 22,
     "file": "export_sfir_examples.py",
-    "line": 86
+    "line": 99
    },
    "op": "imul",
    "pred": null,
@@ -659,7 +659,7 @@
    "loc": {
     "col": 14,
     "file": "export_sfir_examples.py",
-    "line": 86
+    "line": 99
    },
    "op": "iadd",
    "pred": null,
@@ -679,7 +679,7 @@
    "loc": {
     "col": 5,
     "file": "export_sfir_examples.py",
-    "line": 86
+    "line": 99
    },
    "op": "const",
    "pred": null,
@@ -698,7 +698,7 @@
    "loc": {
     "col": 5,
     "file": "export_sfir_examples.py",
-    "line": 86
+    "line": 99
    },
    "op": "store",
    "pred": null,

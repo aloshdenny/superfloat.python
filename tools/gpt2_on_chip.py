@@ -47,10 +47,14 @@ def main(argv=None) -> int:
     ap.add_argument("--no-check", action="store_true", help="do not also check each chip call on the host")
     ap.add_argument("--out", help="write the result as JSON here")
     a = ap.parse_args(argv)
+    if a.tokens < 2 or a.windows < 1:
+        ap.error("--tokens must be at least 2 and --windows at least 1 (a window predicts tokens - 1)")
 
     from transformers import AutoModelForCausalLM
     model = sft.convert(AutoModelForCausalLM.from_pretrained(MODEL).eval(), dtype=a.dtype, accumulate="wide")
     ids = wikitext_ids()
+    if a.windows * a.tokens > ids.shape[1]:
+        sys.exit(f"WikiText-2 test has {ids.shape[1]:,} tokens: {a.windows} windows of {a.tokens} do not fit")
     mm = C.ChipMatmul()
     inner = C.library(mm, check=not a.no_check)["matmul_wide"]
     shapes, cycles, launches = Counter(), [0], [0]

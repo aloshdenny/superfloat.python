@@ -171,3 +171,9 @@ def test_hugging_face_gpt2_code_on_the_chip_is_bit_identical(mm):
     assert torch.equal(got, want)
     assert sum(1 for s in calls if s[-1] == 96) >= 1            # the LM head ran on the chip too
     assert len(calls) >= 2 * 6 + 1                              # 6 matmuls a block, then the head
+
+
+def test_codes_outside_the_format_are_refused(mm):
+    with pytest.raises(ValueError, match="outside sf8"):
+        mm(np.full((1, 8), 200), np.ones((8, 8), int), 0, 8)            # 200 << 8 would set the sign bit
+    assert mm(np.full((1, 8), 127), np.ones((8, 8), int), 0, 8).shape == (1, 8)

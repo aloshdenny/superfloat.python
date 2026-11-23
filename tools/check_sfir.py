@@ -102,6 +102,8 @@ def _check_for(o, here, seen, version, ops, sfir, types, defined, errs) -> None:
         errs.append(f"{here}: a for op needs format_version 2")
     if o["attrs"].get("step") == 0:
         errs.append(f"{here}: step is 0")
+    if o.get("pred") is not None:
+        errs.append(f"{here}: a for op has no pred (its body ops carry any predicate)")
     B = o["body"]
     if not isinstance(B, dict) or set(B) != set(sfir["for_body"]):
         errs.append(f"{here}: body is not {{{', '.join(sorted(sfir['for_body']))}}}")
