@@ -89,8 +89,19 @@ them. Each one is a single place to change if the team decides differently.
   causal attention, projection, 4x MLP; `tools/gpt2_block_on_chip.py`) through
   `torch.compile(backend="superfloat")`: all 6 matmuls on the chip (QKV, scores, P.V, projection, MLP up
   and down), each checked against the host MX model, and the block's output bit-identical to the eager
-  emulation.  Chip cost at sf16: 165.4M cycles for 8 tokens, 65.8M for 1 token (decode).  Not done: a
-  real GPT-2 (needs `transformers` and the weights, a download) and its perplexity; the LM head.
+  emulation.  Chip cost at sf16: 165.4M cycles for 8 tokens, 65.8M for 1 token (decode).
+* Real GPT-2 on the chip model (2026-11-23): `tools/gpt2_on_chip.py` loads openai-community/gpt2 with
+  transformers, converts it with `sft.convert(dtype="sf16", accumulate="wide")` and runs it eager (host
+  emulation) and through `torch.compile(backend="superfloat")` on atreides-hw with the chip library,
+  every chip matmul checked against the host MX model.  The weights and WikiText-2 sit in the working
+  folder's own HF cache, outside this repository.  Host baseline first (WikiText-2 test, 8 windows of
+  256, 2,040 predicted tokens): float 49.538, the same as the earlier runs; sf16 wide 49.526.  On the
+  chip, first 8 tokens of the test set: logits bit-identical to the host, loss 6.439293 on both (ppl
+  625.96 over 7 predicted tokens; a short context, so not comparable to the 256-token number).  115 chip
+  calls: 73 matmuls (12 blocks x 6, then the LM head) and 42 redo relaunches for outputs at +-max;
+  4,892 launches, 4.16G simulated cycles, 262 s wall on the laptop.  The LM head (768 x 50,257) runs on
+  the chip too.  `tests/test_chipmm.py` runs transformers' own GPT-2 code (tiny random config, no
+  download) the same way and asserts bit-identical logits.
 * His hand-written axpy is checked on a toy model of its 7 instructions only (no MX), so wide kernels
   cannot run end to end yet.
 

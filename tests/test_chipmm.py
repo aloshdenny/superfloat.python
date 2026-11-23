@@ -143,3 +143,31 @@ def test_a_transformer_block_on_the_chip_is_bit_identical(mm, dim, heads, tokens
     r = G.run(tokens=tokens, dim=dim, heads=heads)
     assert r["identical"] and r["host_emulated"] == 0
     assert len(r["calls"]) == 6                               # qkv, scores, P.V, proj, fc, out: all on the chip
+
+
+def test_hugging_face_gpt2_code_on_the_chip_is_bit_identical(mm):
+    """transformers' own GPT-2 (Conv1D layers, its attention, the LM head), tiny and random: no download."""
+    transformers = pytest.importorskip("transformers")
+    import torch
+    import sf
+    import sf.torch as sft
+    from sf.kernels._runtime import HardwareAtreides
+    torch.manual_seed(0)
+    cfg = transformers.GPT2Config(n_layer=2, n_embd=64, n_head=2, vocab_size=96, n_positions=32)
+    model = sft.convert(transformers.GPT2LMHeadModel(cfg).eval(), dtype="sf16", accumulate="wide")
+    ids = torch.randint(0, 96, (1, 12))
+    calls = []
+    inner = C.library(mm, check=True)["matmul_wide"]
+    HardwareAtreides.attach_library({"matmul_wide": lambda fmt, a, b, shift=0, mx=None:
+                                     calls.append(b.shape) or inner(fmt, a, b, shift, mx)})
+    try:
+        with torch.no_grad():
+            want = model(ids).logits
+            torch._dynamo.reset()
+            with sf.config(default_device="atreides-hw", preflight="ignore"):
+                got = torch.compile(model, backend="superfloat")(ids).logits
+    finally:
+        HardwareAtreides.attach_library(None)
+    assert torch.equal(got, want)
+    assert sum(1 for s in calls if s[-1] == 96) >= 1            # the LM head ran on the chip too
+    assert len(calls) >= 2 * 6 + 1                              # 6 matmuls a block, then the head
