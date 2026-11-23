@@ -75,3 +75,71 @@ def test_a_gpt2_layer_splits_into_launches(mm):
 def test_shifts_outside_the_pop_range_are_refused(mm):
     with pytest.raises(ValueError, match="-32..31"):
         mm(np.zeros((1, 8), int), np.zeros((8, 8), int), 32, 16)
+
+
+# --- the layout matches Alosh's own functions ---------------------------------------------------
+
+def test_numpy_layout_equals_kernels_v4(mm):
+    rng = np.random.default_rng(11)
+    W, A = rng.integers(0, 1 << 16, (32, 8)), rng.integers(0, 1 << 16, (8, 32))
+    assert C.weight_words(W).tolist() == mm.K.weight_words(W.tolist(), 16, False)
+    assert C.act_words(A).tolist() == mm.K.act_words(A.tolist())
+    codes = rng.integers(-2047, 2048, 50)
+    assert C.encode(codes, 12).tolist() == [C.to_word(c, 12) for c in codes]
+    assert C.decode(C.encode(codes, 12), 12).tolist() == codes.tolist()
+
+
+# --- atreides-hw sends wide matmuls to the chip -------------------------------------------------
+
+@pytest.fixture
+def hw_chip(mm):
+    from sf.kernels._runtime import HardwareAtreides
+    calls = []
+    inner = C.library(mm, check=True)["matmul_wide"]
+
+    def counted(fmt, a, b, shift=0, mx=None):
+        calls.append((tuple(a.shape), tuple(b.shape)))
+        return inner(fmt, a, b, shift, mx)
+    HardwareAtreides.attach_library({"matmul_wide": counted})
+    yield calls
+    HardwareAtreides.attach_library(None)
+
+
+def test_device_matmul_runs_on_the_chip(hw_chip):
+    import sf
+    rng = np.random.default_rng(12)
+    out = {}
+    for dev in ("atreides-hw", "atreides-sim"):
+        with sf.errstate(all="ignore"):
+            a = sf.from_codes(rng.integers(-9000, 9000, (2, 8, 64)), sf.sf16, device=dev)
+            b = sf.from_codes(rng.integers(-9000, 9000, (64, 24)), sf.sf16, device=dev)
+            out[dev] = sf.matmul(a, b, accumulate="wide", shift=-2)
+        rng = np.random.default_rng(12)
+    assert np.array_equal(out["atreides-hw"].codes, out["atreides-sim"].codes)
+    assert hw_chip == [((2, 8, 64), (64, 24))]
+    assert not out["atreides-hw"].status.exact                # no flags on the chip: an upper bound only
+    with sf.config(status="replay"), sf.errstate(all="ignore"):
+        a = sf.from_codes(rng.integers(-9000, 9000, (8, 64)), sf.sf16, device="atreides-hw")
+        b = sf.from_codes(rng.integers(-9000, 9000, (64, 8)), sf.sf16, device="atreides-hw")
+        assert sf.matmul(a, b, accumulate="wide", shift=-2).status.exact   # replayed on the host
+
+
+def test_detached_hardware_keeps_the_host_emulation(mm):
+    import sf
+    from sf.kernels._runtime import HardwareAtreides
+    HardwareAtreides.attach_library(None)
+    with sf.errstate(all="ignore"):
+        a = sf.from_codes(np.ones((8, 8), int), sf.sf16, device="atreides-hw")
+        assert sf.matmul(a, a, accumulate="wide").status.exact
+
+
+@pytest.mark.parametrize("dim,heads,tokens", [(64, 2, 8), (64, 2, 1),
+                                              pytest.param(768, 12, 8, marks=pytest.mark.slow)])
+def test_a_transformer_block_on_the_chip_is_bit_identical(mm, dim, heads, tokens):
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    import gpt2_block_on_chip as G
+    r = G.run(tokens=tokens, dim=dim, heads=heads)
+    assert r["identical"] and r["host_emulated"] == 0
+    assert len(r["calls"]) == 6                               # qkv, scores, P.V, proj, fc, out: all on the chip

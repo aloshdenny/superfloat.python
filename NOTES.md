@@ -80,6 +80,17 @@ them. Each one is a single place to change if the team decides differently.
   sf8, sf9, sf12 and sf16 (tests/test_chipmm.py, needs SUPERFLOAT_SIM and SUPERFLOAT_GPU).  Chip cost
   at sf16, decode (M = 1): 768 x 768 is 5.27M cycles in 10 launches; 768 x 3072 is 21.1M in 39;
   3072 x 768 is 23.7M in 48.  The programs are imported from the checkout, never copied here.
+* Wired in (2026-11-23): `HardwareAtreides.attach_library(_chipmm.library())` makes atreides-hw run
+  `matmul_wide` through the chip programs, so `sf.matmul(..., accumulate="wide")` on atreides-hw arrays,
+  and the compile backend with `default_device="atreides-hw"`, run on the chip model.  No event flags
+  come back (the chip has none): the status is the usual upper bound, or exact with
+  `sf.config(status="replay")`.  Ops not in the library, and atreides-hw with no library, keep the host
+  emulation.  A GPT-2-sized block (768 wide, 12 heads, random weights in GPT-2's shapes, LayerNorm, QKV,
+  causal attention, projection, 4x MLP; `tools/gpt2_block_on_chip.py`) through
+  `torch.compile(backend="superfloat")`: all 6 matmuls on the chip (QKV, scores, P.V, projection, MLP up
+  and down), each checked against the host MX model, and the block's output bit-identical to the eager
+  emulation.  Chip cost at sf16: 165.4M cycles for 8 tokens, 65.8M for 1 token (decode).  Not done: a
+  real GPT-2 (needs `transformers` and the weights, a download) and its perplexity; the LM head.
 * His hand-written axpy is checked on a toy model of its 7 instructions only (no MX), so wide kernels
   cannot run end to end yet.
 
