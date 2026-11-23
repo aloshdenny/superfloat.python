@@ -98,15 +98,20 @@ them. Each one is a single place to change if the team decides differently.
   256, 2,040 predicted tokens): float 49.538, the same as the earlier runs; sf16 wide 49.526.  On the
   chip, first 8 tokens of the test set: logits bit-identical to the host, loss 6.439293 on both (ppl
   625.96 over 7 predicted tokens; a short context, so not comparable to the 256-token number).  115 chip
-  calls: 73 matmuls (12 blocks x 6, then the LM head) and 42 redo relaunches for outputs at +-max;
+  calls: 77 first launches (12 blocks x 6, then the LM head in 5 slices of at most 10,922 columns, the
+  2^23-element limit of `_core.WIDE_BLOCK`) and 38 redo relaunches for outputs at +-max;
   4,892 launches, 4.16G simulated cycles, 262 s wall on the laptop.  The LM head (768 x 50,257) runs on
   the chip too.  A full 256-token window (the first of the test set, 255 predicted tokens): logits
-  bit-identical, loss 3.945928 on both, ppl 51.7243 on the host and on the chip.  121 chip calls,
+  bit-identical, loss 3.945928 on both, ppl 51.7243 on the host and on the chip.  121 chip calls (77 and 44
+  redos: QKV 12, scores 12, MLP down 10, MLP up 7, projection 2, LM head 1),
   161,282 launches, 143.55G simulated cycles (2 graphs, 73 SF ops on the chip, 0 host-emulated); 8,682 s
   wall against 19 s for the host emulation.  `tests/test_chipmm.py` runs transformers' own GPT-2 code (tiny random config, no
   download) the same way and asserts bit-identical logits.
-* His hand-written axpy is checked on a toy model of its 7 instructions only (no MX), so wide kernels
-  cannot run end to end yet.
+* A redo relaunches the whole matmul even if one output needs it (`DeviceRunner.matmul_wide`).  From single
+  matmuls run on superfloat.sim, the 8-token GPT-2 pass without redos would be about 2.71G cycles against the
+  4.16G measured, so redos are about 35% of it (an estimate).
+* Still not done: no kernel has been compiled by the real superfloat-compile.  Kartik's axpy is hand-written
+  and the tests use a stand-in compiler; wide kernels have no compiled program.
 
 ## Alosh's decisions on the 0.15.0 questions (0.16.0, spec 1.10.0)
 
