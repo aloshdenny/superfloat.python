@@ -54,6 +54,19 @@ them. Each one is a single place to change if the team decides differently.
   version 2.  Interpreter and C backend run it; both give the unrolled loop's bits and events (tested,
   tests/test_fori_loop.py).  Example for him: `examples/sfir/dot_k_tiles/` (4 k tiles, 16 top-level
   ops plus a 19-op body).  Plain Python loops still unroll.
+* The driver on superfloat.sim (2026-11-23), Alosh's cycle-accurate model of the chip, lockstep-checked
+  against the v4.9.2 RTL (cycles, pin-bus traffic, every memory word): `sf.kernels._chipsim.SuperfloatSimRunner`
+  is a driver runner on it (load program and memory, write each launch's parameter words, START to DONE,
+  read memory).  Kartik's axpy file, our layout and launches: the same bits as atreides-sim at n = 1, 8,
+  20, 240, 241, 600 and 1000 (tests/test_chipsim.py, run with `SUPERFLOAT_SIM=<checkout>`, skipped
+  otherwise).  The run file `examples/chip_run/axpy_n600.run.json`: 600 of 600 words right, 37,711 cycles
+  in 3 launches (`tools/make_chip_run.py --sim RUN`).  superfloat.sim is Superfloat's private SDK: nothing
+  of it is in this repository, it is imported from its own checkout.
+* 240 or 248 threads per launch (the question for Kartik), measured on superfloat.sim with axpy: the same
+  bits, and cycles within 1% (n = 600: 37,711 vs 37,906; n = 4,800: 299,800 vs 297,983; n = 7,440:
+  464,690 in 31 launches vs 461,280 in 30).  The chip takes up to 255 threads (32 blocks, compiler_v4.9.2.md
+  4.2).  So keeping whole programs in a launch (240 for BLOCK 16) costs nothing measurable, and it is
+  needed for kernels whose threads work together on one program.
 * His hand-written axpy is checked on a toy model of its 7 instructions only (no MX), so wide kernels
   cannot run end to end yet.
 

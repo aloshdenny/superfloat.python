@@ -2,6 +2,7 @@
 
     python tools/make_chip_run.py                  # write examples/chip_run/axpy_n600.run.json
     python tools/make_chip_run.py --check RUN DUMP # compare a testbench dump with RUN's expected words
+    python tools/make_chip_run.py --sim RUN        # run RUN on superfloat.sim (on PYTHONPATH) and check it
 
 A run file holds everything the chip needs for one call: the program, the data
 memory before the first launch, and each launch (thread count and the
@@ -56,6 +57,15 @@ def build() -> str:
 
 
 def main(argv) -> int:
+    if argv[:1] == ["--sim"]:
+        from sf.kernels._chipsim import SuperfloatSimRunner
+        run = json.loads(Path(argv[1]).read_text())
+        runner = SuperfloatSimRunner()
+        bad = D.check_dump(run, runner(D.from_run_file(run)))
+        print(f"superfloat.sim {runner.version}: {len(runner.launches)} launches, {runner.cycles} cycles "
+              f"({', '.join(str(r['cycles']) for r in runner.launches)})")
+        print("every output word matches" if not bad else f"{len(bad)} words differ:\n  " + "\n  ".join(bad[:20]))
+        return 1 if bad else 0
     if argv[:1] == ["--check"]:
         run, dump = (json.loads(Path(f).read_text()) for f in argv[1:3])
         bad = D.check_dump(run, dump)
