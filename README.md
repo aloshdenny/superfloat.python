@@ -89,6 +89,13 @@ driver.
 ## Install and run
 
 ```
+pip install superfloat               # the library; in Python: import sf
+pip install "superfloat[torch]"      # with PyTorch, for sf.torch
+```
+
+From a checkout, for development:
+
+```
 pip install -e ".[test]"             # library + test tools
 pip install -e ".[torch]"            # add PyTorch for sf.torch
 pytest                               # the full per-commit suite (about 8 min)
@@ -117,7 +124,7 @@ Every result is compared as integer codes, never with float tolerances,
 against an independent oracle written with exact fractions. 732 tests run
 on every commit (Python 3.10, 3.12, 3.13) and the exhaustive sf16 sweep
 runs nightly. The full matrix of what is checked, against what, at which
-widths and on which target is in [docs/TESTING.md](docs/TESTING.md).
+widths and on which target is in [docs/TESTING.md](https://github.com/superfloat/superfloat.python/blob/main/docs/TESTING.md).
 
 ## What is done and what is not
 
@@ -138,14 +145,14 @@ Not done:
 
 | File | What it holds |
 |---|---|
-| [docs/API.md](docs/API.md) | Every function, decorator and object for Stages 1 to 3, with syntax and the Python semantics of SF values. The reference to use when writing tests against the simulator. |
-| [docs/TESTING.md](docs/TESTING.md) | The testing matrix, the test files, how to run each gate. |
-| [docs/DETAILS.md](docs/DETAILS.md) | Module map, exact semantics tables, every config option, design notes per stage. |
-| [spec/](spec/ops.py) | The lowering spec for the compiler: every IR op with operands, results, events, memory effects and legal rewrites, plus golden vectors. Generated pages under `website/compiler/`. Run `python tools/gen_spec.py` after editing `spec/ops.py`. |
-| [NOTES.md](NOTES.md) | Design decisions, open hardware questions, review history. |
+| [docs/API.md](https://github.com/superfloat/superfloat.python/blob/main/docs/API.md) | Every function, decorator and object for Stages 1 to 3, with syntax and the Python semantics of SF values. The reference to use when writing tests against the simulator. |
+| [docs/TESTING.md](https://github.com/superfloat/superfloat.python/blob/main/docs/TESTING.md) | The testing matrix, the test files, how to run each gate. |
+| [docs/DETAILS.md](https://github.com/superfloat/superfloat.python/blob/main/docs/DETAILS.md) | Module map, exact semantics tables, every config option, design notes per stage. |
+| [spec/](https://github.com/superfloat/superfloat.python/blob/main/spec/ops.py) | The lowering spec for the compiler: every IR op with operands, results, events, memory effects and legal rewrites, plus golden vectors. Generated pages under `website/compiler/`. Run `python tools/gen_spec.py` after editing `spec/ops.py`. |
+| [NOTES.md](https://github.com/superfloat/superfloat.python/blob/main/NOTES.md) | Design decisions, open hardware questions, review history. |
 | `examples/` | A runnable tour per stage. |
 | `website/` | The developer docs site at [docs.superfloat.si](https://docs.superfloat.si) (Mintlify, hand-written). |
 
 ## License
 
-sf is free to use for developing and running software on Atreides hardware, under the [Superfloat SDK License Agreement](LICENSE). Copyright (c) 2026 Superfloat Private Limited ([superfloat.si](https://superfloat.si)).
+sf is free to use for developing and running software on Atreides hardware, under the [Superfloat SDK License Agreement](https://github.com/superfloat/superfloat.python/blob/main/LICENSE). Copyright (c) 2026 Superfloat Private Limited ([superfloat.si](https://superfloat.si)).

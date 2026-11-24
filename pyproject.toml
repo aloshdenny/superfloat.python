@@ -3,13 +3,18 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sf-python"
+name = "superfloat"
 version = "0.16.0"
-description = "sf: the Python DSL for Superfloat (sf4..sf16 fixed point) on the Atreides GPU. Stages 1.0, 1.1 and 2: scalar arithmetic, arrays and linear algebra, PyTorch integration."
+description = "sf: the Python library for Superfloat numbers (sf4 to sf16 fixed point) on the Atreides chip: arrays, PyTorch integration and GPU-style kernels."
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
+
+[project.urls]
+Homepage = "https://superfloat.si"
+Documentation = "https://docs.superfloat.si"
+Source = "https://github.com/superfloat/superfloat.python"
 
 [project.optional-dependencies]
 torch = ["torch>=2.4"]
