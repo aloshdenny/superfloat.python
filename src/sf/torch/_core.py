@@ -124,11 +124,19 @@ class DeviceRunner:
             C = A + B
         return np.asarray(C.codes, dtype=np.int64), self._events(C, under=False)
 
+    # Redo only the rows and columns that hold a +-max output (False: relaunch the whole matmul).
+    partial_redo = True
+
     def matmul_wide(self, fmt, ka, kb, shift, shift_redo, mx, bias_at=None):
         """One launch at ``shift``, then one relaunch at ``shift_redo`` if any
         output came back at +-max (the codes show it).  The chip cannot
         report flushed totals; accumulator clips were ruled out on the host.
-        ``bias_at``: as on the host; the add runs on the target."""
+        ``bias_at``: as on the host; the add runs on the target.
+
+        The relaunch covers only the rows of ``ka`` and the columns of ``kb``
+        that hold a redone output (``partial_redo``): an output depends only
+        on its own row, column and shift, so the bits are those of a whole
+        relaunch."""
         import sf
         A, B = self._arrays(fmt, ka, kb)
         with sf.errstate(all="ignore"):
@@ -138,9 +146,12 @@ class DeviceRunner:
         top = (np.abs(q) >= fmt.max_code) | (np.abs(y) >= fmt.max_code) | sat
         redo = np.zeros(q.shape, bool)
         if shift_redo is not None and top.any():
-            with sf.errstate(all="ignore"):
-                q2 = np.asarray(sf.matmul(A, B, accumulate="wide", shift=shift_redo).codes, dtype=np.int64)
-            y2, sat2, _ = _post(self, fmt, q2, None, np.broadcast_to(shift_redo, q.shape), bias_at)
+            if self.partial_redo:
+                q2, y2, sat2 = self._redo_window(fmt, ka, kb, q, top, shift_redo, bias_at)
+            else:
+                with sf.errstate(all="ignore"):
+                    q2 = np.asarray(sf.matmul(A, B, accumulate="wide", shift=shift_redo).codes, dtype=np.int64)
+                y2, sat2, _ = _post(self, fmt, q2, None, np.broadcast_to(shift_redo, q.shape), bias_at)
             redo = top
             q, y = np.where(redo, q2, q), np.where(redo, y2, y)
             used = np.where(redo, shift_redo, used)
@@ -148,6 +159,31 @@ class DeviceRunner:
         # +-max after the redo is an upper bound: it may be a true value
         return y, {"used": used, "redone": int(redo.sum()), "saturated": int(top.sum()), "flushed": None,
                    "acc_clipped": 0, "exact": not top.any()}
+
+    def _redo_window(self, fmt, ka, kb, q, top, shift_redo, bias_at):
+        """The relaunch at ``shift_redo`` over the rows and columns that hold
+        a redone output, gathered into one launch.  Returns full-shape
+        (q2, y2, sat2); outside the window they hold the first launch's
+        codes, and only the ``top`` positions are read."""
+        import sf
+        lead = tuple(range(top.ndim - 2))
+        rows = np.flatnonzero(top.any(axis=lead + (top.ndim - 1,)))
+        cols = np.flatnonzero(top.any(axis=lead + (top.ndim - 2,)))
+        win = (Ellipsis, rows[:, None], cols[None, :])
+
+        def cut(a):
+            return np.ascontiguousarray(np.broadcast_to(a, q.shape)[win])
+
+        sh = shift_redo if np.ndim(shift_redo) == 0 else cut(shift_redo)
+        A, B = self._arrays(fmt, np.take(ka, rows, axis=-2), np.take(kb, cols, axis=-1))
+        with sf.errstate(all="ignore"):
+            qw = np.asarray(sf.matmul(A, B, accumulate="wide", shift=sh).codes, dtype=np.int64)
+        full = np.broadcast_to(shift_redo, q.shape)
+        bias_w = None if bias_at is None else (lambda _used: tuple(cut(a) for a in bias_at(full)))
+        yw, satw, _ = _post(self, fmt, qw, None, np.broadcast_to(sh, qw.shape), bias_w)
+        q2, y2, sat2 = q.copy(), q.copy(), np.zeros(q.shape, bool)
+        q2[win], y2[win], sat2[win] = qw, yw, satw
+        return q2, y2, sat2
 
     @staticmethod
     def _events(C, under: bool) -> dict:
