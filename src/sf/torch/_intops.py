@@ -6,7 +6,8 @@ between from the integer definitions, exactly as the chip will compute them.  Fo
 * ``int_gelu(x)``: GPT-2's tanh GELU (``gelu_new``); ``int_silu(x)``: x sigmoid(x).  One exponent per row (last
   axis), from the row's max |x|, clamped to 0..6.
 
-No gradient: these are inference references (the autograd graph is cut, as on the chip).
+No gradient: these are inference references (the autograd graph is cut, as on the chip).  Each is a custom op
+(``sf::int_softmax``, ``sf::int_xsig``), so ``torch.compile`` keeps it whole.
 """
 from __future__ import annotations
 
@@ -20,18 +21,41 @@ def _np(t: torch.Tensor) -> np.ndarray:
     return t.detach().to("cpu", torch.float64).numpy()
 
 
-def int_softmax(scores: torch.Tensor, dim: int = -1) -> torch.Tensor:
+# The integer definitions run in NumPy, so each is a custom op: torch.compile keeps it as one opaque node (run on
+# the host, as in eager) instead of tracing into the NumPy code, which Dynamo cannot do.
+
+@torch.library.custom_op("sf::int_softmax", mutates_args=())
+def _int_softmax_op(scores: torch.Tensor, dim: int) -> torch.Tensor:
     x = scores.movedim(dim, -1)
     p = _intops.softmax_rows(_np(x))
-    return torch.from_numpy(p).to(scores.dtype).to(scores.device).movedim(-1, dim)
+    return torch.from_numpy(p).to(scores.dtype).to(scores.device).movedim(-1, dim).contiguous()
+
+
+@_int_softmax_op.register_fake
+def _(scores, dim):
+    return torch.empty_like(scores)
+
+
+@torch.library.custom_op("sf::int_xsig", mutates_args=())
+def _int_xsig_op(x: torch.Tensor, cubic: bool) -> torch.Tensor:
+    return torch.from_numpy(_intops.xsig_rows(_np(x), cubic)).to(x.dtype).to(x.device)
+
+
+@_int_xsig_op.register_fake
+def _(x, cubic):
+    return torch.empty_like(x)
+
+
+def int_softmax(scores: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    return _int_softmax_op(scores, dim % scores.dim())
 
 
 def int_gelu(x: torch.Tensor) -> torch.Tensor:
-    return torch.from_numpy(_intops.xsig_rows(_np(x), True)).to(x.dtype).to(x.device)
+    return _int_xsig_op(x, True)
 
 
 def int_silu(x: torch.Tensor) -> torch.Tensor:
-    return torch.from_numpy(_intops.xsig_rows(_np(x), False)).to(x.dtype).to(x.device)
+    return _int_xsig_op(x, False)
 
 
 class IntGELU(torch.nn.Module):

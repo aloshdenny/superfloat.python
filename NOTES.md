@@ -118,6 +118,14 @@ them. Each one is a single place to change if the team decides differently.
   launches, 2,716,972,644 cycles (-34.7%).  Both: logits bit-identical to the host (8 x 50,257 values, 0
   differ; per-call checks off), loss 6.439297.  The earlier estimate without any redo is about 2.71G; it is
   an estimate, not a measured run, so "the windows add well under 1%" is not a measurement either.
+* Integer softmax and GELU under torch.compile (2026-11-25): with `nonlinear="integer"`,
+  `torch.compile(backend="superfloat")` failed at 765147f (Dynamo traced into the NumPy definitions:
+  "'ndarray' object has no attribute '__round__'" in `_intops.lo_offset`).  They are now custom ops
+  (`sf::int_softmax`, `sf::int_xsig`), one host node each (`tests/test_intops_compile.py`).  Measured:
+  `tools/gpt2_on_chip.py --tokens 8 --no-check --nonlinear integer`, same settings as the partial-redo run
+  above (window included): 125 chip calls (77 first launches, 48 redos), 3,418 launches, 2,717,320,044
+  cycles, logits bit-identical to the host (8 x 50,257 values, 0 differ), loss 6.442632.  The matmuls run on
+  superfloat.sim; softmax and GELU run on the host, on the integer definitions.
 * Still not done: no kernel has been compiled by the real superfloat-compile.  Kartik's axpy is hand-written
   and the tests use a stand-in compiler; wide kernels have no compiled program.
 
