@@ -524,6 +524,48 @@ def xsig_rows(x: np.ndarray, cubic: bool) -> np.ndarray:
     return out
 
 
+def _pow2_exp(v):
+    """The smallest e with |v| < 2^e (v > 0), as an int array; 0 where v is 0."""
+    v = np.asarray(v, np.float64)
+    return np.where(v > 0, np.floor(np.log2(np.maximum(v, 1e-300))) + 1, 0).astype(np.int64)
+
+
+def norm_rows(x: np.ndarray, gamma, beta=None, eps: float = 1e-5, rms: bool = False) -> np.ndarray:
+    """LayerNorm (or RMSNorm, ``rms``) of float rows (last axis) through ``norm_row``.
+
+    Exponents, one per row unless said otherwise:
+      ex  from max |x|, one step higher for a LayerNorm row where x - mean would saturate;
+      eg  from max |gamma|, eb from max |beta| (one each for the whole layer);
+      eo  from the row's largest output, before and after the beta add (both are held at eo), so the output keeps
+          15 bits against it (the chip takes it from the max of the product codes before the final shift, the way
+          POP takes its shift).
+    No gradient: an inference reference, like the other row wrappers."""
+    x = np.asarray(x, np.float64)
+    shp = x.shape
+    x2 = x.reshape(-1, shp[-1])
+    n = x2.shape[-1]
+    g = np.broadcast_to(np.asarray(gamma, np.float64), (n,))
+    b = np.zeros(n) if beta is None or rms else np.broadcast_to(np.asarray(beta, np.float64), (n,))
+    eg, eb = int(_pow2_exp(np.abs(g).max())), int(_pow2_exp(np.abs(b).max()))
+    gc, bc = to_codes(g, eg), to_codes(b, eb)
+    ex = _pow2_exp(np.abs(x2).max(axis=-1) * (1 + 2 ** -14))
+    if not rms:                                       # one step higher only where x - mean would saturate
+        dev = np.abs(x2 - x2.mean(axis=-1, keepdims=True)).max(axis=-1)
+        ex = ex + (dev * (1 + 2 ** -14) >= np.exp2(ex)).astype(np.int64)
+    if rms:
+        t = x2 / np.sqrt((x2 ** 2).mean(axis=-1, keepdims=True) + eps) * g
+    else:
+        mu = x2.mean(axis=-1, keepdims=True)
+        t = (x2 - mu) / np.sqrt(((x2 - mu) ** 2).mean(axis=-1, keepdims=True) + eps) * g
+    # the scaled row before the beta add is held at eo too, so both it and the sum must fit
+    eo = _pow2_exp(np.maximum(np.abs(t), np.abs(t + b)).max(axis=-1) * (1 + 2 ** -10))
+    out = np.empty_like(x2)
+    for i in range(len(x2)):
+        c = norm_row(to_codes(x2[i], int(ex[i])), gc, bc, int(eo[i]), int(ex[i]), eg, eb, eps, rms)
+        out[i] = np.asarray(c, np.float64) / 32768 * 2.0 ** int(eo[i])
+    return out.reshape(shp)
+
+
 MASKED = -1e4
 
 
