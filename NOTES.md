@@ -107,9 +107,17 @@ them. Each one is a single place to change if the team decides differently.
   161,282 launches, 143.55G simulated cycles (2 graphs, 73 SF ops on the chip, 0 host-emulated); 8,682 s
   wall against 19 s for the host emulation.  `tests/test_chipmm.py` runs transformers' own GPT-2 code (tiny random config, no
   download) the same way and asserts bit-identical logits.
-* A redo relaunches the whole matmul even if one output needs it (`DeviceRunner.matmul_wide`).  From single
-  matmuls run on superfloat.sim, the 8-token GPT-2 pass without redos would be about 2.71G cycles against the
-  4.16G measured, so redos are about 35% of it (an estimate).
+* A redo relaunches only its window (2026-11-25): `DeviceRunner.matmul_wide` gathers the rows of A and the
+  columns of B that hold an output at +-max and relaunches that window at the redo shift in one launch, the
+  bias add included.  An output depends only on its row, its column and its shift, so the bits are those of
+  a whole relaunch (`tests/test_partial_redo.py`, host and superfloat.sim; `DeviceRunner.partial_redo =
+  False` keeps the whole relaunch).  Measured: `tools/gpt2_on_chip.py --tokens 8 --no-check`, GPT-2 small,
+  sf16, the first 8 tokens of WikiText-2 test window 0, LM head over all 8 tokens, superfloat.sim at
+  6b83d38 with superfloat.gpu at fd310b7.  Whole relaunch (the code before this change): 115 chip calls (77
+  first launches, 38 redos), 4,892 launches, 4,158,661,426 cycles.  Window: the same 115 calls, 3,298
+  launches, 2,716,972,644 cycles (-34.7%).  Both: logits bit-identical to the host (8 x 50,257 values, 0
+  differ; per-call checks off), loss 6.439297.  The earlier estimate without any redo is about 2.71G; it is
+  an estimate, not a measured run, so "the windows add well under 1%" is not a measurement either.
 * Still not done: no kernel has been compiled by the real superfloat-compile.  Kartik's axpy is hand-written
   and the tests use a stand-in compiler; wide kernels have no compiled program.
 
