@@ -265,7 +265,7 @@ class Builder:
         return v
 
     def emit(self, name, args, attrs=None, type_=None, shape=(), body=None) -> Value | None:
-        pred = self.current_pred()
+        pred = self.current_pred() if body is None else None   # a for op's body ops carry the predicate
         for a in args:
             if isinstance(a, Value) and a.scope not in self.scopes:
                 raise SFCompileError(

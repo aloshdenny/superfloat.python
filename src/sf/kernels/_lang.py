@@ -148,6 +148,14 @@ def fori_loop(start, stop, body, init, *, step: int = 1):
                    " (make it one with sf.full / sf.zeros, or an int expression of sf.program_id)"))
     if not range(start, stop, step):
         return init
+    pred = b.current_pred()
+    if pred is not None:
+        # under a predicate every value the body computes has one copy per lane (Builder.emit),
+        # so a carry made outside it is widened first, as the first unrolled trip would widen it
+        for i, v in enumerate(inits):
+            shape = broadcast_shapes(v.shape, pred.shape)
+            if shape != v.shape:
+                inits[i] = Sym(b.emit("broadcast", [v.v], {"shape": shape}, v.type, shape))
     from ._ir import Loop
     loop = Loop(None, [], [], [], [])
     with b.loop_body(loop.ops):

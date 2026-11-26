@@ -22,6 +22,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "sf.torch" = ["data/*.json"]
+"sf.kernels" = ["*.h"]                  # the C backend compiles against it
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

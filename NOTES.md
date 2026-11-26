@@ -54,8 +54,64 @@ them. Each one is a single place to change if the team decides differently.
   version 2.  Interpreter and C backend run it; both give the unrolled loop's bits and events (tested,
   tests/test_fori_loop.py).  Example for him: `examples/sfir/dot_k_tiles/` (4 k tiles, 16 top-level
   ops plus a 19-op body).  Plain Python loops still unroll.
-* His hand-written axpy is checked on a toy model of its 7 instructions only (no MX), so wide kernels
-  cannot run end to end yet.
+* The driver on superfloat.sim (2026-11-23), Alosh's cycle-accurate model of the chip, lockstep-checked
+  against the v4.9.2 RTL (cycles, pin-bus traffic, every memory word): `sf.kernels._chipsim.SuperfloatSimRunner`
+  is a driver runner on it (load program and memory, write each launch's parameter words, START to DONE,
+  read memory).  Kartik's axpy file, our layout and launches: the same bits as atreides-sim at n = 1, 8,
+  20, 240, 241, 600 and 1000 (tests/test_chipsim.py, run with `SUPERFLOAT_SIM=<checkout>`, skipped
+  otherwise).  The run file `examples/chip_run/axpy_n600.run.json`: 600 of 600 words right, 37,711 cycles
+  in 3 launches (`tools/make_chip_run.py --sim RUN`).  superfloat.sim is Superfloat's private SDK: nothing
+  of it is in this repository, it is imported from its own checkout.
+* 240 or 248 threads per launch (the question for Kartik), measured on superfloat.sim with axpy: the same
+  bits, and cycles within 1% (n = 600: 37,711 vs 37,906; n = 4,800: 299,800 vs 297,983; n = 7,440:
+  464,690 in 31 launches vs 461,280 in 30).  The chip takes up to 255 threads (32 blocks, compiler_v4.9.2.md
+  4.2).  So keeping whole programs in a launch (240 for BLOCK 16) costs nothing measurable, and it is
+  needed for kernels whose threads work together on one program.
+* Wide matmul as a library call on the chip model (2026-11-23): `sf.kernels._chipmm.ChipMatmul` runs
+  (M, K) @ (K, N) with one POP shift per output through Alosh's hand-written gemv (M = 1) and gemm
+  (8 tokens a block) programs from superfloat.gpu `test/gpt2/kernels_v4.py`, on superfloat.sim.  The
+  host side is ours: blocks of 8 columns, the block table at word 0, weights in WL order, activations
+  chunk by chunk, POP operands slot << 8 | (shift & 63), as many blocks a launch as fit (31 at most,
+  the x region kept off 0x8000).  This is "matmuls as library calls first" from the compiler meeting:
+  no compiler, so it is also the way around LLVM that Alosh asked about.  Measured against sf's MX
+  model (matmul_wide_codes, v4.9.2): 0 wrong on every GPT-2 layer size at sf16 and sf8 (768 x 768 at
+  M = 1 and 8, 768 x 3072, 3072 x 768: 22,272 outputs, tight shifts, full-range inputs), and on
+  saturated POPs, a saturated accumulator, underflow and padding (M, K, N not multiples of 8) at sf4,
+  sf8, sf9, sf12 and sf16 (tests/test_chipmm.py, needs SUPERFLOAT_SIM and SUPERFLOAT_GPU).  Chip cost
+  at sf16, decode (M = 1): 768 x 768 is 5.27M cycles in 10 launches; 768 x 3072 is 21.1M in 39;
+  3072 x 768 is 23.7M in 48.  The programs are imported from the checkout, never copied here.
+* Wired in (2026-11-23): `HardwareAtreides.attach_library(_chipmm.library())` makes atreides-hw run
+  `matmul_wide` through the chip programs, so `sf.matmul(..., accumulate="wide")` on atreides-hw arrays,
+  and the compile backend with `default_device="atreides-hw"`, run on the chip model.  No event flags
+  come back (the chip has none): the status is the usual upper bound, or exact with
+  `sf.config(status="replay")`.  Ops not in the library, and atreides-hw with no library, keep the host
+  emulation.  A GPT-2-sized block (768 wide, 12 heads, random weights in GPT-2's shapes, LayerNorm, QKV,
+  causal attention, projection, 4x MLP; `tools/gpt2_block_on_chip.py`) through
+  `torch.compile(backend="superfloat")`: all 6 matmuls on the chip (QKV, scores, P.V, projection, MLP up
+  and down), each checked against the host MX model, and the block's output bit-identical to the eager
+  emulation.  Chip cost at sf16: 165.4M cycles for 8 tokens, 65.8M for 1 token (decode).
+* Real GPT-2 on the chip model (2026-11-23): `tools/gpt2_on_chip.py` loads openai-community/gpt2 with
+  transformers, converts it with `sft.convert(dtype="sf16", accumulate="wide")` and runs it eager (host
+  emulation) and through `torch.compile(backend="superfloat")` on atreides-hw with the chip library,
+  every chip matmul checked against the host MX model.  The weights and WikiText-2 sit in the working
+  folder's own HF cache, outside this repository.  Host baseline first (WikiText-2 test, 8 windows of
+  256, 2,040 predicted tokens): float 49.538, the same as the earlier runs; sf16 wide 49.526.  On the
+  chip, first 8 tokens of the test set: logits bit-identical to the host, loss 6.439293 on both (ppl
+  625.96 over 7 predicted tokens; a short context, so not comparable to the 256-token number).  115 chip
+  calls: 77 first launches (12 blocks x 6, then the LM head in 5 slices of at most 10,922 columns, the
+  2^23-element limit of `_core.WIDE_BLOCK`) and 38 redo relaunches for outputs at +-max;
+  4,892 launches, 4.16G simulated cycles, 262 s wall on the laptop.  The LM head (768 x 50,257) runs on
+  the chip too.  A full 256-token window (the first of the test set, 255 predicted tokens): logits
+  bit-identical, loss 3.945928 on both, ppl 51.7243 on the host and on the chip.  121 chip calls (77 and 44
+  redos: QKV 12, scores 12, MLP down 10, MLP up 7, projection 2, LM head 1),
+  161,282 launches, 143.55G simulated cycles (2 graphs, 73 SF ops on the chip, 0 host-emulated); 8,682 s
+  wall against 19 s for the host emulation.  `tests/test_chipmm.py` runs transformers' own GPT-2 code (tiny random config, no
+  download) the same way and asserts bit-identical logits.
+* A redo relaunches the whole matmul even if one output needs it (`DeviceRunner.matmul_wide`).  From single
+  matmuls run on superfloat.sim, the 8-token GPT-2 pass without redos would be about 2.71G cycles against the
+  4.16G measured, so redos are about 35% of it (an estimate).
+* Still not done: no kernel has been compiled by the real superfloat-compile.  Kartik's axpy is hand-written
+  and the tests use a stand-in compiler; wide kernels have no compiled program.
 
 ## Alosh's decisions on the 0.15.0 questions (0.16.0, spec 1.10.0)
 

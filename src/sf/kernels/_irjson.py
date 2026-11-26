@@ -142,6 +142,13 @@ def _ops(ops: list) -> list:
     return out
 
 
+def _version_needed(ir: KernelIR) -> int:
+    """The oldest format_version that holds ``ir``: 2 for a ``for`` op, else 1 (old readers keep working)."""
+    v = 2 if any(op.body is not None for op in walk(ir.ops)) else 1
+    assert v <= FORMAT_VERSION
+    return v
+
+
 def to_dict(ir: KernelIR) -> dict:
     """The JSON-ready dict for a traced kernel."""
     ops = _ops(ir.ops)
@@ -150,7 +157,7 @@ def to_dict(ir: KernelIR) -> dict:
               for p in ir.params if p.kind != "constexpr"]
     return {
         "format": FORMAT,
-        "format_version": 2 if any(op.body is not None for op in walk(ir.ops)) else 1,
+        "format_version": _version_needed(ir),
         "spec_version": SPEC_VERSION,
         "kernel": ir.name,
         "style": ir.style,
@@ -286,9 +293,9 @@ def _read_for(o, args, attrs, here, seen, values, define, read) -> Loop:
             isinstance(v, bool) or not isinstance(v, int) for v in attrs.values()) or attrs["step"] == 0:
         raise SFCompileError(f"SF IR JSON: {here}: a for op has int attrs start, stop and step (step not 0), "
                              f"got {attrs}")
-    if o["id"] is not None or o["type"] is not None or o["shape"] is not None:
-        raise SFCompileError(f"SF IR JSON: {here}: a for op's id, type and shape are null; its values are "
-                             "the body's results")
+    if o["id"] is not None or o["type"] is not None or o["shape"] is not None or o["pred"] is not None:
+        raise SFCompileError(f"SF IR JSON: {here}: a for op's id, type, shape and pred are null; its values are "
+                             "the body's results, and its body ops carry any predicate")
     B = o["body"]
     if not isinstance(B, dict):
         raise SFCompileError(f"SF IR JSON: {here}: body is not an object")

@@ -281,3 +281,45 @@ def test_body_field_only_on_for_ops():
     with pytest.raises(sf.SFCompileError, match="unknown fields"):
         KernelIR.from_json(json.dumps(d))
     assert check(copy.deepcopy(d))
+
+
+
+@sf.jit
+def pred_carry(x_ptr, o_ptr, N: sf.constexpr, LOOP: sf.constexpr):
+    i = sf.arange(0, N)
+    x = sf.load(x_ptr + i)
+    c = sf.program_id(0) * 0                           # a scalar, made outside the predicate
+    with sf.predicate(x > 0):
+        if LOOP:
+            c = sf.fori_loop(0, 3, lambda t, v: v + 1, c)
+        else:
+            for _ in range(3):
+                c = c + 1
+        sf.store(o_ptr + i, sf.where(c == 3, x, x - x))
+
+
+def test_a_scalar_carry_under_a_predicate_is_widened_like_the_unrolled_loop(backend):
+    """Under sf.predicate every computed value is one per lane, so the carry widens, as when unrolled."""
+    outs = []
+    for loop in (1, 0):
+        pred_carry.cache.clear()
+        x = sf.from_codes(np.arange(-4, 4) * 1000, sf.sf16, device=DEV)
+        o = sf.zeros(8, "sf16", device=DEV)
+        pred_carry[(1,)](x, o, N=8, LOOP=loop)
+        outs.append(o.codes.copy())
+    assert np.array_equal(*outs)
+
+
+def test_a_for_op_under_a_predicate_has_no_pred_of_its_own():
+    pred_carry.cache.clear()
+    pred_carry[(1,)](sf.zeros(8, "sf16", device=DEV), sf.zeros(8, "sf16", device=DEV), N=8, LOOP=1)
+    ir = _ir(pred_carry)
+    (op,) = [o for o in ir.ops if o.name == "for"]
+    assert op.pred is None and all(o.pred is not None for o in op.body.ops)
+    d = json.loads(ir.to_json())
+    assert check(d) == []
+    f = next(o for o in d["ops"] if o["op"] == "for")
+    f["pred"] = f["body"]["ops"][0]["pred"]
+    with pytest.raises(sf.SFCompileError, match="pred"):
+        KernelIR.from_json(json.dumps(d))
+    assert any("no pred" in e for e in check(d))

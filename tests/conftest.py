@@ -16,6 +16,8 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))      # make ``oracle`` importable
+if os.environ.get("SUPERFLOAT_SIM"):                # a built superfloat.sim checkout: tests/test_chipsim.py runs on it
+    sys.path.insert(0, os.path.join(os.environ["SUPERFLOAT_SIM"], "python"))
 
 import sf                                           # noqa: E402
 from oracle import Fmt                              # noqa: E402

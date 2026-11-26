@@ -168,6 +168,22 @@ class HardwareAtreides(KernelDevice):
         """Attach a driver object with ``launch(ir, grid, block, buffers, scalars) -> Counters``."""
         cls._driver = driver
 
+    _library: dict | None = None
+
+    @classmethod
+    def attach_library(cls, ops: dict | None) -> None:
+        """Run these built-in heavy ops on the hardware: {op: fn(fmt, *codes, **kw) -> codes}
+        (``sf.kernels._chipmm.library()``: matmul_wide through the chip's own gemm / gemv
+        programs).  ``None`` detaches.  Ops not in it keep the host emulation."""
+        cls._library = dict(ops) if ops else None
+
+    def run(self, op, fmt, *operands, **kw):
+        lib = self._library
+        if lib is None or op not in lib:
+            return super().run(op, fmt, *operands, **kw)
+        self.launches += 1
+        return np.asarray(lib[op](fmt, *operands, **kw), dtype=np.int64), None   # the chip has no event flags
+
     def launch(self, ir, grid, block, buffers, scalars) -> Counters:
         if self._driver is None:
             raise SFDeviceError("no Atreides hardware is attached (HardwareAtreides.attach(driver))")
