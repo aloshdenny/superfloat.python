@@ -31,6 +31,7 @@ description: "Which IR op each public Python function becomes, and where it runs
 | `sf.program_id / block_idx / thread_idx / block_dim / arange / cdiv` | trace | program_id / thread_idx / arange / idiv | block_dim is a trace-time int |
 | `sf.load / sf.store` | trace | load / store |  |
 | `sf.shared / sf.barrier` | trace | shared_load / shared_store / barrier |  |
+| `sf.fori_loop` | trace | for | the body is traced once; plain Python loops unroll instead |
 | `sf.predicate (with block)` | trace | and (predicate combine), then every op inside carries pred |  |
 | `sf.torch.convert / backend='superfloat'` | host + device | dot (Linear/Conv2d as matmul) + add | per-layer scale chosen on host |
 | `sf.torch.convert(accumulate='wide') / backend='superfloat'` | host + device | dot_wide (Linear/Conv2d/Conv1D), shift per token and column | power-of-two exponents per token and channel; shifts from sf._heuristic, redo at l2; bias added on the host |

@@ -82,8 +82,15 @@ class Interpreter:
         self.counters.programs += 1
         env = {}
         shared = [np.zeros(s.shape, dtype=np.int64) for s in self.ir.shared]
-        ir = self.ir
-        for op in ir.ops:
+        self._block(self.ir.ops, env, shared, pid)
+
+    def _block(self, ops, env, shared, pid) -> None:
+        for op in ops:
+            n = op.name
+            if n == "for":
+                self._for(op, env, shared, pid)
+                self.counters.ops += 1
+                continue
             pred = env[op.pred.id] if op.pred is not None else None
             r = self._exec(op, env, shared, pid, pred)
             if op.result is not None:
@@ -91,6 +98,18 @@ class Interpreter:
                     r = np.broadcast_to(r, op.result.shape).copy()
                 env[op.result.id] = r
             self.counters.ops += 1
+
+    def _for(self, op, env, shared, pid) -> None:
+        L, at = op.body, op.attrs
+        carry = [env[a.id] for a in op.args]
+        for k in range(at["start"], at["stop"], at["step"]):
+            env[L.iv.id] = np.int64(k)
+            for c, v in zip(L.carried, carry):
+                env[c.id] = v
+            self._block(L.ops, env, shared, pid)
+            carry = [env[y.id] for y in L.yields]
+        for r, v in zip(L.results, carry):
+            env[r.id] = v
 
     # --- helpers -------------------------------------------------------------------------
     def _events(self, ev: dict, pred, shape) -> None:

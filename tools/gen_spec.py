@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 from sf import _reference as ref          # noqa: E402
 from sf._format import FORMATS            # noqa: E402
 from spec.ops import (CHANGELOG, EVENTS, GLOBAL_RULES, OPS, PREDICATION, PUBLIC,  # noqa: E402
-                      SPEC_VERSION, TYPES)
+                      SFIR, SPEC_VERSION, TYPES)
 from spec import target_v481 as T                                                   # noqa: E402
 
 WIDTHS = (16, 8, 4)
@@ -273,7 +273,7 @@ def page_versioning() -> str:
 def outputs() -> dict[Path, str]:
     out = {ROOT / "spec" / "ops.json": json.dumps(
         {"spec_version": SPEC_VERSION, "changelog": CHANGELOG, "global_rules": GLOBAL_RULES, "types": TYPES,
-         "events": EVENTS, "predication": PREDICATION, "ops": OPS,
+         "events": EVENTS, "predication": PREDICATION, "sfir": SFIR, "ops": OPS,
          "target_v481": {"limits": T.LIMITS, "mapping": T.MAPPING, "registers": T.REGISTERS, "cost": T.COST,
                          "gaps": T.GAPS, "verdicts": T.VERDICTS},
          "python_api": [dict(zip(("python", "runs", "lowers_to", "notes"), p)) for p in PUBLIC]}, indent=1) + "\n"}

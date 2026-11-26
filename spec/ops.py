@@ -20,9 +20,11 @@ Versioning (see website/compiler/versioning.mdx):
     example a move to the v4.8.1 wide accumulator).
 """
 
-SPEC_VERSION = "1.10.0"
+SPEC_VERSION = "1.11.0"
 
 CHANGELOG = [
+    ("1.11.0", "2026-11-23", "A `for` op: a loop with a constant trip count whose body is in the IR once (sf.fori_loop in kernels), so a loop such as a matmul's k-tile loop is no longer unrolled into the file. It carries values from trip to trip (scf.for with iter_args) and gives exactly the bits of the unrolled loop. SF IR JSON format_version 2 adds it; it is the only op with a `body` field, and a kernel with no loop is still written as format_version 1. Plain Python loops still unroll."),
+    ("1.10.1", "2026-11-22", "From Kartik's review of the SF IR JSON file. No op changes behaviour. Every op now has an `ir` entry: how many args it takes, each attribute's JSON type and the result types it can have, so an importer can check a file; the top-level `sfir` section gives the file layout and the type names (ptr<int> added to the types). param's result was written wrong: pointer params do produce a value (type ptr<sfN> or ptr<int>), and its id is the first argument of every load and store on that buffer. reshape has a `shape` attribute (the result shape); it was missing. A `for` loop op is planned for SF IR JSON format_version 2."),
     ("1.10.0", "2026-11-18", "Decisions by Alosh on the 1.9.0 questions. Attention's P @ V is prefix-invariant: V is quantized per key (one exponent per key, written once like a KV cache entry), each row folds its keys' exponents into P exactly (P'[t, k] = P[t, k] 2^(e_k - E_t), E_t the largest e_k among the keys the row sees) and the accumulator guard bounds each row against its visible keys only, so keys appended after a row never change it (per-channel V over every key did). Measured on GPT-2 and Qwen2.5-0.5B (2,048 WikiText-2 tokens): perplexity unchanged within noise. A linear layer's bias counts in the first POP exponent: max(l2 - h, pow2_exp(|b|)); Qwen2.5-0.5B sf16 redos 2.32M to 0.87M, perplexity 22.417 to 22.415. The three softmax_row changes of 1.9.0 are signed off, and the max-first score rule is written as an integer rule (align to the row's smallest exponent, subtract the max exactly, one round-half-to-even narrowing). sft_wide.json regenerated. DSL 0.16.0."),
     ("1.9.0", "2026-11-18", "Attention's P @ V takes each output's exponent from the exact bound of the quantized product, (sum of the row's P) times max |V| over only the keys that row uses (P != 0), with POP's rounding margin: masked keys never change a row's output exponent and no P @ V output is ever redone (sft_wide.json regenerated: its causal cases change). Integer definitions of exp, softmax, GELU, SiLU, reciprocal and rsqrt (Alosh's sf_intops_ref.py, ported bit for bit as sf.intops) with golden vectors in spec/golden/intops/. sf's softmax_row is Alosh's sequence with three changes, pending his sign-off: e_i flushed by the main exp are summed with 15 more fraction bits (a second exp at d + 15 ln2 / 2^k, a third MX slot popped 15 lower), q below 2^14 after normalising is popped once more one step higher, and P keeps the row's own exponent instead of being shifted to scale 1. DSL 0.15.0."),
     ("1.8.0", "2026-11-18", "dot_wide takes an optional third operand: an int block broadcastable to (m, n), one shift per output, as POP takes one Rs per token and column; in kernels sf.dot(a, b, accumulate=\"wide\", shift=s) with s a traced int block, usually loaded from an int buffer argument. A shift outside -32..31 on a live lane faults the launch. Kernels take read-only int buffers (ptr<int>, a NumPy int array argument, one 16-bit word per element on the chip): load gives int, store is refused at trace time. DSL 0.14.0."),
@@ -49,10 +51,12 @@ TYPES = {
            "backends; the semantics in this spec are written on k. There is no code -2^(N-1), no NaN, no infinity. "
            "On the chip, registers and memory both hold sign-magnitude: see the memory format rule.",
     "int": "64-bit signed integer (indices, offsets, loop math). Never overflows in practice; the "
-           "reference uses int64 and does not wrap-check.",
+           "reference uses int64 and does not wrap-check. On the Atreides chip a 16-bit two's complement word.",
     "bool": "1-bit predicate / mask.",
     "ptr<sfN>": "Base address of a global buffer of sfN codes. Only appears as a kernel parameter; "
                 "address arithmetic is `ptr + int offsets` and is folded into load/store.",
+    "ptr<int>": "Base address of a read-only buffer of ints (for example one dot_wide shift per output). "
+                "Only appears as a kernel parameter; load gives int, a store to it is refused at trace time.",
 }
 
 EVENTS = {
@@ -91,8 +95,8 @@ OPS = [
     # ---- kernel parameters and constants ---------------------------------------------------------
     _e(name="param", category="index", signature="%r = param {param, kind}",
        operands=[], attrs={"param": "kernel parameter name", "kind": "'ptr' | 'int' | 'sf'"},
-       result="int or sfN scalar for kind int/sf; none for ptr (the buffer is bound by value id)",
-       shape="()", semantics="Reads a scalar kernel argument. Pointer params produce no value; loads and stores refer to them directly.",
+       result="int or sfN scalar for kind int/sf; ptr<sfN> or ptr<int> for kind ptr",
+       shape="()", semantics="Reads a kernel argument. A pointer param's value is the buffer: its id is the first argument of every load and store on that buffer, and it is used nowhere else.",
        predication="pure", hw_v1="kernel argument register / constant bank",
        mlir={"name": "func argument", "traits": ["Pure"]},
        python=["kernel signature"]),
@@ -125,7 +129,8 @@ OPS = [
        shape="attr shape (numpy broadcast rules from x.shape)", semantics="Repeat x to the target shape. No numeric change.",
        predication="pure", hw_v1="register replication / free", mlir={"name": "tensor broadcast / linalg.broadcast", "traits": ["Pure"]},
        python=["sf.full", "sf.zeros", "implicit broadcasting"]),
-    _e(name="reshape", category="shape", signature="%r = reshape %x", operands=["x"], result="same type",
+    _e(name="reshape", category="shape", signature="%r = reshape %x {shape}", operands=["x"],
+       attrs={"shape": "result static shape (same element count)"}, result="same type",
        shape="result shape (same element count)", semantics="Row-major reshape. No numeric change.",
        predication="pure", hw_v1="free (layout only)", mlir={"name": "tensor.reshape", "traits": ["Pure"]},
        python=["x.reshape(...)"]),
@@ -377,6 +382,30 @@ OPS = [
        memory="WRITE block-local shared buffer. Shared memory is zeroed at the start of every program.",
        predication="memory", faults=["live lane out of bounds faults"], hw_v1="tile-local SRAM",
        mlir={"name": "memref.store on workgroup memory", "traits": ["MemWrite"]}, python=["buf[idx] = val"]),
+    _e(name="for", version="1.11", category="control",
+       signature="%r0, ... = for %i = start to stop step s iter_args(%c0 = %x0, ...) { ...; yield %y0, ... }",
+       operands=["x0, x1, ...: the carried values' initial values (any types)"],
+       attrs={"start": "int, fixed at compile time", "stop": "int (excluded), fixed at compile time",
+              "step": "int, not 0, fixed at compile time"},
+       result="one result per carried value, with that value's type and shape (in JSON: body.results; the op's own id is null)",
+       shape="each result has the shape of its initial value",
+       semantics="i takes start, start + step, ... while i < stop (i > stop for a negative step); no trips if the range "
+                 "is empty, and then the results are the initial values. Each trip binds the iv to i and the carried "
+                 "values to the previous trip's yields (the initial values on the first trip), then runs the body in "
+                 "order. After the last trip the results are the last yields. Exactly the unrolled loop: same ops, "
+                 "same order, same bits, same events.",
+       predication="pure",
+       hw_v1="a counted BR loop: the trip counter in a register, the carried values in registers or memory",
+       mlir={"name": "scf.for with iter_args (index bounds; the iv is cast to the int type)", "traits": ["RecursiveMemoryEffects"]},
+       python=["sf.fori_loop(start, stop, body, init, step=1)"],
+       rewrites=["unrolling (fully or by a factor) is legal: the body has no loop-carried state other than the "
+                 "carried values", "do not reorder trips, and do not split a carried sum across trips "
+                 "(no reassociation, see add)", "the trip count is known at compile time: a loop of 0 or 1 trips "
+                 "may be removed"],
+       notes=["the ops inside the body follow their own predication rules; the for op itself has no effect of its own",
+              "a predicate in force when the loop starts stays in force on every body op (each op's own pred says so)",
+              "body ops may use values made before the loop; values made in the body are seen after it only "
+              "through the results"]),
     _e(name="barrier", category="sync", signature="barrier", operands=[], result="none", shape="-",
        semantics="All lanes of the block reach this point before any continues. In lockstep IR this orders shared-memory "
                  "accesses; nothing may be moved across it.",
@@ -415,6 +444,7 @@ PUBLIC = [
     ("sf.program_id / block_idx / thread_idx / block_dim / arange / cdiv", "trace", "program_id / thread_idx / arange / idiv", "block_dim is a trace-time int"),
     ("sf.load / sf.store", "trace", "load / store", ""),
     ("sf.shared / sf.barrier", "trace", "shared_load / shared_store / barrier", ""),
+    ("sf.fori_loop", "trace", "for", "the body is traced once; plain Python loops unroll instead"),
     ("sf.predicate (with block)", "trace", "and (predicate combine), then every op inside carries pred", ""),
     ("sf.torch.convert / backend='superfloat'", "host + device", "dot (Linear/Conv2d as matmul) + add", "per-layer scale chosen on host"),
     ("sf.torch.convert(accumulate='wide') / backend='superfloat'", "host + device", "dot_wide (Linear/Conv2d/Conv1D), shift per token and column",
@@ -447,6 +477,111 @@ GLOBAL_RULES = [
     "Host pre-flight: before a launch the host decides everything it can (a zero divisor, an op that must saturate everywhere, an op that cannot saturate). The compiler never needs to handle those cases specially, but must still produce correct bits for them.",
     "Width: sfN for N < 16 runs on the sf16 datapath. In sign-magnitude the MAGNITUDE is shifted left by 16-N and the sign moves to bit 15; after every op the low 16-N magnitude bits must be re-truncated (masked) so the result equals true sfN.",
 ]
+
+
+# --- SF IR JSON: what an importer checks ------------------------------------------------------
+# The file sf writes for the compiler (src/sf/kernels/_irjson.py).  `SFIR` is the file-level
+# part; `IR` gives, per op, how many args it takes, the JSON type of each attribute and the
+# types its result can have.  Both go into spec/ops.json; tools/check_sfir.py checks a file
+# against them, and tests/test_sfir_schema.py checks that what sf writes passes.
+#
+# Attribute types: {"type": "int"} (optional "min", "max", and "null": true if it may be null),
+# {"type": "string"}, {"type": "int[]"} (a JSON list of ints), {"type": "int|bool"},
+# {"enum": [...]} (one of these strings).  Result types: names from SFIR["types"], with
+# null for an op that has no result (its "id", "type" and "shape" are null).
+
+_SF, _INT, _BOOL, _PSF, _PINT = "sfN", "int", "bool", "ptr<sfN>", "ptr<int>"
+_CMP_OPS = {"enum": ["lt", "le", "gt", "ge", "eq", "ne"]}
+_AXIS = {"type": "int", "min": 0, "max": 2}
+_RED_AXIS = {"type": "int", "min": 0, "null": True}
+_BITS = {"type": "int", "min": 4, "max": 16}
+
+
+def _ir(args, result, **attrs):
+    n = (args, args) if isinstance(args, int) else args
+    return {"args": list(n), "attrs": attrs, "result": result}
+
+
+IR = {
+    "param": _ir(0, [_SF, _INT, _PSF, _PINT], param={"type": "string"}, kind={"enum": ["ptr", "int", "sf"]}),
+    "const": _ir(0, [_SF, _INT, _BOOL], value={"type": "int|bool"}, kind={"enum": ["int", "sf", "bool"]}),
+    "program_id": _ir(0, [_INT], axis=_AXIS),
+    "thread_idx": _ir(0, [_INT], axis=_AXIS),
+    "arange": _ir(0, [_INT], start={"type": "int"}, end={"type": "int"}),
+    "broadcast": _ir(1, [_SF, _INT, _BOOL], shape={"type": "int[]"}),
+    "reshape": _ir(1, [_SF, _INT, _BOOL], shape={"type": "int[]"}),
+    "transpose": _ir(1, [_SF, _INT, _BOOL]),
+    **{n: _ir(2, [_INT]) for n in ("iadd", "isub", "imul", "idiv", "imod")},
+    **{n: _ir(1, [_INT]) for n in ("ineg", "iabs", "bool_to_int")},
+    "icmp": _ir(2, [_BOOL], op=_CMP_OPS),
+    **{n: _ir(2, [_BOOL]) for n in ("and", "or", "xor")},
+    "not": _ir(1, [_BOOL]),
+    "where": _ir(3, [_SF, _INT, _BOOL]),
+    **{n: _ir(2, [_SF]) for n in ("add", "sub", "mul", "div", "maximum", "minimum", "dot")},
+    "fma": _ir(3, [_SF]),
+    **{n: _ir(1, [_SF]) for n in ("neg", "abs", "sqrt")},
+    "widen": _ir(1, [_SF], bits=_BITS),
+    "narrow": _ir(1, [_SF], bits=_BITS),
+    "cmp": _ir(2, [_BOOL], op=_CMP_OPS),
+    "cmp_lit": _ir(1, [_BOOL], op=_CMP_OPS, value={"type": "int"}),
+    **{n: _ir(1, [_SF], axis=_RED_AXIS) for n in ("sum", "max", "min")},
+    "dot_wide": _ir((2, 3), [_SF], shift={"type": "int", "min": -32, "max": 31, "null": True}),
+    "load": _ir(4, [_SF, _INT]),
+    "store": _ir(4, [None]),
+    "shared_load": _ir(2, [_SF], buf={"type": "int", "min": 0}),
+    "shared_store": _ir(3, [None], buf={"type": "int", "min": 0}),
+    "barrier": _ir(0, [None]),
+    "for": _ir((0, 64), [None], start={"type": "int"}, stop={"type": "int"}, step={"type": "int"}),
+}
+
+SFIR = {
+    "format": "sfir",
+    "format_version": 2,
+    "format_versions": [1, 2],
+    "fields": {
+        "format": "always \"sfir\"",
+        "format_version": "2 if the kernel has a for op, else 1 (version 1 has no for op); a reader refuses "
+                          "a version it does not know",
+        "spec_version": "this spec's version; a reader refuses a different major version",
+        "kernel": "the kernel's name",
+        "style": "\"block\" (one program is a vector of lanes) or \"thread\" (CUDA style)",
+        "block": "[x, y, z] lanes per block for thread kernels, [1, 1, 1] for block kernels",
+        "constexpr": "{name: value}: every constexpr argument, the only place they appear",
+        "params": "the runtime arguments in signature order: {name, kind (ptr | sf | int), type, id}. "
+                  "id is the result id of that argument's param op",
+        "shared": "shared buffers: {id, type, shape}; shared_load / shared_store name them by buf",
+        "ops": "{id, op, args, attrs, type, shape, pred, loc} in program order; see each op's `ir` entry",
+    },
+    "op_fields": {
+        "id": "the result's value id, unique in the file; null for an op with no result",
+        "op": "the op's name, one of the ops in this file",
+        "args": "ids of earlier results, in the op's operand order",
+        "attrs": "exactly the attributes in the op's `ir` entry, with those JSON types",
+        "type": "the result type (a name from `types`), null with no result",
+        "shape": "the result's static shape, a list of rank <= 3 ([] for a scalar); null with no result",
+        "pred": "id of the bool mask the op runs under, or null",
+        "loc": "{file, line, col}: base name of the source file (never a path), the line and the 1-based column "
+               "(col may be null); every op has one, ops sf adds itself give the user line that caused them, "
+               "param ops give the def",
+    },
+    "for_body": {
+        "iv": "the loop index's value id: int, shape [], start + trip * step",
+        "carried": "one value id per arg: the value inside the body, with that arg's type and shape",
+        "ops": "the body's ops, in the same form as the top-level ops; they may use values made before the loop",
+        "yield": "one id per arg, a value the body can see: the carried value for the next trip",
+        "results": "one id per arg: the value after the loop (the arg itself if there are no trips)",
+    },
+    "types": {"sfN": "^sf([4-9]|1[0-6])$", "int": "^int$", "bool": "^bool$",
+              "ptr<sfN>": "^ptr<sf([4-9]|1[0-6])>$", "ptr<int>": "^ptr<int>$"},
+    "not_in_the_file": ["the grid (it changes with every launch and the file is the compile cache key)",
+                        "the kernel's source text", "full paths, timestamps or anything else that varies between runs"],
+    "planned": [],
+}
+
+assert set(IR) == {o["name"] for o in OPS}, set(IR) ^ {o["name"] for o in OPS}
+for _o in OPS:
+    assert set(IR[_o["name"]]["attrs"]) == set(_o["attrs"]), _o["name"]
+    _o["ir"] = IR[_o["name"]]
 
 
 # --- Atreides v4.8.1 lowering (spec/target_v481.py) ------------------------------------------

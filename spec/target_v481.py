@@ -52,7 +52,7 @@ MAPPING = [
     ("bool values", "Cannot be stored: nothing writes a comparison to a register. A condition exists only as NZP after CMP, and only thread 0's steers a branch", "ISA s5"),
     ("Masks on load and store", "No predication. A tail mask offs < n lowers to launching exactly n threads, so the spare threads are disabled and touch no memory. Any other mask has no lowering", "ISA s1.2, s4.2"),
     ("Predicates (sf.predicate, if on lane values)", "No predication. Only SF values can be if-converted, arithmetically with ReLU (ISA s5); everything else must be uniform", "ISA s5, s7"),
-    ("Unrolled loops", "The SF IR is straight-line: Python loops are unrolled when a kernel is traced. With 512 program words the compiler must re-roll loops into BR loops (uniform trip counts only)", "ISA s1.4, s4.2"),
+    ("Loops", "Plain Python loops are unrolled when a kernel is traced; sf.fori_loop gives a for op with a constant trip count, which lowers to a BR loop. With 512 program words, prefer the for op for long loops; an unrolled loop must otherwise be re-rolled by the compiler (uniform trip counts only)", "ISA s1.4, s4.2"),
     ("Kernel entry and exit", "Emit CMP R0, R0 first so an unconditional BRnzp is taken; end every path with RET", "ISA s3.1, s4.2"),
     ("Events (overflow, underflow, divide, invalid)", "The chip has no flags, so the compiler emits nothing for them. The host gets counts by replay (sf.config(status=\"replay\"))", "ISA s1.1"),
     ("Spills", "13 registers. Spill to the scratchpad, 8 words per thread at 0xFFC0 + 8*tid + k", "ISA s7"),
@@ -177,6 +177,11 @@ OPS_V481 = {
                                "DSL shared memory starts at 0: emit the zeroing stores if the kernel reads before writing",
                     "about 3 cycles per thread"),
     "shared_store": ("limited", "STR to 0xFFC0 + index; at most 64 words per tile", "about 2 cycles per thread"),
+    "for": ("expand", "(suggested) a counted loop: the counter in a register, the body once, then ADD the step, CMP "
+                      "with the bound and BR back while it holds (ISA s1.2: thread 0's NZP steers, so the count must "
+                      "be uniform, which a constant trip count is). Carried values stay in registers, or memory when "
+                      "they do not fit. Keep a hot body to 32 instructions for the instruction cache (ISA s1.4); "
+                      "unrolling is always a legal fallback", "about 3 instructions per trip plus the body"),
     "barrier": ("native", "nothing to emit inside a block: every instruction finishes for all 8 threads before the next, so "
                           "a store is visible to the whole block from the next instruction (ISA s1.5). There is no "
                           "barrier between blocks", "free"),

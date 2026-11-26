@@ -1,0 +1,359 @@
+{
+ "block": [
+  1,
+  1,
+  1
+ ],
+ "constexpr": {
+  "BLOCK": 8
+ },
+ "format": "sfir",
+ "format_version": 1,
+ "kernel": "axpy",
+ "ops": [
+  {
+   "args": [],
+   "attrs": {
+    "kind": "sf",
+    "param": "a"
+   },
+   "id": 0,
+   "loc": {
+    "col": 1,
+    "file": "export_sfir_examples.py",
+    "line": 48
+   },
+   "op": "param",
+   "pred": null,
+   "shape": [],
+   "type": "sf16"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "ptr",
+    "param": "x_ptr"
+   },
+   "id": 1,
+   "loc": {
+    "col": 1,
+    "file": "export_sfir_examples.py",
+    "line": 48
+   },
+   "op": "param",
+   "pred": null,
+   "shape": [],
+   "type": "ptr<sf16>"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "ptr",
+    "param": "y_ptr"
+   },
+   "id": 2,
+   "loc": {
+    "col": 1,
+    "file": "export_sfir_examples.py",
+    "line": 48
+   },
+   "op": "param",
+   "pred": null,
+   "shape": [],
+   "type": "ptr<sf16>"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "ptr",
+    "param": "out_ptr"
+   },
+   "id": 3,
+   "loc": {
+    "col": 1,
+    "file": "export_sfir_examples.py",
+    "line": 48
+   },
+   "op": "param",
+   "pred": null,
+   "shape": [],
+   "type": "ptr<sf16>"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "int",
+    "param": "n"
+   },
+   "id": 4,
+   "loc": {
+    "col": 1,
+    "file": "export_sfir_examples.py",
+    "line": 48
+   },
+   "op": "param",
+   "pred": null,
+   "shape": [],
+   "type": "int"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "axis": 0
+   },
+   "id": 5,
+   "loc": {
+    "col": 12,
+    "file": "export_sfir_examples.py",
+    "line": 49
+   },
+   "op": "program_id",
+   "pred": null,
+   "shape": [],
+   "type": "int"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "int",
+    "value": 8
+   },
+   "id": 6,
+   "loc": {
+    "col": 12,
+    "file": "export_sfir_examples.py",
+    "line": 49
+   },
+   "op": "const",
+   "pred": null,
+   "shape": [],
+   "type": "int"
+  },
+  {
+   "args": [
+    5,
+    6
+   ],
+   "attrs": {},
+   "id": 7,
+   "loc": {
+    "col": 12,
+    "file": "export_sfir_examples.py",
+    "line": 49
+   },
+   "op": "imul",
+   "pred": null,
+   "shape": [],
+   "type": "int"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "end": 8,
+    "start": 0
+   },
+   "id": 8,
+   "loc": {
+    "col": 39,
+    "file": "export_sfir_examples.py",
+    "line": 49
+   },
+   "op": "arange",
+   "pred": null,
+   "shape": [
+    8
+   ],
+   "type": "int"
+  },
+  {
+   "args": [
+    7,
+    8
+   ],
+   "attrs": {},
+   "id": 9,
+   "loc": {
+    "col": 12,
+    "file": "export_sfir_examples.py",
+    "line": 49
+   },
+   "op": "iadd",
+   "pred": null,
+   "shape": [
+    8
+   ],
+   "type": "int"
+  },
+  {
+   "args": [
+    9,
+    4
+   ],
+   "attrs": {
+    "op": "lt"
+   },
+   "id": 10,
+   "loc": {
+    "col": 12,
+    "file": "export_sfir_examples.py",
+    "line": 50
+   },
+   "op": "icmp",
+   "pred": null,
+   "shape": [
+    8
+   ],
+   "type": "bool"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "sf",
+    "value": 0
+   },
+   "id": 11,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 51
+   },
+   "op": "const",
+   "pred": null,
+   "shape": [],
+   "type": "sf16"
+  },
+  {
+   "args": [
+    1,
+    9,
+    10,
+    11
+   ],
+   "attrs": {},
+   "id": 12,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 51
+   },
+   "op": "load",
+   "pred": null,
+   "shape": [
+    8
+   ],
+   "type": "sf16"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "sf",
+    "value": 0
+   },
+   "id": 13,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 52
+   },
+   "op": "const",
+   "pred": null,
+   "shape": [],
+   "type": "sf16"
+  },
+  {
+   "args": [
+    2,
+    9,
+    10,
+    13
+   ],
+   "attrs": {},
+   "id": 14,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 52
+   },
+   "op": "load",
+   "pred": null,
+   "shape": [
+    8
+   ],
+   "type": "sf16"
+  },
+  {
+   "args": [
+    0,
+    12,
+    14
+   ],
+   "attrs": {},
+   "id": 15,
+   "loc": {
+    "col": 30,
+    "file": "export_sfir_examples.py",
+    "line": 53
+   },
+   "op": "fma",
+   "pred": null,
+   "shape": [
+    8
+   ],
+   "type": "sf16"
+  },
+  {
+   "args": [
+    3,
+    9,
+    15,
+    10
+   ],
+   "attrs": {},
+   "id": null,
+   "loc": {
+    "col": 5,
+    "file": "export_sfir_examples.py",
+    "line": 53
+   },
+   "op": "store",
+   "pred": null,
+   "shape": null,
+   "type": null
+  }
+ ],
+ "params": [
+  {
+   "id": 0,
+   "kind": "sf",
+   "name": "a",
+   "type": "sf16"
+  },
+  {
+   "id": 1,
+   "kind": "ptr",
+   "name": "x_ptr",
+   "type": "ptr<sf16>"
+  },
+  {
+   "id": 2,
+   "kind": "ptr",
+   "name": "y_ptr",
+   "type": "ptr<sf16>"
+  },
+  {
+   "id": 3,
+   "kind": "ptr",
+   "name": "out_ptr",
+   "type": "ptr<sf16>"
+  },
+  {
+   "id": 4,
+   "kind": "int",
+   "name": "n",
+   "type": "int"
+  }
+ ],
+ "shared": [],
+ "spec_version": "1.11.0",
+ "style": "block"
+}

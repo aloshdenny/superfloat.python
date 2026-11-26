@@ -3,6 +3,60 @@
 Decisions the spec left open or did not state, and how this code resolves
 them. Each one is a single place to change if the team decides differently.
 
+## SF IR JSON and the Atreides driver (spec 1.10.1 and 1.11.0, not released yet)
+
+* sf writes each traced kernel as SF IR JSON (`src/sf/kernels/_irjson.py`, format "sfir" version 1),
+  the file `superfloat-compile` reads.  Examples with inputs and expected outputs: `examples/sfir/`.
+* Kartik's review (2026-11-22): the design is fine, with four changes, now done.  (1) Constexpr values
+  are only in the top-level `constexpr` map, not also in `params`; reading a file puts them back after
+  the runtime params, so the signature order of constexpr params is not kept (nothing uses it).
+  (2) Pointer params have a value id, and it is the first argument of every load and store on that
+  buffer (tested; the spec's param entry said the opposite and is fixed).  (3) Each op's args, attribute
+  types and result types are in spec/ops.json (`ir` per op, `sfir` for the file); `tools/check_sfir.py`
+  checks a file, and `SF_IR_ROUNDTRIP=1 pytest` checks every kernel the suite traces.  This found that
+  `reshape` writes a `shape` attribute the spec did not list.  (4) A `for` op: done in spec 1.11.0
+  (below), waiting for his review.
+* Also from him: the grid stays out of the file, no source text in it, the compiler CLI (stdin to
+  stdout, `--target`, `--version`) and 16-bit two's complement ints are confirmed.
+* The driver (`src/sf/kernels/_driver.py`) reads his kernel file format 0.3-draft (0.1 and 0.2 still read),
+  and refuses a compiled kernel whose target is not the one asked for.  Our own choice, not his: a file
+  that does not say whether pointers are compared with CMP is treated as if they are.
+* The chip runs `total_threads` lanes whatever grid the user wrote, so the driver refuses a grid that
+  is not the chip's grid of programs: otherwise atreides-hw and atreides-sim would compute different
+  things.  Kartik's 0.3 rule: `lanes_per_program` (BLOCK as written) sets the grid,
+  `threads_per_program` (the compiler's choice) sets the chip threads, ceil(lanes * tpp / lpp); a launch
+  holds whole programs (BLOCK 16: 240 threads, not 248).  Without the fields: the block size (thread
+  kernels) or `threads_per_block`.  `Counters.programs` on the hardware is that program count.
+* Kartik's other answers (2026-11-22), done: the JSON reader refuses unknown ops and fields; every
+  `loc` has a 1-based column; int tables are `dtype "int16"`; the compiler is called with
+  `--target=T` and the cache key hashes the exact argument list; dirty compiler builds and
+  `--emit=...` debug options are never cached; 2-D grids run as row launches (his draft).
+  Still ours to check with him: in a 2-D launch the axis-0 slot gets the first program index, which
+  equals the block index only while threads_per_program = threads_per_block.
+* A launch also ends on a chip block boundary: it holds a multiple of lcm(threads_per_program,
+  threads_per_block) threads, so the block_offset written before it is always a whole block.  The
+  launch rule is read once (`_launch_rule`), when the file is read and again with the call's lanes.
+* Run files (`to_run_file`, format "atreides-run" 0.1-draft): one JSON file with the program, the data
+  memory before the first launch, each launch (threads, first block, the words to write first) and the
+  expected output words from atreides-sim.  It is for a chip or RTL testbench we do not drive: whoever
+  runs it sends back the data memory and `check_dump` (or `tools/make_chip_run.py --check RUN DUMP`)
+  names every word that differs.  Example: `examples/chip_run/axpy_n600.run.json` (3 launches).
+* The `for` op (spec 1.11.0, SF IR format_version 2), from `sf.fori_loop(start, stop, body, init, step=1)`.
+  Tracing, not AST rewriting, so the loop is a function call: the body is traced once with a traced
+  int index, and the carried values go in as `init` and come back as the body's return value (the JAX
+  `fori_loop` shape, with a step).  Why not a Python `for` over `sf.range`: a tracer cannot see which
+  local names the body rebinds, and AST rewriting is what Triton does and we decided against.  The op
+  is MLIR's `scf.for` with `iter_args`: in JSON `args` are the initial values and a `body` field holds
+  `iv`, `carried`, `ops`, `yield` and `results` (types and shapes come from the args).  Values made in
+  the body are refused after the loop at trace time, in the reader and in the checker.  Bounds are
+  compile-time ints (the chip branches on thread 0 only, so the trip count must be uniform).  A kernel
+  with no loop is still written as format_version 1, so Kartik's reader keeps working until he adds
+  version 2.  Interpreter and C backend run it; both give the unrolled loop's bits and events (tested,
+  tests/test_fori_loop.py).  Example for him: `examples/sfir/dot_k_tiles/` (4 k tiles, 16 top-level
+  ops plus a 19-op body).  Plain Python loops still unroll.
+* His hand-written axpy is checked on a toy model of its 7 instructions only (no MX), so wide kernels
+  cannot run end to end yet.
+
 ## Alosh's decisions on the 0.15.0 questions (0.16.0, spec 1.10.0)
 
 * Alosh (2026-11-18), on Poojith's four questions in PR 23; measured on GPT-2 and Qwen2.5-0.5B, 2,048

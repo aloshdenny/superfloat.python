@@ -3,7 +3,7 @@ title: "Lowering spec"
 description: "Everything the compiler needs to lower every Superfloat op: types, events, global rules, and where the machine-readable spec lives."
 ---
 
-**Spec version 1.10.0.** Generated from `spec/ops.py` by `tools/gen_spec.py`; do not edit by hand.
+**Spec version 1.11.0.** Generated from `spec/ops.py` by `tools/gen_spec.py`; do not edit by hand.
 
 This section is written for the compiler (MLIR) side. The Python reference is the ground truth: if the compiled code gives different bits from the reference on any input, the compiler is wrong (or the spec is, and we fix it).
 
@@ -38,9 +38,10 @@ This section is written for the compiler (MLIR) side. The Python reference is th
 | Type | Meaning |
 |---|---|
 | `sfN` | Superfloat code, N in 4..16. Stored as a signed integer k in [-M, M], M = 2^(N-1) - 1. Value = k / 2^(N-1). In the IR, k is a plain signed (two's complement) integer, int64 in both reference backends; the semantics in this spec are written on k. There is no code -2^(N-1), no NaN, no infinity. On the chip, registers and memory both hold sign-magnitude: see the memory format rule. |
-| `int` | 64-bit signed integer (indices, offsets, loop math). Never overflows in practice; the reference uses int64 and does not wrap-check. |
+| `int` | 64-bit signed integer (indices, offsets, loop math). Never overflows in practice; the reference uses int64 and does not wrap-check. On the Atreides chip a 16-bit two's complement word. |
 | `bool` | 1-bit predicate / mask. |
 | `ptr<sfN>` | Base address of a global buffer of sfN codes. Only appears as a kernel parameter; address arithmetic is `ptr + int offsets` and is folded into load/store. |
+| `ptr<int>` | Base address of a read-only buffer of ints (for example one dot_wide shift per output). Only appears as a kernel parameter; load gives int, a store to it is refused at trace time. |
 
 ## Events
 

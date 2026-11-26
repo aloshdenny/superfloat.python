@@ -1,0 +1,583 @@
+{
+ "block": [
+  1,
+  1,
+  1
+ ],
+ "constexpr": {
+  "K": 16,
+  "M": 8,
+  "N": 8
+ },
+ "format": "sfir",
+ "format_version": 1,
+ "kernel": "dot_chain",
+ "ops": [
+  {
+   "args": [],
+   "attrs": {
+    "kind": "ptr",
+    "param": "a_ptr"
+   },
+   "id": 0,
+   "loc": {
+    "col": 1,
+    "file": "export_sfir_examples.py",
+    "line": 64
+   },
+   "op": "param",
+   "pred": null,
+   "shape": [],
+   "type": "ptr<sf16>"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "ptr",
+    "param": "b_ptr"
+   },
+   "id": 1,
+   "loc": {
+    "col": 1,
+    "file": "export_sfir_examples.py",
+    "line": 64
+   },
+   "op": "param",
+   "pred": null,
+   "shape": [],
+   "type": "ptr<sf16>"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "ptr",
+    "param": "c_ptr"
+   },
+   "id": 2,
+   "loc": {
+    "col": 1,
+    "file": "export_sfir_examples.py",
+    "line": 64
+   },
+   "op": "param",
+   "pred": null,
+   "shape": [],
+   "type": "ptr<sf16>"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "end": 8,
+    "start": 0
+   },
+   "id": 3,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 65
+   },
+   "op": "arange",
+   "pred": null,
+   "shape": [
+    8
+   ],
+   "type": "int"
+  },
+  {
+   "args": [
+    3
+   ],
+   "attrs": {
+    "shape": [
+     8,
+     1
+    ]
+   },
+   "id": 4,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 65
+   },
+   "op": "reshape",
+   "pred": null,
+   "shape": [
+    8,
+    1
+   ],
+   "type": "int"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "end": 16,
+    "start": 0
+   },
+   "id": 5,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 66
+   },
+   "op": "arange",
+   "pred": null,
+   "shape": [
+    16
+   ],
+   "type": "int"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "end": 8,
+    "start": 0
+   },
+   "id": 6,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 67
+   },
+   "op": "arange",
+   "pred": null,
+   "shape": [
+    8
+   ],
+   "type": "int"
+  },
+  {
+   "args": [
+    6
+   ],
+   "attrs": {
+    "shape": [
+     1,
+     8
+    ]
+   },
+   "id": 7,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 67
+   },
+   "op": "reshape",
+   "pred": null,
+   "shape": [
+    1,
+    8
+   ],
+   "type": "int"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "int",
+    "value": 16
+   },
+   "id": 8,
+   "loc": {
+    "col": 25,
+    "file": "export_sfir_examples.py",
+    "line": 68
+   },
+   "op": "const",
+   "pred": null,
+   "shape": [],
+   "type": "int"
+  },
+  {
+   "args": [
+    4,
+    8
+   ],
+   "attrs": {},
+   "id": 9,
+   "loc": {
+    "col": 25,
+    "file": "export_sfir_examples.py",
+    "line": 68
+   },
+   "op": "imul",
+   "pred": null,
+   "shape": [
+    8,
+    1
+   ],
+   "type": "int"
+  },
+  {
+   "args": [
+    5
+   ],
+   "attrs": {
+    "shape": [
+     1,
+     16
+    ]
+   },
+   "id": 10,
+   "loc": {
+    "col": 33,
+    "file": "export_sfir_examples.py",
+    "line": 68
+   },
+   "op": "reshape",
+   "pred": null,
+   "shape": [
+    1,
+    16
+   ],
+   "type": "int"
+  },
+  {
+   "args": [
+    9,
+    10
+   ],
+   "attrs": {},
+   "id": 11,
+   "loc": {
+    "col": 17,
+    "file": "export_sfir_examples.py",
+    "line": 68
+   },
+   "op": "iadd",
+   "pred": null,
+   "shape": [
+    8,
+    16
+   ],
+   "type": "int"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "bool",
+    "value": true
+   },
+   "id": 12,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 68
+   },
+   "op": "const",
+   "pred": null,
+   "shape": [],
+   "type": "bool"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "sf",
+    "value": 0
+   },
+   "id": 13,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 68
+   },
+   "op": "const",
+   "pred": null,
+   "shape": [],
+   "type": "sf16"
+  },
+  {
+   "args": [
+    0,
+    11,
+    12,
+    13
+   ],
+   "attrs": {},
+   "id": 14,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 68
+   },
+   "op": "load",
+   "pred": null,
+   "shape": [
+    8,
+    16
+   ],
+   "type": "sf16"
+  },
+  {
+   "args": [
+    5
+   ],
+   "attrs": {
+    "shape": [
+     16,
+     1
+    ]
+   },
+   "id": 15,
+   "loc": {
+    "col": 25,
+    "file": "export_sfir_examples.py",
+    "line": 69
+   },
+   "op": "reshape",
+   "pred": null,
+   "shape": [
+    16,
+    1
+   ],
+   "type": "int"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "int",
+    "value": 8
+   },
+   "id": 16,
+   "loc": {
+    "col": 25,
+    "file": "export_sfir_examples.py",
+    "line": 69
+   },
+   "op": "const",
+   "pred": null,
+   "shape": [],
+   "type": "int"
+  },
+  {
+   "args": [
+    15,
+    16
+   ],
+   "attrs": {},
+   "id": 17,
+   "loc": {
+    "col": 25,
+    "file": "export_sfir_examples.py",
+    "line": 69
+   },
+   "op": "imul",
+   "pred": null,
+   "shape": [
+    16,
+    1
+   ],
+   "type": "int"
+  },
+  {
+   "args": [
+    17,
+    7
+   ],
+   "attrs": {},
+   "id": 18,
+   "loc": {
+    "col": 17,
+    "file": "export_sfir_examples.py",
+    "line": 69
+   },
+   "op": "iadd",
+   "pred": null,
+   "shape": [
+    16,
+    8
+   ],
+   "type": "int"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "bool",
+    "value": true
+   },
+   "id": 19,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 69
+   },
+   "op": "const",
+   "pred": null,
+   "shape": [],
+   "type": "bool"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "sf",
+    "value": 0
+   },
+   "id": 20,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 69
+   },
+   "op": "const",
+   "pred": null,
+   "shape": [],
+   "type": "sf16"
+  },
+  {
+   "args": [
+    1,
+    18,
+    19,
+    20
+   ],
+   "attrs": {},
+   "id": 21,
+   "loc": {
+    "col": 9,
+    "file": "export_sfir_examples.py",
+    "line": 69
+   },
+   "op": "load",
+   "pred": null,
+   "shape": [
+    16,
+    8
+   ],
+   "type": "sf16"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "int",
+    "value": 8
+   },
+   "id": 22,
+   "loc": {
+    "col": 22,
+    "file": "export_sfir_examples.py",
+    "line": 70
+   },
+   "op": "const",
+   "pred": null,
+   "shape": [],
+   "type": "int"
+  },
+  {
+   "args": [
+    4,
+    22
+   ],
+   "attrs": {},
+   "id": 23,
+   "loc": {
+    "col": 22,
+    "file": "export_sfir_examples.py",
+    "line": 70
+   },
+   "op": "imul",
+   "pred": null,
+   "shape": [
+    8,
+    1
+   ],
+   "type": "int"
+  },
+  {
+   "args": [
+    23,
+    7
+   ],
+   "attrs": {},
+   "id": 24,
+   "loc": {
+    "col": 14,
+    "file": "export_sfir_examples.py",
+    "line": 70
+   },
+   "op": "iadd",
+   "pred": null,
+   "shape": [
+    8,
+    8
+   ],
+   "type": "int"
+  },
+  {
+   "args": [
+    14,
+    21
+   ],
+   "attrs": {},
+   "id": 25,
+   "loc": {
+    "col": 33,
+    "file": "export_sfir_examples.py",
+    "line": 70
+   },
+   "op": "dot",
+   "pred": null,
+   "shape": [
+    8,
+    8
+   ],
+   "type": "sf16"
+  },
+  {
+   "args": [],
+   "attrs": {
+    "kind": "bool",
+    "value": true
+   },
+   "id": 26,
+   "loc": {
+    "col": 5,
+    "file": "export_sfir_examples.py",
+    "line": 70
+   },
+   "op": "const",
+   "pred": null,
+   "shape": [],
+   "type": "bool"
+  },
+  {
+   "args": [
+    2,
+    24,
+    25,
+    26
+   ],
+   "attrs": {},
+   "id": null,
+   "loc": {
+    "col": 5,
+    "file": "export_sfir_examples.py",
+    "line": 70
+   },
+   "op": "store",
+   "pred": null,
+   "shape": null,
+   "type": null
+  }
+ ],
+ "params": [
+  {
+   "id": 0,
+   "kind": "ptr",
+   "name": "a_ptr",
+   "type": "ptr<sf16>"
+  },
+  {
+   "id": 1,
+   "kind": "ptr",
+   "name": "b_ptr",
+   "type": "ptr<sf16>"
+  },
+  {
+   "id": 2,
+   "kind": "ptr",
+   "name": "c_ptr",
+   "type": "ptr<sf16>"
+  }
+ ],
+ "shared": [],
+ "spec_version": "1.11.0",
+ "style": "block"
+}
