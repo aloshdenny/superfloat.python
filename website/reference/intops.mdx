@@ -44,4 +44,4 @@ The float path (`softmax_rows`) gives the same codes: every S_i and D_i is a flo
 
 ## In PyTorch
 
-`sft.int_softmax(scores, dim=-1)`, `sft.int_gelu(x)`, `sft.int_silu(x)` run tensors through these definitions (no gradient). `sft.convert(model, ..., nonlinear="integer")` puts them in the model: attention's softmax (wide mode), tanh-GELU and SiLU modules. See the [PyTorch guide](/guides/pytorch).
+`sft.int_softmax(scores, dim=-1)`, `sft.int_gelu(x)`, `sft.int_silu(x)` run tensors through these definitions (no gradient). Each is a custom op (`sf::int_softmax`, `sf::int_xsig`), so `torch.compile` keeps it whole and runs it on the host. `sft.convert(model, ..., nonlinear="integer")` puts them in the model: attention's softmax (wide mode), tanh-GELU and SiLU modules. See the [PyTorch guide](/guides/pytorch).

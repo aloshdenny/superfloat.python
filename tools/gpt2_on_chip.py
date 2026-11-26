@@ -1,7 +1,8 @@
 """Real GPT-2 on the chip model: every wide matmul through Alosh's gemm / gemv programs on superfloat.sim.
 
     HF_HOME=<cache with openai-community/gpt2 and wikitext> SUPERFLOAT_GPU=<superfloat.gpu checkout> \\
-    PYTHONPATH=<superfloat.sim>/python python tools/gpt2_on_chip.py --tokens 32 [--windows 1] [--no-check]
+    PYTHONPATH=<superfloat.sim>/python python tools/gpt2_on_chip.py --tokens 32 [--windows 1] [--no-check] \\
+        [--nonlinear integer]
 
 Converts GPT-2 with sft.convert(dtype="sf16", accumulate="wide") and runs the
 first windows of WikiText-2 test twice: the eager host emulation, and
@@ -44,6 +45,8 @@ def main(argv=None) -> int:
     ap.add_argument("--tokens", type=int, default=32, help="tokens per window")
     ap.add_argument("--windows", type=int, default=1)
     ap.add_argument("--dtype", default="sf16")
+    ap.add_argument("--nonlinear", choices=["float", "integer"], default="float",
+                    help="softmax / GELU on sf's integer definitions (still on the host)")
     ap.add_argument("--no-check", action="store_true", help="do not also check each chip call on the host")
     ap.add_argument("--out", help="write the result as JSON here")
     a = ap.parse_args(argv)
@@ -51,7 +54,8 @@ def main(argv=None) -> int:
         ap.error("--tokens must be at least 2 and --windows at least 1 (a window predicts tokens - 1)")
 
     from transformers import AutoModelForCausalLM
-    model = sft.convert(AutoModelForCausalLM.from_pretrained(MODEL).eval(), dtype=a.dtype, accumulate="wide")
+    model = sft.convert(AutoModelForCausalLM.from_pretrained(MODEL).eval(), dtype=a.dtype, accumulate="wide",
+                        nonlinear=a.nonlinear)
     ids = wikitext_ids()
     if a.windows * a.tokens > ids.shape[1]:
         sys.exit(f"WikiText-2 test has {ids.shape[1]:,} tokens: {a.windows} windows of {a.tokens} do not fit")
@@ -66,7 +70,7 @@ def main(argv=None) -> int:
         launches[0] += len(mm.report.launches)
         return out
 
-    res = dict(model=MODEL, dtype=a.dtype, tokens_per_window=a.tokens, windows=[])
+    res = dict(model=MODEL, dtype=a.dtype, nonlinear=a.nonlinear, tokens_per_window=a.tokens, windows=[])
     nll = {"host": 0.0, "chip": 0.0}
     n = 0
     old = HardwareAtreides._library
