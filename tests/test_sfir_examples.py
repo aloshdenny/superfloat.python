@@ -6,6 +6,7 @@ If this fails after a change to the DSL or the IR, regenerate the pack with
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -21,10 +22,17 @@ from sf.kernels._ir import KernelIR  # noqa: E402
 PACK = E.build()
 
 
+def _cols_dropped(text: str) -> str:
+    """Python 3.10 has no column positions, so there a loc's "col" is null where 3.11+ (which wrote the pack)
+    has a number: compare without the columns on 3.10."""
+    return text if sys.version_info >= (3, 11) else re.sub(r'"col": (\d+|null)', '"col": -', text)
+
+
 @pytest.mark.parametrize("name", sorted(PACK))
 def test_pack_files_are_current(name):
     for fname, text in PACK[name].items():
-        assert (E.OUT_DIR / name / fname).read_text() == text, f"{name}/{fname} is stale"
+        saved = (E.OUT_DIR / name / fname).read_text()
+        assert _cols_dropped(saved) == _cols_dropped(text), f"{name}/{fname} is stale"
 
 
 @pytest.mark.parametrize("name", sorted(PACK))

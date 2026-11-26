@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 
 import numpy as np
 import pytest
@@ -110,7 +111,10 @@ def test_loc_has_the_column():
     for name, marker, code in [("load", "L-loadx", "sf.load("), ("store", "L-store", "sf.store(")]:
         op = next(o for o in ir.ops if o.name == name)
         assert op.loc[1] == _line(marker)
-        assert op.loc[2] == text[op.loc[1] - 1].index(code) + 1      # 1-based, where the call starts
+        if sys.version_info < (3, 11):                              # no column positions before 3.11
+            assert op.loc[2] is None
+        else:
+            assert op.loc[2] == text[op.loc[1] - 1].index(code) + 1  # 1-based, where the call starts
 
 
 def test_dump_is_unchanged_by_locations():
