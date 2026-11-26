@@ -17,7 +17,8 @@ description: "The chip's definitions of the nonlinear ops, on SF16 codes, bit fo
 | `softmax_row_v0(s, k)` | Alosh's softmax, unchanged: P at scale 1. |
 | `softmax_row(s, k, visible=None)` | sf's softmax: returns `(t, ep)`, P = t · 2^(ep-15). Masked keys (`visible` False) give 0 and are not summed. |
 | `softmax(s, k, visible=None)` | `softmax_row` for a batch of rows (one k per row). |
-| `norm_row(x, gamma, beta, ...)` | LayerNorm / RMSNorm, for reference only: norms stay on the host in float. |
+| `norm_row(x, gamma, beta, ...)` | LayerNorm / RMSNorm of one row: exact MX sums, the rest in sf16 arithmetic, `rsqrt_norm` for 1/sqrt. |
+| `norm_rows(x, gamma, beta, eps, rms)` | Float rows through `norm_row`: one exponent per row for the input (one step higher where x - mean would saturate) and the output (from its largest value before and after the beta add). |
 | `softmax_rows(x)`, `xsig_rows(x, cubic)` | Float rows through the integer definitions, for models on the host. Scores: the row max subtracted first, then k = 4, or 5 if a key is more than 16 below the max (`softmax_rows_raw`: Alosh's raw-score convention, k = 4 redone at 5, 6). GELU / SiLU: one exponent per row from max \|x\|, 0..6. |
 
 ## sf's softmax: three changes to v0 (signed off by Alosh, 2026-11-18)
@@ -44,4 +45,4 @@ The float path (`softmax_rows`) gives the same codes: every S_i and D_i is a flo
 
 ## In PyTorch
 
-`sft.int_softmax(scores, dim=-1)`, `sft.int_gelu(x)`, `sft.int_silu(x)` run tensors through these definitions (no gradient). Each is a custom op (`sf::int_softmax`, `sf::int_xsig`), so `torch.compile` keeps it whole and runs it on the host. `sft.convert(model, ..., nonlinear="integer")` puts them in the model: attention's softmax (wide mode), tanh-GELU and SiLU modules. See the [PyTorch guide](/guides/pytorch).
+`sft.int_softmax(scores, dim=-1)`, `sft.int_gelu(x)`, `sft.int_silu(x)` and `sft.int_norm(x, weight, bias, eps, rms)` run tensors through these definitions (no gradient). Each is a custom op (`sf::int_softmax`, `sf::int_xsig`, `sf::int_norm`), so `torch.compile` keeps it whole and runs it on the host. `sft.convert(model, ..., nonlinear="integer")` puts softmax (wide mode), tanh-GELU and SiLU in the model; `norm="integer"` adds LayerNorm and RMSNorm (Gemma's 1 + weight form stays float). See the [PyTorch guide](/guides/pytorch).

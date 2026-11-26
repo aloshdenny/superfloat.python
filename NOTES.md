@@ -126,6 +126,20 @@ them. Each one is a single place to change if the team decides differently.
   above (window included): 125 chip calls (77 first launches, 48 redos), 3,418 launches, 2,717,320,044
   cycles, logits bit-identical to the host (8 x 50,257 values, 0 differ), loss 6.442632.  The matmuls run on
   superfloat.sim; softmax and GELU run on the host, on the integer definitions.
+* Integer LayerNorm and RMSNorm (2026-11-25): `convert(norm="integer")` swaps `nn.LayerNorm` (one axis),
+  `nn.RMSNorm` and Hugging Face `*RMSNorm` for `IntNorm`, which runs `sf.intops.norm_rows` (Alosh's `norm_row`:
+  exact MX sums, sf16 multiplies, `rsqrt_norm`) on the host, one custom op `sf::int_norm`.  Gemma's 1 + weight
+  RMSNorm stays float.  Exponents per row: input from max |x| (one step up for a LayerNorm row where x - mean
+  would saturate), output from the largest value before and after the beta add.  Measured on the host
+  (an eval script outside the repo; `convert(dtype="sf16", accumulate="wide", nonlinear="integer")`, WikiText-2
+  test, 8 windows of 256 tokens, 2,040 predicted tokens): GPT-2 perplexity 49.547 with float norms, 49.849
+  with `norm="integer"`; Qwen2.5-0.5B 22.42025 and 22.42009.  The GPT-2 float-norm run is from an earlier
+  version of the eval script, so that pair is close but not a strict same-code comparison.
+  Known defect: with an outlier channel (GPT-2's residual stream has some) most z codes are small and the
+  two truncating Q15 multiplies in z * y * gamma shrink the row (GPT-2's `ln_f` scale 0.988).  Rounding those
+  two multiplies gives 1.00006 and GPT-2 49.612 (an experiment outside the repo, not adopted: it changes
+  Alosh's definition).  `tests/test_int_norm.py` holds this as a strict xfail.
+  Not measured: the cost of an sf16 residual stream on Qwen (its baseline run did not finish).
 * Still not done: no kernel has been compiled by the real superfloat-compile.  Kartik's axpy is hand-written
   and the tests use a stand-in compiler; wide kernels have no compiled program.
 
@@ -204,8 +218,8 @@ them. Each one is a single place to change if the team decides differently.
 * `convert(nonlinear="integer")`: softmax in `sft.attention` (wide mode) and
   in eager attention scopes; tanh-GELU and SiLU modules swapped for
   `IntGELU` / `IntSiLU` (MoE `act_fn` too).  erf GELU has no integer form:
-  stays float, reported.  Norms stay float (Alosh: up to 4% off with squares
-  in sf16).  Numpy round trip: no gradient, graph break under compile.
+  stays float, reported.  Norms stay float unless `norm="integer"` (below).
+  NumPy round trip: no gradient; under compile each is one custom op.
 * P·V (`out_rule="max_b"`): each output's exponent is the exact bound of the
   quantized product, (sum of the row's quantized P) x max |quantized V| over
   the keys the row uses (P != 0), times 32768/32767 for POP's rounding.  No

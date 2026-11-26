@@ -252,6 +252,11 @@ def _int_act(m: nn.Module):
     return integer_activation(m)
 
 
+def _int_norm(m: nn.Module):
+    from ._intops import integer_norm
+    return integer_norm(m)
+
+
 def _linear_like(m: nn.Module) -> bool:
     return isinstance(m, (nn.Linear, SFLinear, SFHFConv1D)) or is_hf_conv1d(m)
 
@@ -295,7 +300,7 @@ def find_lm_heads(model: nn.Module) -> dict[int, str]:
 def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom: str = "bound",
             inplace: bool = False, *, accumulate: str = "chain", shift: int | None = None,
             calibration: str = "heuristic", keep_sf16="auto", attention="auto",
-            nonlinear: str = "float", widths: dict | None = None) -> nn.Module:
+            nonlinear: str = "float", widths: dict | None = None, norm: str = "float") -> nn.Module:
     """Swap ``nn.Linear``, ``nn.Conv2d`` and Hugging Face's ``Conv1D`` (GPT-2's
     layers) for SF versions with a scale policy.
 
@@ -335,7 +340,13 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
     (``sf.intops``, Alosh's chip sequences): attention's softmax (wide mode
     only, where attention runs on sf), GPT-2's tanh GELU and SiLU modules
     (MoE experts' ``act_fn`` included).  GELU with erf has no integer form
-    and stays float.  Norms always stay on the host.  The report lists each.
+    and stays float.  The report lists each.
+
+    ``norm``: ``"float"`` (default) keeps LayerNorm and RMSNorm in float on
+    the host.  ``"integer"`` runs them on sf's integer definition
+    (``sf.intops.norm_rows``, still on the host): ``nn.LayerNorm`` over one
+    axis, ``nn.RMSNorm`` and Hugging Face's ``*RMSNorm`` (weight times the
+    normalised row; Gemma's 1 + weight form stays float).
 
     Other modules (normalisation, pooling, ...) stay as
     they are and run in float on the host; ``sft.conversion_report(model)``
@@ -347,6 +358,8 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
         raise ValueError(f"attention must be \"auto\" or False, got {attention!r}")
     if nonlinear not in ("float", "integer"):
         raise ValueError(f"nonlinear must be \"float\" or \"integer\", got {nonlinear!r}")
+    if norm not in ("float", "integer"):
+        raise ValueError(f"norm must be \"float\" or \"integer\", got {norm!r}")
     if not inplace:
         model = copy.deepcopy(model)
     report = ConversionReport()
@@ -444,6 +457,12 @@ def convert(model: nn.Module, dtype="sf16", scale: str = "per_tensor", headroom:
             else:
                 rep = SFMultiheadAttention(child, full, cfg_for(child, full))
                 report.converted.append((full, "MultiheadAttention"))
+        elif norm == "integer" and _int_norm(child)[1] is not None:
+            rep, what = _int_norm(child)
+            if rep is None:
+                report.skipped.append((full, type(child).__name__, what))
+            else:
+                report.nonlinear.append((full, what))
         elif nonlinear == "integer" and _int_act(child)[1] is not None:
             rep, what = _int_act(child)
             if rep is None:
